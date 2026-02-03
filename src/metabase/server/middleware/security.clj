@@ -268,7 +268,7 @@
   (update response :headers #(merge %2 %1) (security-headers
                                             :origin         (get (:headers request) "origin")
                                             :nonce          (:nonce request)
-                                            :allow-iframes? ((some-fn request/public? request/embed?) request)
+                                            :allow-iframes? true
                                             :allow-cache?   (request/cacheable? request))))
 
 (defn add-security-headers

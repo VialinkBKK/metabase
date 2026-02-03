@@ -18,13 +18,14 @@ interface ManuelLoginProps {
 
 export const ManuelLogin = ({ location }: ManuelLoginProps): JSX.Element => {
   const sessionUid = location?.query?.session;
+  const redirectUrl = location?.query?.redirect;
 
   useEffect(() => {
     if (sessionUid) {
       Cookies.set(METABASE_SESSION_COOKIE, sessionUid);
-      window.location.href = "/";
+      window.location.href = redirectUrl || "/";
     }
-  }, [sessionUid]);
+  }, [redirectUrl, sessionUid]);
 
   return (
     <AuthLayout>
