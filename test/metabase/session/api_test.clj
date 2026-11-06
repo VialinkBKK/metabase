@@ -1,7 +1,9 @@
 (ns metabase.session.api-test
   "Tests for /api/session"
   (:require
+   [buddy.sign.jwt :as jwt]
    [clj-http.client :as http]
+   [clojure.string :as str]
    [clojure.test :refer :all]
    [java-time.api :as t]
    [medley.core :as m]
@@ -12,7 +14,9 @@
    [metabase.request.core :as request]
    [metabase.request.settings :as request.settings]
    [metabase.session.api :as api.session]
+   [metabase.session.challenge :as session.challenge]
    [metabase.session.models.session :as session]
+   [metabase.session.settings :as session.settings]
    [metabase.settings.core :as setting :refer [defsetting]]
    [metabase.settings.models.setting]
    [metabase.sso.ldap-test-util :as ldap.test]
@@ -1199,3 +1203,72 @@
     (testing "Should be a valid password"
       (is (= {:valid true}
              (mt/client :post 200 "session/password-check" {:password "something123"}))))))
+
+(defn- fresh-session-key
+  "Log `credentials` in over the API, the way a backend gets the session it hands off, and return the session key."
+  [credentials]
+  (:id (mt/client :post 200 "session" credentials)))
+
+(deftest session-handoff-test
+  (reset-throttlers)
+  (let [source-key (fresh-session-key (mt/user->credentials :rasta))
+        code       (:code (mt/client source-key :post 200 "session/handoff"))
+        response   (mt/client-full-response :post 200 "session/handoff/exchange" {:code code})
+        cookie     (some #(when (str/starts-with? % (str session-cookie "=")) %)
+                         (flatten [(get-in response [:headers "Set-Cookie"])]))]
+    (testing "the code does not contain the session key"
+      (is (not (str/includes? (str (jwt/unsign code (session.settings/mfa-challenge-signing-key) {:alg :hs256}))
+                              source-key))))
+    (testing "the session reaches the browser in an HttpOnly cookie and nowhere else"
+      (is (re-find #"(?i);\s*HttpOnly" (str cookie)))
+      (is (= {:success true} (:body response))))
+    (testing "the new session works and belongs to the same user"
+      (let [new-key (second (re-find #"^[^=]+=([^;]+)" (str cookie)))]
+        (is (not= source-key new-key))
+        (is (= (mt/user->id :rasta)
+               (:id (mt/client new-key :get 200 "user/current"))))))
+    (testing "the exchange ended the source session"
+      (mt/client source-key :get 401 "user/current"))
+    (testing "a code cannot be replayed"
+      (mt/client :post 401 "session/handoff/exchange" {:code code}))))
+
+(deftest session-handoff-requires-session-test
+  (testing "issuing a code needs a live session"
+    (mt/client :post 401 "session/handoff")
+    (mt/client (str (random-uuid)) :post 401 "session/handoff")))
+
+(deftest session-handoff-rejects-bad-codes-test
+  (reset-throttlers)
+  (let [source-key (fresh-session-key (mt/user->credentials :rasta))
+        code       (:code (mt/client source-key :post 200 "session/handoff"))
+        claims     (jwt/unsign code (session.settings/mfa-challenge-signing-key) {:alg :hs256})]
+    (testing "garbage"
+      (mt/client :post 401 "session/handoff/exchange" {:code "not-a-code"}))
+    (testing "expired"
+      (mt/client :post 401 "session/handoff/exchange"
+                 {:code (jwt/sign (assoc claims :exp (dec (quot (System/currentTimeMillis) 1000)))
+                                  (session.settings/mfa-challenge-signing-key)
+                                  {:alg :hs256})}))
+    (testing "signed with the wrong key"
+      (mt/client :post 401 "session/handoff/exchange"
+                 {:code (jwt/sign claims "not-the-signing-key" {:alg :hs256})}))
+    (testing "a token issued for another purpose"
+      (mt/client :post 401 "session/handoff/exchange"
+                 {:code (session.challenge/issue-challenge-token (mt/user->id :rasta) "password")}))
+    (testing "none of these spent the code's source session"
+      (is (= (mt/user->id :rasta)
+             (:id (mt/client source-key :get 200 "user/current")))))
+    (testing "a logout before the exchange kills the code"
+      (mt/client source-key :delete 204 "session")
+      (mt/client :post 401 "session/handoff/exchange" {:code code}))))
+
+(deftest session-handoff-deactivated-user-test
+  (mt/with-temp [:model/User    user {}
+                 :model/Session source {:id          (session/generate-session-id)
+                                        :user_id     (:id user)
+                                        :session_key (session/generate-session-key)}]
+    (let [code (session.challenge/issue-handoff-code (:id user) "password" (:id source) nil)]
+      (t2/update! :model/User :id (:id user) {:is_active false})
+      (testing "a deactivated user cannot exchange a code they already have"
+        (mt/client :post 401 "session/handoff/exchange" {:code code})
+        (is (= 1 (t2/count :model/Session :user_id (:id user))))))))

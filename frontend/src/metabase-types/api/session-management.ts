@@ -37,6 +37,7 @@ export const SESSION_END_REASONS = [
   "support-grant-revoked",
   "expired",
   "timed-out",
+  "handoff",
 ] as const;
 export type SessionEndReason = (typeof SESSION_END_REASONS)[number];
 

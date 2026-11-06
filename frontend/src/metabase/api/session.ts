@@ -107,6 +107,13 @@ export const sessionApi = Api.injectEndpoints({
         body: { email },
       }),
     }),
+    exchangeSessionHandoff: builder.mutation<void, { code: string }>({
+      query: (body) => ({
+        method: "POST",
+        url: "/api/session/handoff/exchange",
+        body,
+      }),
+    }),
     checkPassword: builder.mutation<void, { password: string }>({
       query: (body) => ({
         method: "POST",
@@ -121,6 +128,7 @@ export const {
   useCreateSessionMutation,
   useCreateSessionWithGoogleAuthMutation,
   useDeleteSessionMutation,
+  useExchangeSessionHandoffMutation,
   useLogoutSsoMutation,
   useResetPasswordMutation,
   useGetPasswordResetTokenStatusQuery,

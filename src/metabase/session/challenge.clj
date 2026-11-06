@@ -17,16 +17,23 @@
   `enrollment/consume-jti`'s conservative 2-hour window.)"
   (* 5 60))
 
+(def ^:private handoff-ttl-seconds
+  "How long a session handoff code stays valid. It travels in a URL, so only long enough to open the page."
+  60)
+
 (defn- create-token
-  "Helper for creating signed, single-use JWTs with different `purpose` and TTLs."
-  [user-id provider purpose ttl-seconds]
-  (jwt/sign {:user-id  user-id
-             :provider (name provider)
-             :purpose  purpose
-             :jti      (str (random-uuid))
-             :exp      (+ (quot (System/currentTimeMillis) 1000) ttl-seconds)}
-            (session.settings/mfa-challenge-signing-key)
-            {:alg :hs256}))
+  "Helper for creating signed, single-use JWTs with different `purpose` and TTLs. `extra-claims` are added to the token."
+  ([user-id provider purpose ttl-seconds]
+   (create-token user-id provider purpose ttl-seconds nil))
+  ([user-id provider purpose ttl-seconds extra-claims]
+   (jwt/sign (merge extra-claims
+                    {:user-id  user-id
+                     :provider (name provider)
+                     :purpose  purpose
+                     :jti      (str (random-uuid))
+                     :exp      (+ (quot (System/currentTimeMillis) 1000) ttl-seconds)})
+             (session.settings/mfa-challenge-signing-key)
+             {:alg :hs256})))
 
 (defn issue-challenge-token
   "Create a signed token authorizing a second-factor attempt for `user-id`, remembering the
@@ -41,6 +48,14 @@
   not yet have MFA enrolled."
   [user-id provider]
   (create-token user-id provider "mfa-enrollment" challenge-ttl-seconds))
+
+(defn issue-handoff-code
+  "Create a signed code that a browser can exchange for a session of its own, ending the session `session-id`.
+  Carries no credential: `session-id` is a row id, not the session key."
+  [user-id provider session-id mfa-auth-identity-id]
+  (create-token user-id provider "session-handoff" handoff-ttl-seconds
+                {:session-id           session-id
+                 :mfa-auth-identity-id mfa-auth-identity-id}))
 
 (defn- verify-token
   "Helper for verifying a token's signature, expiry and `purpose`. Returns nil if the token is invalid, expired or
@@ -74,3 +89,9 @@
   second-factor verification, so a user can retry codes on the same token."
   [token]
   (verify-token token "mfa-enrollment"))
+
+(defn verify-handoff-code
+  "Verify a `session-handoff` code's signature and expiry. Returns its claims map, or nil if
+  invalid/expired/tampered. Does NOT make the code single-use: the caller gets that by ending the session it names."
+  [code]
+  (verify-token code "session-handoff"))

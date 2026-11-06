@@ -46,6 +46,14 @@
                  :ended_by_user_id (if (= ended-by :self) :user_id ended-by)
                  :key_hashed       nil})))
 
+(mu/defn handoff-source :- [:maybe [:map
+                                     [:id                   :string]
+                                     [:auth_identity_id     [:maybe ms/PositiveInt]]
+                                     [:mfa_auth_identity_id [:maybe ms/PositiveInt]]]]
+  "The columns of the Session with `key-hashed` that a session handoff carries over, or nil."
+  [key-hashed :- :string]
+  (t2/select-one [:model/Session :id :auth_identity_id :mfa_auth_identity_id] :key_hashed key-hashed))
+
 (mu/defn end-sessions-by-ids! :- ms/IntGreaterThanOrEqualToZero
   "[[end-sessions!]] for the Sessions with `ids`, in batches of `batch-size` ids ([[default-end-batch-size]] by
   default), returning the total number ended. An empty `ids` ends nothing."

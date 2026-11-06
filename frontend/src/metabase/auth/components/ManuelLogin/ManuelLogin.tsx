@@ -1,34 +1,41 @@
-import Cookies from "js-cookie";
-import { type JSX, useEffect } from "react";
+import { type JSX, useEffect, useRef } from "react";
+import { t } from "ttag";
 
+import { useExchangeSessionHandoffMutation } from "metabase/api";
 import { useSearchParams } from "metabase/router";
 import { Box, Loader } from "metabase/ui";
+import { replaceLocation } from "metabase/utils/dom";
 
 import { AuthLayout } from "../AuthLayout";
 
-const METABASE_SESSION_COOKIE = "metabase.SESSION";
-
 export const ManuelLogin = (): JSX.Element => {
   const [searchParams] = useSearchParams();
-  const sessionUid = searchParams.get("session");
+  const code = searchParams.get("code");
+  const [exchangeCode, { isError }] = useExchangeSessionHandoffMutation();
+  // A code works only once, so a re-run of the effect must not spend it again
+  const exchangedCode = useRef<string | null>(null);
 
   useEffect(() => {
-    if (sessionUid) {
-      Cookies.set(METABASE_SESSION_COOKIE, sessionUid);
-      window.location.href = "/";
+    if (code && exchangedCode.current !== code) {
+      exchangedCode.current = code;
+      exchangeCode({ code }).then((result) => {
+        if (!result.error) {
+          // `replace` keeps the URL with the code out of the browser history
+          replaceLocation("/");
+        }
+      });
     }
-  }, [sessionUid]);
+  }, [code, exchangeCode]);
 
   return (
     <AuthLayout>
-      {sessionUid ? (
+      {code && !isError ? (
         <div style={{ display: "flex", justifyContent: "center" }}>
           <Loader />
         </div>
       ) : (
-        // eslint-disable-next-line i18next/no-literal-string
         <Box fz="1rem" ta="center">
-          Please continue at Manuel.Ai
+          {t`Please continue at Manuel.Ai`}
         </Box>
       )}
     </AuthLayout>

@@ -50,4 +50,5 @@ export const getEndReasonLabel = (reason: SessionEndReason): string =>
     .with("support-grant-revoked", () => t`Support access revoked`)
     .with("expired", () => t`Expired`)
     .with("timed-out", () => t`Timed out`)
+    .with("handoff", () => t`Handed off to browser`)
     .exhaustive();
