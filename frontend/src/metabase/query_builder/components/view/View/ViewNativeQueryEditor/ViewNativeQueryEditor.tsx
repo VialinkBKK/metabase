@@ -1,13 +1,12 @@
-import type { ResizableBoxProps } from "react-resizable";
-
-import { useSelector } from "metabase/lib/redux";
-import NativeQueryEditor from "metabase/query_builder/components/NativeQueryEditor";
-import type {
-  SelectionRange,
-  SidebarFeatures,
-} from "metabase/query_builder/components/NativeQueryEditor/types";
-import type { QueryModalType } from "metabase/query_builder/constants";
-import { getHighlightedNativeQueryLineNumbers } from "metabase/query_builder/selectors";
+import { useInlineSQLPrompt } from "metabase/metabot/components/MetabotInlineSQLPrompt";
+import { MetabotPromptButton } from "metabase/metabot/components/MetabotPromptButton";
+import { useUserMetabotPermissions } from "metabase/metabot/hooks";
+import { getMetabotVisible } from "metabase/metabot/state";
+import { NativeQueryParametersList } from "metabase/parameters/components/NativeQueryParametersList";
+import { NativeQueryEditor } from "metabase/querying/components/NativeQueryEditor";
+import type { SelectionRange } from "metabase/querying/editor/types";
+import { useSelector } from "metabase/redux";
+import type { QueryModalType } from "metabase/redux/store";
 import { Box } from "metabase/ui";
 import * as Lib from "metabase-lib";
 import type Question from "metabase-lib/v1/Question";
@@ -20,6 +19,8 @@ import type {
   ParameterId,
 } from "metabase-types/api";
 
+import { getHighlightedNativeQueryLineNumbers } from "../../../../store/selectors";
+
 import NativeQueryEditorS from "./ViewNativeQueryEditor.module.css";
 
 interface ViewNativeQueryEditorProps {
@@ -31,7 +32,6 @@ interface ViewNativeQueryEditorProps {
 
   nativeEditorSelectedText?: string;
   modalSnippet?: NativeQuerySnippet;
-  viewHeight: number;
   highlightedLineNumbers?: number[];
 
   isInitiallyOpen?: boolean;
@@ -46,12 +46,7 @@ interface ViewNativeQueryEditorProps {
 
   readOnly?: boolean;
   canChangeDatabase?: boolean;
-  hasTopBar?: boolean;
-  hasParametersList?: boolean;
-  hasEditingSidebar?: boolean;
-  sidebarFeatures?: SidebarFeatures;
   resizable?: boolean;
-  resizableBoxProps?: Partial<Omit<ResizableBoxProps, "axis">>;
 
   editorContext?: "question";
 
@@ -76,15 +71,22 @@ interface ViewNativeQueryEditorProps {
   cancelQuery?: () => void;
   closeSnippetModal: () => void;
   onSetDatabaseId?: (id: DatabaseId) => void;
+  availableHeight?: number;
 }
 
 export const ViewNativeQueryEditor = (props: ViewNativeQueryEditorProps) => {
-  const { question, height, isNativeEditorOpen, card, onSetDatabaseId } = props;
+  const { question, isNativeEditorOpen, onSetDatabaseId } = props;
 
   const legacyNativeQuery = question.legacyNativeQuery();
   const highlightedLineNumbers = useSelector(
     getHighlightedNativeQueryLineNumbers,
   );
+
+  const inlineSQLPrompt = useInlineSQLPrompt(question, "qb");
+  const isMetabotSidebarOpen = useSelector((state) =>
+    getMetabotVisible(state, "omnibot"),
+  );
+  const { hasSqlGenerationAccess } = useUserMetabotPermissions();
 
   // Normally, when users open native models,
   // they open an ad-hoc GUI question using the model as a data source
@@ -94,7 +96,7 @@ export const ViewNativeQueryEditor = (props: ViewNativeQueryEditorProps) => {
   // This check makes it hide the editor in this particular case
   // More details: https://github.com/metabase/metabase/pull/20161
   const { isEditable } = Lib.queryDisplayInfo(question.query());
-  if (question.type() === "model" && !isEditable) {
+  if ((question.type() === "model" && !isEditable) || !legacyNativeQuery) {
     return null;
   }
 
@@ -103,12 +105,32 @@ export const ViewNativeQueryEditor = (props: ViewNativeQueryEditorProps) => {
       <NativeQueryEditor
         {...props}
         query={legacyNativeQuery}
-        viewHeight={height}
         highlightedLineNumbers={highlightedLineNumbers}
         isInitiallyOpen={isNativeEditorOpen}
-        datasetQuery={card && card.dataset_query}
+        canAutoOpenDataReference={!isMetabotSidebarOpen}
         onSetDatabaseId={onSetDatabaseId}
-      />
+        extensions={inlineSQLPrompt?.extensions}
+        proposedQuestion={inlineSQLPrompt?.proposedQuestion}
+        onAcceptProposed={inlineSQLPrompt?.handleAcceptProposed}
+        onRejectProposed={inlineSQLPrompt?.handleRejectProposed}
+        hasSqlGenerationAccess={hasSqlGenerationAccess}
+      >
+        <NativeQueryEditor.TopBar leftContent={<NativeQueryParametersList />}>
+          <NativeQueryEditor.Sidebar
+            promptButton={
+              inlineSQLPrompt && (
+                <MetabotPromptButton
+                  isPromptInputOpen={inlineSQLPrompt.isPromptOpen}
+                  onClick={inlineSQLPrompt.togglePrompt}
+                />
+              )
+            }
+          />
+          <NativeQueryEditor.VisibilityToggler />
+        </NativeQueryEditor.TopBar>
+        <NativeQueryEditor.RunButton />
+      </NativeQueryEditor>
+      {inlineSQLPrompt?.portalElement}
     </Box>
   );
 };

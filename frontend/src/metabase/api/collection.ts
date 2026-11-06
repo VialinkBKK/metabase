@@ -1,15 +1,20 @@
 import type {
   Collection,
+  CollectionItemModel,
+  CollectionItemsMetadata,
+  CollectionPermissionsGraph,
   CreateCollectionRequest,
   DeleteCollectionRequest,
   GetCollectionDashboardQuestionCandidatesRequest,
   GetCollectionDashboardQuestionCandidatesResult,
+  GetCollectionItemsMetadataRequest,
   ListCollectionItemsRequest,
   ListCollectionItemsResponse,
   ListCollectionsRequest,
   ListCollectionsTreeRequest,
   MoveCollectionDashboardCandidatesRequest,
   MoveCollectionDashboardCandidatesResult,
+  UpdateCollectionPermissionsGraphRequest,
   UpdateCollectionRequest,
   getCollectionRequest,
 } from "metabase-types/api";
@@ -23,6 +28,13 @@ import {
   provideCollectionListTags,
   provideCollectionTags,
 } from "./tags";
+
+const getCollectionItemTagModels = (
+  models: ListCollectionItemsRequest["models"],
+): CollectionItemModel[] | undefined =>
+  models?.filter(
+    (model): model is CollectionItemModel => model !== "no_models",
+  );
 
 export const collectionApi = Api.injectEndpoints({
   endpoints: (builder) => ({
@@ -50,8 +62,10 @@ export const collectionApi = Api.injectEndpoints({
         url: "/api/collection/tree",
         params,
       }),
-      providesTags: (collections = []) =>
-        provideCollectionListTags(collections),
+      providesTags: (collections = []) => [
+        ...provideCollectionListTags(collections),
+        "collection-tree",
+      ],
     }),
     listCollectionItems: builder.query<
       ListCollectionItemsResponse,
@@ -62,19 +76,60 @@ export const collectionApi = Api.injectEndpoints({
         url: `/api/collection/${id}/items`,
         params,
       }),
-      providesTags: (response, error, { models }) =>
-        provideCollectionItemListTags(response?.data ?? [], models),
+      providesTags: (response, error, { models, id }) => [
+        ...provideCollectionItemListTags(
+          response?.data ?? [],
+          getCollectionItemTagModels(models),
+        ),
+        { type: "collection", id: `${id}-items` },
+      ],
+    }),
+    getCollectionItemsMetadata: builder.query<
+      CollectionItemsMetadata,
+      GetCollectionItemsMetadataRequest
+    >({
+      query: ({ id, ...params }) => ({
+        method: "GET",
+        url: `/api/collection/${id}/items/metadata`,
+        params,
+      }),
+      // The metadata describes items of every model, so any item change may invalidate it.
+      providesTags: (_response, _error, { id }) => [
+        ...provideCollectionItemListTags([]),
+        { type: "collection", id: `${id}-items` },
+      ],
     }),
     getCollection: builder.query<Collection, getCollectionRequest>({
-      query: ({ id, ...params }) => {
+      query: ({ id, ignore_error, ...params }) => {
         return {
           method: "GET",
           url: `/api/collection/${id}`,
           params,
+          noEvent: ignore_error,
         };
       },
       providesTags: (collection) =>
         collection ? provideCollectionTags(collection) : [],
+    }),
+    getCollectionPermissionsGraph: builder.query<
+      CollectionPermissionsGraph,
+      { namespace?: string } | void
+    >({
+      query: (params) => ({
+        method: "GET",
+        url: "/api/collection/graph",
+        params: params ?? undefined,
+      }),
+    }),
+    updateCollectionPermissionsGraph: builder.mutation<
+      CollectionPermissionsGraph,
+      UpdateCollectionPermissionsGraphRequest
+    >({
+      query: (body) => ({
+        method: "PUT",
+        url: "/api/collection/graph?skip-graph=true",
+        body,
+      }),
     }),
     createCollection: builder.mutation<Collection, CreateCollectionRequest>({
       query: (body) => ({
@@ -82,13 +137,23 @@ export const collectionApi = Api.injectEndpoints({
         url: "/api/collection",
         body,
       }),
-      invalidatesTags: (collection, error) =>
-        collection
-          ? invalidateTags(error, [
-              listTag("collection"),
-              idTag("collection", collection.parent_id ?? "root"),
-            ])
-          : [],
+      invalidatesTags: (collection, error, request) => {
+        if (!collection) {
+          return [];
+        }
+
+        const tags = [
+          listTag("collection"),
+          idTag("collection", collection.parent_id ?? "root"),
+        ];
+
+        // Creating a shared tenant collection affects the setup guide checklist
+        if (request.namespace === "shared-tenant-collection") {
+          tags.push(listTag("setup-guide-checklist"));
+        }
+
+        return invalidateTags(error, tags);
+      },
     }),
     updateCollection: builder.mutation<Collection, UpdateCollectionRequest>({
       query: ({ id, ...body }) => ({
@@ -97,11 +162,21 @@ export const collectionApi = Api.injectEndpoints({
         body,
       }),
       invalidatesTags: (_, error, payload) => {
-        return invalidateTags(error, [
+        const tags = [
           listTag("collection"),
           idTag("collection", payload.id),
           idTag("collection", payload.parent_id ?? "root"),
-        ]);
+          // archiving a collection resolves content-diagnostics findings in its subtree
+          listTag("content-diagnostics-finding"),
+        ];
+
+        // When archiving/restoring a collection, invalidate bookmarks
+        // since items within the collection may be bookmarked
+        if ("archived" in payload) {
+          tags.push(listTag("bookmark"));
+        }
+
+        return invalidateTags(error, tags);
       },
     }),
     deleteCollection: builder.mutation<void, DeleteCollectionRequest>({
@@ -155,7 +230,10 @@ export const {
   useListCollectionsQuery,
   useListCollectionsTreeQuery,
   useListCollectionItemsQuery,
+  useGetCollectionItemsMetadataQuery,
   useGetCollectionQuery,
+  useGetCollectionPermissionsGraphQuery,
+  useUpdateCollectionPermissionsGraphMutation,
   useCreateCollectionMutation,
   useUpdateCollectionMutation,
   useDeleteCollectionMutation,

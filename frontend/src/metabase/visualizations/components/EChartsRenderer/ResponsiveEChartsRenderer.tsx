@@ -1,28 +1,32 @@
-import { forwardRef, useEffect } from "react";
+import { forwardRef, useLayoutEffect } from "react";
 
-import ExplicitSize from "metabase/common/components/ExplicitSize";
-import { isNumber } from "metabase/lib/types";
-import type { EChartsRendererProps } from "metabase/visualizations/components/EChartsRenderer/EChartsRenderer";
-import { EChartsRenderer } from "metabase/visualizations/components/EChartsRenderer/EChartsRenderer";
-import { ResponsiveEChartsRendererStyled } from "metabase/visualizations/components/EChartsRenderer/ResponsiveEChartsRenderer.styled";
+import { ExplicitSize } from "metabase/common/components/ExplicitSize";
+import CS from "metabase/css/core/index.css";
+import { Box } from "metabase/ui";
+import { isNumber } from "metabase/utils/types";
+import {
+  EChartsRenderer,
+  type EChartsRendererProps,
+} from "metabase/visualizations/components/EChartsRenderer/EChartsRenderer";
 
-export interface ResponsiveEChartsRendererProps extends EChartsRendererProps {
+export interface ResponsiveEChartsRendererProps extends React.PropsWithChildren<EChartsRendererProps> {
   onResize?: (width: number, height: number) => void;
 }
 
-const _ResponsiveEChartsRenderer = forwardRef<
+const ResponsiveEChartsRendererInner = forwardRef<
   HTMLDivElement,
   ResponsiveEChartsRendererProps
->(function _ResponsiveEChartsRenderer(
+>(function ResponsiveEChartsRendererBase(
   {
     onResize,
     width,
     height,
+    children,
     ...echartsRenderedProps
   }: ResponsiveEChartsRendererProps,
   ref,
 ) {
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (isNumber(width) && isNumber(height)) {
       onResize?.(width, height);
     }
@@ -33,19 +37,39 @@ const _ResponsiveEChartsRenderer = forwardRef<
   }
 
   return (
-    <ResponsiveEChartsRendererStyled>
+    <Box pos="absolute" inset={0}>
       <EChartsRenderer
         ref={ref}
         {...echartsRenderedProps}
         width={width}
         height={height}
       />
-    </ResponsiveEChartsRendererStyled>
+      {children}
+    </Box>
   );
 });
 
-export const ResponsiveEChartsRendererExplicitSize =
-  ExplicitSize<ResponsiveEChartsRendererProps>({
-    wrapped: true,
-    refreshMode: "debounceLeading",
-  })(_ResponsiveEChartsRenderer);
+const ResponsiveEChartsRendererExplicitSize = ExplicitSize<
+  ResponsiveEChartsRendererProps & { className?: string }
+>({
+  wrapped: true,
+  refreshMode: "debounceLeading",
+})(ResponsiveEChartsRendererInner);
+
+type ResponsiveEChartsRendererOuterProps = Omit<
+  ResponsiveEChartsRendererProps,
+  "width" | "height"
+>;
+
+export const ResponsiveEChartsRenderer = forwardRef<
+  HTMLDivElement,
+  ResponsiveEChartsRendererOuterProps
+>(function ResponsiveEChartsRenderer(props, ref) {
+  return (
+    <ResponsiveEChartsRendererExplicitSize
+      {...props}
+      className={CS.fullHeight}
+      ref={ref}
+    />
+  );
+});

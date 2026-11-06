@@ -1,19 +1,18 @@
-import cx from "classnames";
+import type { Extension } from "@uiw/react-codemirror";
+import { useMemo } from "react";
 
-import { CodeMirror } from "metabase/common/components/CodeMirror";
+import {
+  CodeMirror,
+  type CodeMirrorProps,
+} from "metabase/common/components/CodeMirror";
 
-import S from "./CodeEditor.module.css";
 import type { CodeLanguage } from "./types";
 import { useExtensions } from "./utils";
 
-type Props = {
-  className?: string;
-  highlightRanges?: { start: number; end: number }[];
-  id?: string;
-  language: CodeLanguage;
+export type CodeEditorProps = Omit<CodeMirrorProps, "onChange"> & {
+  language?: CodeLanguage | Extension;
   lineNumbers?: boolean;
-  readOnly?: boolean;
-  value: string;
+  proposedValue?: string;
   onChange?: (value: string) => void;
 };
 
@@ -25,25 +24,40 @@ export function CodeEditor({
   lineNumbers = true,
   readOnly,
   value,
+  proposedValue,
   onChange,
-}: Props) {
-  const extensions = useExtensions({ language });
+  extensions: externalExtensions,
+  ...rest
+}: CodeEditorProps) {
+  const extensions = useExtensions({
+    language,
+    extensions: externalExtensions,
+    originalValue: proposedValue ? value : undefined,
+    proposedValue,
+  });
+
+  const basicSetup = useMemo(
+    () => ({
+      lineNumbers,
+      foldGutter: false,
+      highlightActiveLine: false,
+      highlightActiveLineGutter: false,
+    }),
+    [lineNumbers],
+  );
 
   return (
     <CodeMirror
-      basicSetup={{
-        lineNumbers,
-        foldGutter: false,
-        highlightActiveLine: false,
-        highlightActiveLineGutter: false,
-      }}
-      className={cx(S.codeEditor, className)}
+      basicSetup={basicSetup}
+      className={className}
       extensions={extensions}
       id={id}
+      editable={!readOnly}
       readOnly={readOnly}
-      value={value}
+      value={proposedValue ?? value}
       onChange={onChange}
       highlightRanges={highlightRanges}
+      {...rest}
     />
   );
 }

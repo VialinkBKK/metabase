@@ -1,22 +1,61 @@
 import { html } from "@codemirror/lang-html";
 import { javascript } from "@codemirror/lang-javascript";
 import { json } from "@codemirror/lang-json";
+import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { python } from "@codemirror/lang-python";
-import { StreamLanguage } from "@codemirror/language";
+import { sql } from "@codemirror/lang-sql";
+import {
+  LanguageDescription,
+  StreamLanguage,
+  indentUnit,
+  syntaxHighlighting,
+} from "@codemirror/language";
 import { clojure } from "@codemirror/legacy-modes/mode/clojure";
 import { pug } from "@codemirror/legacy-modes/mode/pug";
 import { ruby } from "@codemirror/legacy-modes/mode/ruby";
+import { unifiedMergeView } from "@codemirror/merge";
 import type { Extension } from "@codemirror/state";
 import { handlebarsLanguage as handlebars } from "@xiechao/codemirror-lang-handlebars";
 import { useMemo } from "react";
+import _ from "underscore";
+
+import { markdownMarkHighlighting } from "metabase/ui/syntax";
 
 import type { CodeLanguage } from "./types";
 
-export function useExtensions({ language }: { language: CodeLanguage }) {
-  return useMemo(() => [getLanguageExtension(language)], [language]);
+export function useExtensions({
+  language,
+  extensions,
+  originalValue,
+  proposedValue,
+}: {
+  language?: CodeLanguage | Extension;
+  extensions?: Extension[];
+  originalValue?: string;
+  proposedValue?: string;
+}) {
+  return useMemo(() => {
+    const hasProposed = !!originalValue && !!proposedValue;
+
+    return _.compact([
+      ...(extensions ?? []),
+      language && getLanguageExtension(language),
+      hasProposed &&
+        unifiedMergeView({
+          original: originalValue,
+          mergeControls: false,
+        }),
+    ]);
+  }, [language, extensions, originalValue, proposedValue]);
 }
 
-export function getLanguageExtension(language: CodeLanguage): Extension {
+export function getLanguageExtension(
+  language: CodeLanguage | Extension,
+): Extension {
+  if (typeof language !== "string") {
+    return language;
+  }
+
   switch (language) {
     case "clojure":
       return StreamLanguage.define(clojure);
@@ -24,8 +63,20 @@ export function getLanguageExtension(language: CodeLanguage): Extension {
       return html();
     case "json":
       return json();
+    case "markdown":
+      return [
+        markdown({
+          codeLanguages: [
+            LanguageDescription.of({
+              name: "sql",
+              support: sql(),
+            }),
+          ],
+        }),
+        syntaxHighlighting(markdownMarkHighlighting(markdownLanguage)),
+      ];
     case "python":
-      return python();
+      return [python(), indentUnit.of("    ")];
     case "mustache":
       return handlebars;
     case "pug":
@@ -37,5 +88,7 @@ export function getLanguageExtension(language: CodeLanguage): Extension {
         jsx: true,
         typescript: language === "typescript",
       });
+    case "sql":
+      return sql();
   }
 }

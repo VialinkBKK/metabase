@@ -4,11 +4,15 @@ title: Databricks
 
 # Databricks
 
-To add a database connection, click on the **gear** icon in the top right, and navigate to **Admin settings** > **Databases** > **Add a database**. Then select **Databricks**.
+To add a database connection, click the **grid** icon in the top right, and navigate to **Admin** > **Databases** > **Add a database**. Then select **Databricks**.
 
 You can edit these settings at any time. Just remember to save your changes.
 
 ## Edit connection details
+
+### Connection string
+
+Paste a connection string here to pre-fill the remaining fields below.
 
 ### Display name
 
@@ -16,13 +20,13 @@ The display name for the database in the Metabase interface.
 
 ### Host
 
-Your database's IP address, or its domain name (e.g., `xxxxxxxxxx.cloud.databricks.com` or `adb-xxxxx.azuredatabricks.net`). This is the value of your Databrick's compute resource's Server Hostname.
+Your database's IP address, or its domain name (e.g., `xxxxxxxxxx.cloud.databricks.com` or `adb-xxxxx.azuredatabricks.net`). This is the value of your Databricks compute resource's Server Hostname.
 
 See [Compute settings for the Databricks JDBC Driver](https://docs.databricks.com/en/integrations/jdbc/compute.html).
 
 ### HTTP path
 
-This is the Databrick's compute resources HTTP Path value. This value is often a SQL warehouse endpoint in the format `/sql/1.0/endpoints/abcdef1234567890`. See [Connect to a SQL warehouse](https://docs.databricks.com/en/compute/sql-warehouse/index.html).
+This is the Databricks compute resource's HTTP Path value. This value is often a SQL warehouse endpoint in the format `/sql/1.0/endpoints/abcdef1234567890`. See [Connect to a SQL warehouse](https://docs.databricks.com/en/compute/sql-warehouse/index.html).
 
 Additionally, see [Compute settings for the Databricks JDBC Driver](https://docs.databricks.com/en/integrations/jdbc/compute.html).
 
@@ -83,7 +87,7 @@ See [Compute settings for the Databricks JDBC Driver](https://docs.databricks.co
 
 Turn this option **OFF** if people want to click **Run** (the play button) before applying any summarizations or filters in the query builder.
 
-By default, Metabase will execute a query as soon as you choose an grouping option from the **Summarize** menu or a filter condition from the [drill-through menu](https://www.metabase.com/learn/metabase-basics/querying-and-dashboards/questions/drill-through). If your database is slow, you may want to disable re-running to avoid loading data on each click.
+By default, Metabase will execute a query as soon as you choose a grouping option from the **Summarize** menu or a filter condition from the [drill-through menu](../../questions/visualizations/drill-through.md). If your database is slow, you may want to disable re-running to avoid loading data on each click.
 
 ### Choose when syncs and scans happen
 
@@ -97,9 +101,17 @@ Turn this option **ON** to scan a sample of values every time Metabase runs a [s
 
 A fingerprinting query examines the first 10,000 rows from each column and uses that data to guesstimate how many unique values each column has, what the minimum and maximum values are for numeric and timestamp columns, and so on. If you leave this option **OFF**, Metabase will only fingerprint your columns once during setup.
 
-## Model features
+## Writable connection
 
-There aren't (yet) any model features available for Databricks.
+Set up an additional connection used for write operations. See [Writable connections](../writable-connection.md).
+
+## Database routing
+
+With database routing, an admin can build a question once using one database, and the question will run its query against a different database with the same schema depending on who is viewing the question.
+
+When **multi-catalog is not enabled**, you can route between catalogs on the same host. If multi-catalog is enabled, then you can only route between databases on separate hosts.
+
+See [Database routing](../../permissions/database-routing.md).
 
 ## Danger zone
 
@@ -108,6 +120,6 @@ See [Danger zone](../danger-zone.md).
 ## Further reading
 
 - [Managing databases](../../databases/connecting.md)
-- [Metadata editing](../../data-modeling/metadata-editing.md)
-- [Models](../../data-modeling/models.md)
+- [Metadata editing](../../data-modeling/metadata/metadata-editing.md)
+- [Models](../../data-modeling/models/models.md)
 - [Setting data access permissions](../../permissions/data.md)

@@ -133,7 +133,6 @@ To view your conditional counts by plan, set the **Group by** column to "Plan".
 - [Spreadsheets](#spreadsheets)
 - [Python](#python)
 
-
 ### Conditional running counts
 
 `CountIf` doesn't do running counts, and [CumulativeCount](../expressions/cumulative.md) doesn't accept conditions (or any other arguments) . To do conditional running counts, you'll need to be creative: combine [CumulativeSum](../expressions/cumulative.md) (not `CumulativeCount`! ) with [`case`](./case.md). The idea is to use `case` to return `1` when a condition is satisfied and `0` when it isn't, then compute the running sum of all the 1's.
@@ -191,7 +190,7 @@ GROUP BY
     plan
 ```
 
-The `SELECT` part of the SQl query matches the Metabase expression:
+The `SELECT` part of the SQL query matches the Metabase expression:
 
 ```
 CountIf([Active Subscription] = false)

@@ -48,11 +48,11 @@ export interface Parameter extends ParameterValuesConfig {
   type: string;
   slug: string;
   sectionId?: string;
-  default?: any;
+  default?: ParameterValueOrArray | null;
   required?: boolean;
   options?: ParameterOptions;
   filteringParameters?: ParameterId[];
-  value?: any;
+  value?: ParameterValueOrArray | null;
   target?: ParameterTarget;
   temporal_units?: TemporalUnit[];
 }
@@ -72,7 +72,8 @@ export type ValuesSourceType = null | "card" | "static-list";
 export interface ValuesSourceConfig {
   values?: string[] | ParameterValue[];
   card_id?: CardId;
-  value_field?: unknown[];
+  value_field?: FieldReference;
+  label_field?: FieldReference;
 }
 
 export type VariableTarget = ["template-tag", string];
@@ -104,7 +105,7 @@ export type ParameterValueOrArray =
   | string
   | number
   | boolean
-  | Array<string | number | boolean>;
+  | Array<string | number | boolean | null>;
 
 export type HumanReadableParameterValue = string;
 export type NotRemappedParameterValue = [RowValue];
@@ -113,7 +114,7 @@ export type ParameterValue = NotRemappedParameterValue | RemappedParameterValue;
 
 export type ParameterValuesMap = Record<
   ParameterId,
-  ParameterValueOrArray | null
+  ParameterValueOrArray | null | undefined
 >;
 
 export interface ParameterValues {
@@ -149,6 +150,16 @@ export type NormalizedParameter = {
   values_query_type?: ValuesQueryType;
   values_source_type?: ValuesSourceType;
   values_source_config?: ValuesSourceConfig;
+};
+
+// The parameter payload attached to query execution requests. `value` is
+// undefined when the parameter should fall back to its default.
+export type NormalizedQueryParameter = {
+  id: ParameterId;
+  type: string;
+  value?: ParameterValueOrArray | null;
+  target?: ParameterTarget;
+  options?: ParameterOptions;
 };
 
 export type GetParameterValuesRequest = {

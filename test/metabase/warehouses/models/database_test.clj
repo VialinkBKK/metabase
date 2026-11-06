@@ -5,6 +5,7 @@
    [java-time.api :as t]
    [mb.hawk.assert-exprs.approximately-equal :as =?]
    [metabase.api.common :as api]
+   [metabase.config.core :as config]
    [metabase.driver :as driver]
    [metabase.driver.settings :as driver.settings]
    [metabase.driver.util :as driver.u]
@@ -13,7 +14,9 @@
    [metabase.models.serialization :as serdes]
    [metabase.permissions.core :as perms]
    [metabase.permissions.models.data-permissions :as data-perms]
-   [metabase.query-processor.store :as qp.store]
+   [metabase.permissions.models.permissions-group-membership :as perms-group-membership]
+   ;; binds mock metadata providers via the ambient store, which the code under test reads
+   ^{:clj-kondo/ignore [:deprecated-namespace]} [metabase.query-processor.store :as qp.store]
    [metabase.request.core :as request]
    [metabase.secrets.core :as secret]
    [metabase.sync.task.sync-databases :as task.sync-databases]
@@ -32,6 +35,30 @@
 
 (use-fixtures :once (fixtures/initialize :db :plugins :test-drivers))
 
+(deftest should-auto-sync?-respects-disable-auto-sync-test
+  (testing "should-auto-sync? gates automatically-triggered syncs on the disable-auto-sync setting,"
+    (testing "so that newly inserted or edited databases skip Quartz trigger registration."
+      (mt/with-temp [:model/Database db {}]
+        (testing "default (disable-auto-sync=false): a regular database is auto-sync-eligible"
+          (is (true? (database/should-auto-sync? (:id db)))))
+        (testing "with disable-auto-sync=true: a regular database is not auto-sync-eligible"
+          (mt/with-temporary-setting-values [disable-auto-sync true]
+            (is (false? (database/should-auto-sync? (:id db))))))))
+    (testing "but should-sync? (the gate for explicit, user-requested syncs) ignores the setting"
+      (mt/with-temp [:model/Database db {}]
+        (is (true? (database/should-sync? (:id db))))
+        (mt/with-temporary-setting-values [disable-auto-sync true]
+          (is (true? (database/should-sync? (:id db)))
+              "an explicit Sync-now must remain available even when auto-sync is disabled")))))
+  (testing "destination databases (router children) are excluded from both, regardless of the flag"
+    (mt/with-temp [:model/Database router {}
+                   :model/Database dest   {:router_database_id (:id router)}]
+      (is (false? (database/should-sync? (:id dest))))
+      (is (false? (database/should-auto-sync? (:id dest))))
+      (mt/with-temporary-setting-values [disable-auto-sync true]
+        (is (false? (database/should-sync? (:id dest))))
+        (is (false? (database/should-auto-sync? (:id dest))))))))
+
 (defn- trigger-for-db [db-id]
   (some (fn [{trigger-key :key, :as trigger}]
           (when (str/ends-with? trigger-key (str \. db-id))
@@ -41,9 +68,38 @@
 (deftest cleanup-permissions-after-delete-db-test
   (mt/with-temp [:model/Database {db-id :id} {}]
     (is (true? (t2/exists? :model/DataPermissions :db_id db-id)))
-    (t2/delete! :model/Database db-id)
+    (t2/delete! :model/Database :id db-id)
     (testing "All permissions are deleted when we delete the database"
       (is (false? (t2/exists? :model/DataPermissions :db_id db-id))))))
+
+(deftest ^:synchronized delete-empty-database-does-not-run-field-delete-test
+  (testing "Deleting a Database with no Fields avoids the locking bulk-delete query"
+    (mt/with-temp [:model/Database {db-id :id} {}]
+      (let [original-query-one @#'t2/query-one
+            delete-queries     (atom [])]
+        ;; A dynamic redef permanently proxies this hot var. This test is synchronized, so a temporary root swap is
+        ;; both safe and cheaper for the rest of the test JVM.
+        (with-redefs [t2/query-one (fn [& args]
+                                     (swap! delete-queries into (filter :delete-from args))
+                                     (apply original-query-one args))]
+          (#'database/delete-database-fields! db-id))
+        (is (empty? @delete-queries))))))
+
+(deftest ^:parallel delete-database-fields-test
+  (testing "Fields, including nested Fields, are deleted when the Database has Fields"
+    (mt/with-temp [:model/Database {db-id :id}     {}
+                   :model/Table    {table-id :id}  {:db_id db-id}
+                   :model/Field    {parent-id :id} {:table_id table-id}
+                   :model/Field    _               {:table_id table-id :parent_id parent-id}]
+      (t2/with-call-count [call-count]
+        ;; This only deletes the test-local Database Fields created above.
+        ;; [kondo-keep] suppresses a warning :redundant-ignore can't see; --audit rechecks
+        #_{:clj-kondo/ignore [:metabase/validate-deftest]}
+        (#'database/delete-database-fields! db-id)
+        (is (= 4 (call-count))
+            "One existence check, two successful DELETEs, and one terminating DELETE"))
+      (is (not (t2/exists? :model/Field :id parent-id)))
+      (is (not (t2/exists? :model/Field :table_id table-id))))))
 
 (deftest tasks-test
   (testing "Sync tasks should get scheduled for a newly created Database"
@@ -58,77 +114,152 @@
                  :final-fire-time     nil
                  :data                {"db-id" db-id}}
                 (trigger-for-db db-id)))
-
         (testing "When deleting a Database, sync tasks should get removed"
           (t2/delete! :model/Database :id db-id)
           (is (= nil
                  (trigger-for-db db-id))))))))
 
+(deftest delete-database-deletes-query-actions-test
+  (testing "deleting a Database deletes the query Actions that run against it, including the ones without a model"
+    (mt/with-temp [:model/Database    {db-id :id}     {}
+                   :model/Action      {action-id :id} {:type :query :name "No model" :model_id nil}
+                   :model/QueryAction _               {:action_id     action-id
+                                                       :dataset_query {:database db-id
+                                                                       :type     :native
+                                                                       :native   {:query "select 1"}}}]
+      (t2/delete! :model/Database :id db-id)
+      (is (not (t2/exists? :model/Action :id action-id))))))
+
+(deftest health-check-candidates-test
+  (testing "startup health checks pick one representative database per engine: the lowest id, skipping
+            audit/sample/destination databases"
+    (mt/with-temp [:model/Database {router :id} {:engine :postgres}
+                   :model/Database {dest :id}   {:engine :mysql :router_database_id router}
+                   :model/Database {sample :id} {:engine :mysql :is_sample true}
+                   :model/Database {audit :id}  {:engine :mysql :is_audit true}
+                   :model/Database {stub :id}   {:engine :mysql :is_stub true}
+                   :model/Database {_mysql :id} {:engine :mysql}
+                   :model/Database {pg2 :id}    {:engine :postgres}
+                   :model/Database {pg3 :id}    {:engine :postgres}]
+      (let [candidates    (#'database/health-check-candidates)
+            candidate-ids (into #{} (map :id) candidates)
+            engines       (into #{} (map :engine) candidates)]
+        (testing "exactly one representative per engine"
+          (is (= (count candidates) (count engines))))
+        (testing "every engine with an eligible database gets a representative"
+          (is (contains? engines :postgres))
+          (is (contains? engines :mysql)))
+        (testing "only the lowest-id database of an engine can be the representative"
+          (is (not (contains? candidate-ids pg2)))
+          (is (not (contains? candidate-ids pg3))))
+        (testing "router destinations are never candidates"
+          (is (not (contains? candidate-ids dest))))
+        (testing "sample databases can't claim an engine's slot"
+          (is (not (contains? candidate-ids sample))))
+        (testing "audit databases are never candidates"
+          (is (not (contains? candidate-ids audit))))
+        (testing "stub databases can't claim an engine's slot"
+          (is (not (contains? candidate-ids stub))))))))
+
 (deftest check-health!-test
   (mt/test-drivers (mt/normal-drivers)
-    (with-redefs [quick-task/submit-task! (fn [task] (task))
-                  t2/select (fn [model & args]
-                              (if (and (= model :model/Database) (nil? args))
-                                [(mt/db)]
-                                (apply t2/select model args)))]
-      (binding [driver.settings/*allow-testing-h2-connections* true]
-        (testing "status gauge resets"
-          (mt/with-prometheus-system! [_ system]
-            (mt/with-temporary-setting-values [db-connection-timeout-ms 30000]
-              (database/check-health!)
-              (is (== 1.0 (mt/metric-value system :metabase-database/status {:driver driver/*driver* :healthy true})))
-              (database/check-health!)
-              (is (== 1.0 (mt/metric-value system :metabase-database/status {:driver driver/*driver* :healthy true}))))))))))
+    (let [original-select (mt/original-fn #'t2/select)]
+      (mt/with-dynamic-fn-redefs [quick-task/submit-task! (fn [task] (task))
+                                  ;; make the startup candidate fetch return only the test DB
+                                  t2/select (fn [model & args]
+                                              (if (= model :model/Database)
+                                                [(mt/db)]
+                                                (apply original-select model args)))]
+        (binding [driver.settings/*allow-testing-h2-connections* true]
+          (testing "status gauge resets"
+            (mt/with-prometheus-system! [_ system]
+              (mt/with-temporary-setting-values [db-connection-timeout-ms 30000]
+                (database/check-health!)
+                (is (== 1.0 (mt/metric-value system :metabase-database/status {:driver driver/*driver* :healthy true :connection-type "default"})))
+                (database/check-health!)
+                (is (== 1.0 (mt/metric-value system :metabase-database/status {:driver driver/*driver* :healthy true :connection-type "default"})))))))))))
 
 (deftest health-check-database-test
   (mt/test-drivers (mt/normal-drivers)
-    (with-redefs [quick-task/submit-task! (fn [task] (task))]
+    (mt/with-dynamic-fn-redefs [quick-task/submit-task! (fn [task] (task))]
       (binding [driver.settings/*allow-testing-h2-connections* true]
         (testing "successes"
           (mt/with-prometheus-system! [_ system]
             (mt/with-temporary-setting-values [db-connection-timeout-ms 30000]
               (database/health-check-database! (mt/db))
-              (is (== 1 (mt/metric-value system :metabase-database/status {:driver driver/*driver* :healthy true})) "healthy")
-              (is (== 0 (mt/metric-value system :metabase-database/status {:driver driver/*driver* :healthy false :reason "user-input"})) "unhealthy user-input")
-              (is (== 0 (mt/metric-value system :metabase-database/status {:driver driver/*driver* :healthy false :reason "exception"})) "unhealthy exception"))))
-
+              (is (== 1 (mt/metric-value system :metabase-database/status {:driver driver/*driver* :healthy true :connection-type "default"})) "healthy")
+              (is (== 0 (mt/metric-value system :metabase-database/status {:driver driver/*driver* :healthy false :reason "user-input" :connection-type "default"})) "unhealthy user-input")
+              (is (== 0 (mt/metric-value system :metabase-database/status {:driver driver/*driver* :healthy false :reason "exception" :connection-type "default"})) "unhealthy exception"))))
         (testing "skip audit"
           (mt/with-prometheus-system! [_ system]
             (database/health-check-database! (assoc (mt/db) :is_audit true))
-            (is (== 0 (mt/metric-value system :metabase-database/status {:driver driver/*driver* :healthy true})) "healthy")
-            (is (== 0 (mt/metric-value system :metabase-database/status {:driver driver/*driver* :healthy false :reason "user-input"})) "unhealthy user-input")
-            (is (== 0 (mt/metric-value system :metabase-database/status {:driver driver/*driver* :healthy false :reason "exception"})) "unhealthy exception")))
-
+            (is (== 0 (mt/metric-value system :metabase-database/status {:driver driver/*driver* :healthy true :connection-type "default"})) "healthy")
+            (is (== 0 (mt/metric-value system :metabase-database/status {:driver driver/*driver* :healthy false :reason "user-input" :connection-type "default"})) "unhealthy user-input")
+            (is (== 0 (mt/metric-value system :metabase-database/status {:driver driver/*driver* :healthy false :reason "exception" :connection-type "default"})) "unhealthy exception")))
         (testing "skip sample"
           (mt/with-prometheus-system! [_ system]
             (database/health-check-database! (assoc (mt/db) :is_sample true))
-            (is (== 0 (mt/metric-value system :metabase-database/status {:driver driver/*driver* :healthy true})) "healthy")
-            (is (== 0 (mt/metric-value system :metabase-database/status {:driver driver/*driver* :healthy false :reason "user-input"})) "unhealthy user-input")
-            (is (== 0 (mt/metric-value system :metabase-database/status {:driver driver/*driver* :healthy false :reason "exception"})) "unhealthy exception")))
-
+            (is (== 0 (mt/metric-value system :metabase-database/status {:driver driver/*driver* :healthy true :connection-type "default"})) "healthy")
+            (is (== 0 (mt/metric-value system :metabase-database/status {:driver driver/*driver* :healthy false :reason "user-input" :connection-type "default"})) "unhealthy user-input")
+            (is (== 0 (mt/metric-value system :metabase-database/status {:driver driver/*driver* :healthy false :reason "exception" :connection-type "default"})) "unhealthy exception")))
         (testing "failures for timeout"
           (mt/with-prometheus-system! [_ system]
-            (mt/with-temporary-setting-values [db-connection-timeout-ms 0]
-              (database/health-check-database! (mt/db))
-              (is (== 0 (mt/metric-value system :metabase-database/status {:driver driver/*driver* :healthy true})) "healthy")
-              (is (== 0 (mt/metric-value system :metabase-database/status {:driver driver/*driver* :healthy false :reason "user-input"})) "unhealthy user-input")
-              (is (== 1 (mt/metric-value system :metabase-database/status {:driver driver/*driver* :healthy false :reason "exception"})) "unhealthy exception"))))
-
+            (mt/with-temporary-setting-values [db-connection-timeout-ms 1]
+              (with-redefs [driver/can-connect? (fn [& _args] (Thread/sleep 500) true)]
+                (database/health-check-database! (mt/db)))
+              (is (== 0 (mt/metric-value system :metabase-database/status {:driver driver/*driver* :healthy true :connection-type "default"})) "healthy")
+              (is (== 0 (mt/metric-value system :metabase-database/status {:driver driver/*driver* :healthy false :reason "user-input" :connection-type "default"})) "unhealthy user-input")
+              (is (== 1 (mt/metric-value system :metabase-database/status {:driver driver/*driver* :healthy false :reason "exception" :connection-type "default"})) "unhealthy exception"))))
         (testing "failures for bad connections"
           (when-let [bad-conn (tx/bad-connection-details driver/*driver*)]
             (mt/with-prometheus-system! [_ system]
               (database/health-check-database! (update (mt/db) :details merge bad-conn))
-              (is (== 0 (mt/metric-value system :metabase-database/status {:driver driver/*driver* :healthy true})) "healthy")
-              (is (or (== 1 (mt/metric-value system :metabase-database/status {:driver driver/*driver* :healthy false :reason "user-input"}))
-                      (== 1 (mt/metric-value system :metabase-database/status {:driver driver/*driver* :healthy false :reason "exception"}))) "unhealthy user-input or exception"))))
-
+              (is (== 0 (mt/metric-value system :metabase-database/status {:driver driver/*driver* :healthy true :connection-type "default"})) "healthy")
+              (is (or (== 1 (mt/metric-value system :metabase-database/status {:driver driver/*driver* :healthy false :reason "user-input" :connection-type "default"}))
+                      (== 1 (mt/metric-value system :metabase-database/status {:driver driver/*driver* :healthy false :reason "exception" :connection-type "default"}))) "unhealthy user-input or exception"))))
         (testing "failures for exception"
           (with-redefs [driver/can-connect? (fn [& _args] (throw (Exception. "boom")))]
             (mt/with-prometheus-system! [_ system]
               (database/health-check-database! (mt/db))
-              (is (== 0 (mt/metric-value system :metabase-database/status {:driver driver/*driver* :healthy true})) "healthy")
-              (is (== 0 (mt/metric-value system :metabase-database/status {:driver driver/*driver* :healthy false :reason "user-input"})) "unhealthy user-input")
-              (is (== 1 (mt/metric-value system :metabase-database/status {:driver driver/*driver* :healthy false :reason "exception"})) "unhealthy exception"))))))))
+              (is (== 0 (mt/metric-value system :metabase-database/status {:driver driver/*driver* :healthy true :connection-type "default"})) "healthy")
+              (is (== 0 (mt/metric-value system :metabase-database/status {:driver driver/*driver* :healthy false :reason "user-input" :connection-type "default"})) "unhealthy user-input")
+              (is (== 1 (mt/metric-value system :metabase-database/status {:driver driver/*driver* :healthy false :reason "exception" :connection-type "default"})) "unhealthy exception"))))))))
+
+(deftest health-check-write-connection-test
+  (mt/test-drivers (mt/normal-drivers)
+    (when config/ee-available?
+      (mt/with-premium-features #{:writable-connection}
+        (mt/with-dynamic-fn-redefs [quick-task/submit-task! (fn [task] (task))]
+          (binding [driver.settings/*allow-testing-h2-connections* true]
+            (testing "database with write_data_details checks both connections"
+              (mt/with-prometheus-system! [_ system]
+                (mt/with-temporary-setting-values [db-connection-timeout-ms 30000]
+                  (database/health-check-database! (assoc (mt/db) :write_data_details (:details (mt/db))))
+                  (is (== 1 (mt/metric-value system :metabase-database/status {:driver driver/*driver* :healthy true :connection-type "default"}))
+                      "default connection healthy")
+                  (is (== 1 (mt/metric-value system :metabase-database/status {:driver driver/*driver* :healthy true :connection-type "write-data"}))
+                      "write-data connection healthy"))))
+            (testing "database without write_data_details only checks default connection"
+              (mt/with-prometheus-system! [_ system]
+                (mt/with-temporary-setting-values [db-connection-timeout-ms 30000]
+                  (database/health-check-database! (mt/db))
+                  (is (== 1 (mt/metric-value system :metabase-database/status {:driver driver/*driver* :healthy true :connection-type "default"}))
+                      "default connection healthy")
+                  (is (== 0 (mt/metric-value system :metabase-database/status {:driver driver/*driver* :healthy true :connection-type "write-data"}))
+                      "no write-data connection checked"))))
+            (testing "write connection failure does not prevent default check"
+              (let [call-count (atom 0)]
+                (with-redefs [driver/can-connect? (fn [& _args]
+                                                    (if (< (swap! call-count inc) 2)
+                                                      true
+                                                      (throw (Exception. "write connection failed"))))]
+                  (mt/with-prometheus-system! [_ system]
+                    (mt/with-temporary-setting-values [db-connection-timeout-ms 30000]
+                      (database/health-check-database! (assoc (mt/db) :write_data_details (:details (mt/db))))
+                      (is (== 1 (mt/metric-value system :metabase-database/status {:driver driver/*driver* :healthy true :connection-type "default"}))
+                          "default connection healthy")
+                      (is (== 1 (mt/metric-value system :metabase-database/status {:driver driver/*driver* :healthy false :reason "exception" :connection-type "write-data"}))
+                          "write-data connection failed"))))))))))))
 
 (deftest can-read-database-setting-test
   (let [encode-decode (comp json/decode json/encode)
@@ -157,6 +288,18 @@
                 "id"          3}
                (encode-decode pg-db)))))))
 
+(deftest unknown-database-setting-test
+  (testing "a removed setting left in a database's settings is hidden, and isn't logged as an error (GHY-4961)"
+    (let [db (mi/instance :model/Database {:id       3
+                                           :settings {:database-enable-actions true
+                                                      :removed-setting         true}})]
+      (request/with-current-user (mt/user->id :rasta)
+        (mt/with-log-messages-for-level [messages [metabase.warehouses.models.database :debug]]
+          (is (= {"database-enable-actions" true}
+                 (get (json/decode (json/encode db)) "settings")))
+          (is (=? [{:level :debug, :message #"Hiding unknown setting :removed-setting.*"}]
+                  (filter #(re-find #"removed-setting" (:message %)) (messages)))))))))
+
 (deftest driver-supports-actions-and-database-enable-actions-test
   (mt/test-drivers #{:sqlite}
     (testing "Updating database-enable-actions to true should fail if the engine doesn't support actions"
@@ -165,13 +308,13 @@
         (is (thrown-with-msg?
              clojure.lang.ExceptionInfo
              #"The database does not support actions."
-             (t2/update! :model/Database (:id database) {:settings {:database-enable-actions true}})))))
+             (t2/update! :model/Database :id (:id database) {:settings {:database-enable-actions true}})))))
     (testing "Updating the engine when database-enable-actions is true should fail if the engine doesn't support actions"
       (mt/with-temp [:model/Database database {:engine :h2 :settings {:database-enable-actions true}}]
         (is (thrown-with-msg?
              clojure.lang.ExceptionInfo
              #"The database does not support actions."
-             (t2/update! :model/Database (:id database) {:engine :sqlite})))))))
+             (t2/update! :model/Database :id (:id database) {:engine :sqlite})))))))
 
 (deftest ^:parallel sensitive-data-redacted-test
   (let [encode-decode (comp json/decode json/encode)
@@ -227,7 +370,6 @@
                   "engine"      "bigquery-cloud-sdk"
                   "settings"    {"database-enable-actions" true}}
                  (encode-decode bq-db)))))
-
       (testing "details are obfuscated for admin users"
         (request/with-current-user
           (mt/user->id :crowberto)
@@ -315,8 +457,8 @@
             (is (= (:details db)
                    (database/maybe-test-and-migrate-details! db)))
             (is (= (:details db)
-                   (t2/select-one-fn :details :model/Database (:id db)))
-                [(:id db) "query"])))))))
+                   (t2/select-one-fn :details :model/Database :id (:id db)))
+                (str [(:id db) "query"]))))))))
 
 (deftest maybe-test-and-migrate-details!-password-test
   (mt/with-driver
@@ -333,7 +475,7 @@
                     :password "secret"}
                    (database/maybe-test-and-migrate-details! db)))
             (is (= {:password "secret"}
-                   (t2/select-one-fn :details :model/Database (:id db))))))))))
+                   (t2/select-one-fn :details :model/Database :id (:id db))))))))))
 
 (deftest maybe-test-and-migrate-details!-keystore-test
   (mt/with-driver
@@ -349,7 +491,7 @@
             (is (= {:keystore-id (get-in db [:details :keystore-id])}
                    (database/maybe-test-and-migrate-details! db)))
             (is (= {:keystore-id (get-in db [:details :keystore-id])}
-                   (t2/select-one-fn :details :model/Database (:id db))))))))))
+                   (t2/select-one-fn :details :model/Database :id (:id db))))))))))
 
 (deftest secrets-in-details-test
   (mt/with-driver :secret-test-driver
@@ -362,8 +504,8 @@
                                                      :created_at (t/instant)
                                                      :updated_at (t/instant)
                                                      :details json-details}]
-            (is (= json-details (t2/select-one-fn :details database-table db-id)))
-            (is (= {:host "localhost" :keystore-id secret-id} (t2/select-one-fn :details :model/Database db-id)))
+            (is (= json-details (t2/select-one-fn :details database-table :id db-id)))
+            (is (= {:host "localhost" :keystore-id secret-id} (t2/select-one-fn :details :model/Database :id db-id)))
             (is (= {:host "localhost" :keystore-id secret-id :keystore-options "uploaded" :keystore-value secret/protected-password}
                    (:details (mt/user-http-request :crowberto :get 200 (format "database/%d" db-id))))
                 "API request")))))
@@ -375,8 +517,8 @@
                                                    :created_at (t/instant)
                                                    :updated_at (t/instant)
                                                    :details json-details}]
-          (is (= json-details (t2/select-one-fn :details database-table db-id)))
-          (is (= {:host "localhost"} (t2/select-one-fn :details :model/Database db-id)))
+          (is (= json-details (t2/select-one-fn :details database-table :id db-id)))
+          (is (= {:host "localhost"} (t2/select-one-fn :details :model/Database :id db-id)))
           (is (= {:host "localhost"}
                  (:details (mt/user-http-request :crowberto :get 200 (format "database/%d" db-id))))
               "API request"))))))
@@ -388,29 +530,25 @@
     (let [db-id (:id db)
           secret-id (get-in db [:details :keystore-id])
           expected {:keystore-id secret-id}]
-      (is (= expected (t2/select-one-fn (comp json/decode+kw :details) (t2/table-name :model/Database) db-id)))
+      (is (= expected (t2/select-one-fn (comp json/decode+kw :details) (t2/table-name :model/Database) :id db-id)))
       (is (=? {:value (u/string-to-bytes "secret") :source :uploaded :version 1}
               (secret/latest-for-id secret-id)))
-
-      (t2/update! :model/Database db-id {:details {:keystore-path "secret-path"}})
-      (is (= expected (t2/select-one-fn (comp json/decode+kw :details) (t2/table-name :model/Database) db-id)))
+      (t2/update! :model/Database :id db-id {:details {:keystore-path "secret-path"}})
+      (is (= expected (t2/select-one-fn (comp json/decode+kw :details) (t2/table-name :model/Database) :id db-id)))
       (is (=? {:value (u/string-to-bytes "secret-path") :source :file-path :version 2}
               (secret/latest-for-id secret-id)))
-
-      (t2/update! :model/Database db-id {:details {:keystore-path "ignore-path" :keystore-value "prefer-value"}})
-      (is (= expected (t2/select-one-fn (comp json/decode+kw :details) (t2/table-name :model/Database) db-id)))
+      (t2/update! :model/Database :id db-id {:details {:keystore-path "ignore-path" :keystore-value "prefer-value"}})
+      (is (= expected (t2/select-one-fn (comp json/decode+kw :details) (t2/table-name :model/Database) :id db-id)))
       (is (=? {:value (u/string-to-bytes "prefer-value") :source :uploaded :version 3}
               (secret/latest-for-id secret-id)))
-
-      (t2/update! :model/Database db-id {:details {:keystore-options "local"
-                                                   :keystore-path "prefer-path"
-                                                   :keystore-value "ignore-value"}})
-      (is (= expected (t2/select-one-fn (comp json/decode+kw :details) (t2/table-name :model/Database) db-id)))
+      (t2/update! :model/Database :id db-id {:details {:keystore-options "local"
+                                                       :keystore-path "prefer-path"
+                                                       :keystore-value "ignore-value"}})
+      (is (= expected (t2/select-one-fn (comp json/decode+kw :details) (t2/table-name :model/Database) :id db-id)))
       (is (=? {:value (u/string-to-bytes "prefer-path") :source :file-path :version 4}
               (secret/latest-for-id secret-id)))
-
-      (t2/update! :model/Database db-id {:details {:keystore-value nil}})
-      (is (= {} (t2/select-one-fn (comp json/decode+kw :details) (t2/table-name :model/Database) db-id)))
+      (t2/update! :model/Database :id db-id {:details {:keystore-value nil}})
+      (is (= {} (t2/select-one-fn (comp json/decode+kw :details) (t2/table-name :model/Database) :id db-id)))
       (is (=? nil
               (secret/latest-for-id secret-id))))))
 
@@ -431,7 +569,6 @@
                                            :created_at (t/instant)
                                            :updated_at (t/instant)
                                            :details (json/encode original-details)}]
-
         (testing "Initially setting secret value"
           (is (=? (=?/malli expected-path-response)
                   (:details (mt/user-http-request :crowberto :put 200 (format "database/%d" db-id)
@@ -439,13 +576,11 @@
                                                                    :keystore-path "local.key"
                                                                    :keystore-options "local")}))))
           (is (=? (=?/malli host-and-keystore-id)
-                  (json/decode (:details (t2/select-one db-table db-id)) keyword))
+                  (json/decode (:details (t2/select-one db-table :id db-id)) keyword))
               "Database value")
-
           (is (=? (=?/malli expected-path-response)
                   (:details (mt/user-http-request :crowberto :get 200 (format "database/%d" db-id))))
               "API request"))
-
         (testing "Change secret value from local path to uploaded"
           (is (=? (=?/malli (conj host-and-keystore-id
                                   ;; The secret gets passed back on the put for the ui
@@ -455,11 +590,9 @@
                                                   {:details (assoc original-details
                                                                    :keystore-value secret-key
                                                                    :keystore-options "uploaded")}))))
-
           (is (=? (=?/malli host-and-keystore-id)
-                  (json/decode (:details (t2/select-one db-table db-id)) keyword))
+                  (json/decode (:details (t2/select-one db-table :id db-id)) keyword))
               "Database value")
-
           (is (=? (=?/malli (conj host-and-keystore-id
                                   [:keystore-value [:enum secret/protected-password]]
                                   [:keystore-options [:enum "uploaded"]]))
@@ -482,7 +615,6 @@
                                        :name "Secret Test"
                                        :details base-details}]
       (mt/with-current-user (mt/user->id :crowberto)
-        #_{:clj-kondo/ignore [:redundant-nested-call]}
         (are [expected extra-details] (= (merge
                                           base-details
                                           expected)
@@ -557,7 +689,7 @@
                                        :version 1
                                        :value   "new-password"})
                 (testing " updating the value works as expected"
-                  (t2/update! :model/Database id {:details (assoc details :password-path "/path/to/my/password-file")})
+                  (t2/update! :model/Database :id id {:details (assoc details :password-path "/path/to/my/password-file")})
                   (check-db-fn (t2/select-one :model/Database :id id) {:kind    :password
                                                                        :source  :file-path
                                                                        :version 2
@@ -569,21 +701,198 @@
                   (is (nil? (t2/select-one :model/Secret :id secret-id))
                       (format "Secret ID %d was not removed from the app DB" secret-id)))))))))))
 
-(deftest user-may-not-update-sample-database-test
-  (mt/with-temp [:model/Database {:keys [id] :as _sample-database} {:engine    :h2
-                                                                    :is_sample true
-                                                                    :name      "Sample Database"
-                                                                    :details   {:db "./resources/sample-database.db;USER=GUEST;PASSWORD=guest"}}]
-    (testing " updating the engine of a sample database is not allowed"
-      (is (thrown-with-msg?
-           clojure.lang.ExceptionInfo
-           #"The engine on a sample database cannot be changed."
-           (t2/update! :model/Database id {:engine :sqlite}))))
-    (testing " updating other attributes of a sample database is allowed"
-      (t2/update! :model/Database id {:name "My New Name"})
-      (is (= "My New Name" (t2/select-one-fn :name :model/Database :id id))))))
+(deftest write-data-details-secrets-on-insert-test
+  (testing "handle-incoming-client-secrets! processes write_data_details on insert"
+    (mt/with-temp [:model/Database db {:engine             "secret-test-driver"
+                                       :name               "Secret Test"
+                                       :details            {:host "localhost"}
+                                       :write_data_details {:keystore-value "write-secret"}}]
+      (let [db-id             (:id db)
+            raw-write-details (t2/select-one-fn
+                               (comp json/decode+kw :write_data_details)
+                               (t2/table-name :model/Database) :id db-id)]
+        (testing "keystore-value replaced with keystore-id"
+          (is (contains? raw-write-details :keystore-id))
+          (is (not (contains? raw-write-details :keystore-value))))
+        (testing "Secret record created with correct value"
+          (when-let [secret-id (:keystore-id raw-write-details)]
+            (is (=? {:value (u/string-to-bytes "write-secret") :source :uploaded :version 1}
+                    (secret/latest-for-id secret-id)))))))))
+
+(deftest write-data-details-secrets-on-update-test
+  (testing "handle-incoming-client-secrets! processes write_data_details on update"
+    (mt/with-temp [:model/Database db {:engine  "secret-test-driver"
+                                       :name    "Secret Test"
+                                       :details {:host "localhost"}}]
+      (let [db-id (:id db)]
+        (t2/update! :model/Database :id db-id {:write_data_details {:keystore-value "write-secret"}})
+        (let [raw-write-details (t2/select-one-fn
+                                 (comp json/decode+kw :write_data_details)
+                                 (t2/table-name :model/Database) :id db-id)]
+          (testing "keystore-value replaced with keystore-id"
+            (is (contains? raw-write-details :keystore-id))
+            (is (not (contains? raw-write-details :keystore-value))))
+          (testing "Secret record created with correct value"
+            (when-let [secret-id (:keystore-id raw-write-details)]
+              (is (=? {:value (u/string-to-bytes "write-secret") :source :uploaded :version 1}
+                      (secret/latest-for-id secret-id))))))))))
+
+(deftest delete-orphaned-secrets-includes-write-data-details-test
+  (testing "Secret records referenced in write_data_details are deleted when database is deleted"
+    (let [db-table (t2/table-name :model/Database)]
+      (mt/with-temp [:model/Secret {write-secret-id :id} {:name "write-secret" :value "secret-value" :kind "keystore"}]
+        (mt/with-temp [db-table {db-id :id} {:engine             (name :secret-test-driver)
+                                             :name               "Secret Test"
+                                             :created_at         (t/instant)
+                                             :updated_at         (t/instant)
+                                             :details            (json/encode {:host "localhost"})
+                                             :write_data_details (json/encode {:keystore-id write-secret-id})}]
+          (t2/delete! :model/Database :id db-id)
+          (is (nil? (t2/select-one :model/Secret :id write-secret-id))
+              "Secret referenced in write_data_details should be deleted"))))))
+
+(deftest write-data-details-redaction-to-json-test
+  (testing "to-json-hydrate-redacted-secrets hydrates redacted values in write_data_details"
+    (mt/with-temp [:model/Secret {secret-id :id} {:name "secret" :value "stored-secret-value" :kind "s" :source "uploaded"}
+                   :model/Database db {:engine  (name :secret-test-driver)
+                                       :name    "Secret Test"
+                                       :details {:host "localhost"}}]
+      (mt/with-current-user (mt/user->id :crowberto)
+        (let [db-with-write-details (assoc db :write_data_details {:keystore-id secret-id})
+              json-result           (-> db-with-write-details json/encode json/decode+kw)]
+          (testing "keystore-value hydrated with redacted placeholder"
+            (is (= secret/protected-password
+                   (get-in json-result [:write_data_details :keystore-value]))))
+          (testing "keystore-options hydrated"
+            (is (= "uploaded"
+                   (get-in json-result [:write_data_details :keystore-options])))))))))
+
+(deftest clean-secret-properties-from-write-data-details-test
+  (testing "results-transform cleans secret properties from write_data_details"
+    (let [db-table (t2/table-name :model/Database)]
+      (mt/with-temp [db-table {db-id :id} {:engine             (name :secret-test-driver)
+                                           :name               "Secret Test"
+                                           :created_at         (t/instant)
+                                           :updated_at         (t/instant)
+                                           :details            (json/encode {:host "localhost"})
+                                           :write_data_details (json/encode {:keystore-value "should-be-cleaned"
+                                                                             :keystore-id    999})}]
+        (let [db (t2/select-one :model/Database :id db-id)]
+          (testing "keystore-value cleaned from write_data_details"
+            (is (not (contains? (:write_data_details db) :keystore-value)))))))))
+
+(deftest after-select-keywordizes-auth-provider-in-details-test
+  (testing "after-select keywordizes :auth-provider in both :details and :write_data_details"
+    (mt/with-temp [:model/Database db {:engine             :h2
+                                       :name               "Auth Provider Test"
+                                       :details            {:auth-provider "aws-iam"}
+                                       :write_data_details {:auth-provider "aws-iam"}}]
+      (let [db (t2/select-one :model/Database :id (:id db))]
+        (testing ":details :auth-provider is keywordized"
+          (is (keyword? (get-in db [:details :auth-provider]))))
+        (testing ":write_data_details :auth-provider is keywordized"
+          (is (keyword? (get-in db [:write_data_details :auth-provider]))))))))
 
 (driver/register! ::test, :abstract? true)
+
+(driver/register! ::host-details-driver, :abstract? true)
+(driver/register! ::alternate-details-driver, :abstract? true)
+
+(defmethod driver/connection-hosts ::host-details-driver
+  [_driver details]
+  (driver/hosts-from-details details [:host]))
+
+(defmethod driver/connection-hosts ::alternate-details-driver
+  [_driver details]
+  (driver/hosts-from-details details [:alternate-host]))
+
+(deftest engine-change-validates-existing-details-with-new-driver-test
+  (mt/with-temp-env-var-value! [mb-warehouse-allowed-networks "external-only"]
+    (mt/with-temp [:model/Database db {:engine  (u/qualified-name ::host-details-driver)
+                                       :details {:host "8.8.8.8" :alternate-host "127.0.0.1"}}]
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo
+           #"private or internal network address"
+           (t2/update! :model/Database :id (:id db) {:engine (u/qualified-name ::alternate-details-driver)}))))))
+
+(deftest overlay-details-are-validated-the-way-they-are-resolved-test
+  ;; `:write_data_details` is merged onto `:details` by
+  ;; [[metabase.driver.connection/effective-details]] rather than used on their own, so that merge is what has to
+  ;; satisfy the policy -- an overlay holding nothing but credentials repoints nothing.
+  (mt/with-temp-env-var-value! [mb-warehouse-allowed-networks "external-only"]
+    (mt/with-temp [:model/Database db {:engine  (u/qualified-name ::host-details-driver)
+                                       :details {:host "8.8.8.8"}}]
+      (testing "an overlay carrying only credentials inherits the host it will be merged with"
+        (is (pos? (t2/update! :model/Database :id (:id db) {:write_data_details {:user "hummingbird"}}))))
+      (testing "an overlay that repoints the connection at an internal address is refused"
+        (is (thrown-with-msg?
+             clojure.lang.ExceptionInfo
+             #"private or internal network address"
+             (t2/update! :model/Database :id (:id db) {:write_data_details {:host "127.0.0.1" :user "hummingbird"}})))))))
+
+(deftest disallowed-connection-parameters-are-refused-on-save-test
+  ;; like the network policy, enforced on the model so serialization import and config-file provisioning -- which
+  ;; write a Database without testing a connection -- cannot store one either
+  (testing "a disallowed connection parameter cannot be stored"
+    (doseq [details [{:host "db.example.com" :additional-options "socketFactory=a.b.C"}
+                     {:host "db.example.com" :sslfactory "a.b.C"}]]
+      (testing (pr-str details)
+        (is (thrown-with-msg?
+             clojure.lang.ExceptionInfo #"dangerous"
+             (mt/with-temp [:model/Database _ {:engine :postgres :details details}]))))))
+  (testing "...including by adding it to an existing database"
+    (mt/with-temp [:model/Database db {:engine :postgres :details {:host "db.example.com"}}]
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo #"dangerous"
+           (t2/update! :model/Database :id (:id db) {:details {:host "db.example.com" :sslfactory "a.b.C"}})))))
+  (testing "a database whose driver isn't registered (e.g. an uninstalled plugin) can still be saved"
+    (mt/with-temp [:model/Database db {:engine "not-a-registered-driver" :details {:host "db.example.com"}}]
+      (t2/update! :model/Database :id (:id db) {:details {:host "db2.example.com"}})
+      (is (=? {:details {:host "db2.example.com"}}
+              (t2/select-one :model/Database :id (:id db)))))))
+
+(deftest empty-details-are-not-subject-to-the-network-policy-test
+  (mt/with-temp-env-var-value! [mb-warehouse-allowed-networks "external-only"]
+    (testing "a database with empty details can be created"
+      (mt/with-temp [:model/Database db {:engine :h2, :details {}}]
+        (testing "and its engine changed, the way installing analytics flips the audit db's"
+          (is (pos? (t2/update! :model/Database :id (:id db) {:engine "postgres"}))))
+        (testing "but giving it an internal address is refused"
+          (is (thrown-with-msg?
+               clojure.lang.ExceptionInfo
+               #"private or internal network address"
+               (t2/update! :model/Database :id (:id db) {:details {:host "127.0.0.1"}}))))))))
+
+(deftest attached-dwh-relaxes-the-network-policy-test
+  (mt/with-temp-env-var-value! [mb-warehouse-allowed-networks "external-only"]
+    (mt/with-premium-features #{:attached-dwh}
+      ;; the exemption requires the :attached-dwh token feature, which an OSS build can never have
+      (when config/ee-available?
+        (testing "an attached DWH on a private address can be written"
+          (mt/with-temp [:model/Database db {:engine          (u/qualified-name ::host-details-driver)
+                                             :is_attached_dwh true
+                                             :details         {:host "10.224.7.141"}}]
+            (testing "and updated"
+              (is (pos? (t2/update! :model/Database :id (:id db) {:details {:host "10.224.7.142"}})))))))
+      (testing "loopback and link-local stay blocked even for the attached DWH"
+        (doseq [host ["127.0.0.1" "169.254.169.254"]]
+          (is (thrown-with-msg?
+               clojure.lang.ExceptionInfo
+               #"private or internal network address"
+               (t2/insert! :model/Database {:name            "attached dwh"
+                                            :engine          (u/qualified-name ::host-details-driver)
+                                            :is_attached_dwh true
+                                            :details         {:host host}}))
+              (str "should be refused: " host)))))
+    (testing "without the :attached-dwh token feature the flag confers no exemption"
+      (mt/with-premium-features #{}
+        (is (thrown-with-msg?
+             clojure.lang.ExceptionInfo
+             #"private or internal network address"
+             (t2/insert! :model/Database {:name            "dwh-flavored smuggling"
+                                          :engine          (u/qualified-name ::host-details-driver)
+                                          :is_attached_dwh true
+                                          :details         {:host "10.224.7.141"}})))))))
 
 (deftest preserve-driver-namespaces-test
   (testing "Make sure databases preserve namespaced driver names"
@@ -591,13 +900,28 @@
       (is (= ::test
              (t2/select-one-fn :engine :model/Database :id db-id))))))
 
-(deftest identity-hash-test
-  (testing "Database hashes are composed of the name and engine"
-    (mt/with-temp [:model/Database db {:engine :mysql :name "hashmysql"}]
-      (is (= (Integer/toHexString (hash ["hashmysql" :mysql]))
-             (serdes/identity-hash db)))
-      (is (= "b6f1a9e8"
-             (serdes/identity-hash db))))))
+(deftest ^:parallel serdes-extract-is-stub-test
+  (testing "serdes/extract-one never exports :is_stub"
+    (mt/with-temp [:model/Database stub     {:engine :h2 :name "stub" :is_stub true}
+                   :model/Database non-stub {:engine :h2 :name "non-stub"}]
+      (is (not (contains? (serdes/extract-one "Database" nil stub) :is_stub)))
+      (is (not (contains? (serdes/extract-one "Database" nil non-stub) :is_stub))))))
+
+(deftest ^:parallel serdes-is-sample-not-trusted-test
+  (testing "serdes never trusts an archive's :is_sample (SEC-1175): the real Sample Database is excluded from export,
+            so an incoming is_sample is forged. It is dropped from :copy and imported as false."
+    (let [spec (serdes/make-spec "Database" nil)]
+      (is (not (contains? (set (:copy spec)) :is_sample)))
+      (is (false? ((get-in spec [:transform :is_sample :import]) true))))))
+
+(deftest assert-sqlite-not-hosted-test
+  (testing "serdes import refuses a SQLite Database on a hosted instance (SEC-1175); self-hosted and non-SQLite are fine"
+    (mt/with-premium-features #{:hosting}
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"SQLite is not available"
+                            (database/assert-sqlite-not-hosted! {:engine :sqlite :name "x" :details {:db "/etc/hosts"}})))
+      (is (nil? (database/assert-sqlite-not-hosted! {:engine :postgres :name "x"}))))
+    (mt/with-premium-features #{}
+      (is (nil? (database/assert-sqlite-not-hosted! {:engine :sqlite :name "x"}))))))
 
 (deftest create-database-with-null-details-test
   (testing "Details should get a default value of {} if unspecified"
@@ -606,17 +930,7 @@
         (is (partial= {:details {}}
                       db))))))
 
-(deftest ^:parallel after-select-driver-features-realize-db-row-test
-  ;; This test is necessary because driver multimethods should be able to assume that the db argument is a Database
-  ;; instance, not a transient row. Otherwise a call like `(mi/instance-of :model/Database db)` will return false
-  ;; when it should return true.
-  (testing "Make sure selecting a database calls `driver/database-supports?` with a database instance"
-    (mt/with-temp [:model/Database {db-id :id} {:engine (u/qualified-name ::test)}]
-      (mt/with-dynamic-fn-redefs [driver.u/supports? (fn [_ _ db]
-                                                       (is (true? (mi/instance-of? :model/Database db))))]
-        (is (some? (t2/select-one-fn :features :model/Database :id db-id)))))))
-
-(deftest hydrate-tables-test
+(deftest ^:parallel hydrate-tables-test
   (is (= ["CATEGORIES"
           "CHECKINS"
           "ORDERS"
@@ -630,8 +944,24 @@
              :tables
              (#(map :name %))))))
 
-(deftest visible-filter-clause-test
-  (testing "Database visible-filter-clause generates a HoneySQL clause that filters databases based on user permissions"
+;;; ---------------------------------------- visible-filter-clause tests ----------------------------------------
+
+(defn- fetch-visible-db-ids
+  "Helper to fetch visible database IDs using visible-filter-clause.
+   Handles the :with/:clause return value format."
+  [db-ids user-info permission-mapping column-field]
+  (let [{:keys [clause]} (mi/visible-filter-clause :model/Database column-field user-info permission-mapping)]
+    (t2/select-pks-set :model/Database
+                       {:where [:and
+                                clause
+                                [:in :id db-ids]]})))
+
+(def ^:private default-permission-mapping
+  {:perms/view-data :unrestricted
+   :perms/create-queries :query-builder})
+
+(deftest visible-filter-clause-superuser-test
+  (testing "Superuser should see all databases"
     (mt/with-no-data-perms-for-all-users!
       (mt/with-temp [:model/Database {db1-id :id} {:name "Database 1"}
                      :model/Database {db2-id :id} {:name "Database 2"}
@@ -641,130 +971,287 @@
                      :model/Table _ {:db_id db3-id :name "Table3"}
                      :model/PermissionsGroup pg1 {}
                      :model/PermissionsGroup pg2 {}]
-
-        ;; Set up permissions: user has access to db1 and db2 via different groups, but not db3
         (perms/add-user-to-group! (mt/user->id :rasta) pg1)
         (perms/add-user-to-group! (mt/user->id :rasta) pg2)
-
-        ;; Clear existing permissions for our test databases only
         (t2/delete! :model/DataPermissions :db_id [:in [db1-id db2-id db3-id]])
-
-        ;; Grant permissions to specific databases
         (data-perms/set-database-permission! pg1 db1-id :perms/view-data :unrestricted)
         (data-perms/set-database-permission! pg1 db1-id :perms/create-queries :query-builder)
-
         (data-perms/set-database-permission! pg2 db2-id :perms/view-data :unrestricted)
         (data-perms/set-database-permission! pg2 db2-id :perms/create-queries :query-builder)
-
-        ;; No permissions for db3
         (data-perms/set-database-permission! pg1 db3-id :perms/view-data :blocked)
         (data-perms/set-database-permission! pg2 db3-id :perms/view-data :blocked)
+        (is (= #{db1-id db2-id db3-id}
+               (fetch-visible-db-ids [db1-id db2-id db3-id]
+                                     {:user-id (mt/user->id :rasta) :is-superuser? true}
+                                     default-permission-mapping
+                                     :id)))))))
 
-        (let [user-id (mt/user->id :rasta)
-              fetch-visible-ids (fn [user-info permission-mapping column-field]
-                                  (let [filter-clause (mi/visible-filter-clause :model/Database column-field user-info permission-mapping)]
-                                    (t2/select-pks-set :model/Database
-                                                       {:where [:and
-                                                                filter-clause
-                                                                [:in :id [db1-id db2-id db3-id]]]})))] ; Only check our test databases
+(deftest visible-filter-clause-non-superuser-test
+  (testing "Non-superuser should only see databases they have permissions for"
+    (mt/with-no-data-perms-for-all-users!
+      (mt/with-temp [:model/Database {db1-id :id} {:name "Database 1"}
+                     :model/Database {db2-id :id} {:name "Database 2"}
+                     :model/Database {db3-id :id} {:name "Database 3"}
+                     :model/Table _ {:db_id db1-id :name "Table1"}
+                     :model/Table _ {:db_id db2-id :name "Table2"}
+                     :model/Table _ {:db_id db3-id :name "Table3"}
+                     :model/PermissionsGroup pg1 {}
+                     :model/PermissionsGroup pg2 {}]
+        (perms/add-user-to-group! (mt/user->id :rasta) pg1)
+        (perms/add-user-to-group! (mt/user->id :rasta) pg2)
+        (t2/delete! :model/DataPermissions :db_id [:in [db1-id db2-id db3-id]])
+        (data-perms/set-database-permission! pg1 db1-id :perms/view-data :unrestricted)
+        (data-perms/set-database-permission! pg1 db1-id :perms/create-queries :query-builder)
+        (data-perms/set-database-permission! pg2 db2-id :perms/view-data :unrestricted)
+        (data-perms/set-database-permission! pg2 db2-id :perms/create-queries :query-builder)
+        (data-perms/set-database-permission! pg1 db3-id :perms/view-data :blocked)
+        (data-perms/set-database-permission! pg2 db3-id :perms/view-data :blocked)
+        (is (= #{db1-id db2-id}
+               (fetch-visible-db-ids [db1-id db2-id db3-id]
+                                     {:user-id (mt/user->id :rasta) :is-superuser? false}
+                                     default-permission-mapping
+                                     :id)))))))
 
-          (testing "Superuser should see all databases"
-            (let [user-info {:user-id user-id :is-superuser? true}
-                  permission-mapping {:perms/view-data :unrestricted
-                                      :perms/create-queries :query-builder}]
-              (is (= #{db1-id db2-id db3-id}
-                     (fetch-visible-ids user-info permission-mapping :id))
-                  "Superuser should see all databases")))
+(deftest visible-filter-clause-qualified-column-test
+  (testing "Should work with qualified column names"
+    (mt/with-no-data-perms-for-all-users!
+      (mt/with-temp [:model/Database {db1-id :id} {:name "Database 1"}
+                     :model/Database {db2-id :id} {:name "Database 2"}
+                     :model/Database {db3-id :id} {:name "Database 3"}
+                     :model/Table _ {:db_id db1-id :name "Table1"}
+                     :model/Table _ {:db_id db2-id :name "Table2"}
+                     :model/Table _ {:db_id db3-id :name "Table3"}
+                     :model/PermissionsGroup pg1 {}
+                     :model/PermissionsGroup pg2 {}]
+        (perms/add-user-to-group! (mt/user->id :rasta) pg1)
+        (perms/add-user-to-group! (mt/user->id :rasta) pg2)
+        (t2/delete! :model/DataPermissions :db_id [:in [db1-id db2-id db3-id]])
+        (data-perms/set-database-permission! pg1 db1-id :perms/view-data :unrestricted)
+        (data-perms/set-database-permission! pg1 db1-id :perms/create-queries :query-builder)
+        (data-perms/set-database-permission! pg2 db2-id :perms/view-data :unrestricted)
+        (data-perms/set-database-permission! pg2 db2-id :perms/create-queries :query-builder)
+        (data-perms/set-database-permission! pg1 db3-id :perms/view-data :blocked)
+        (data-perms/set-database-permission! pg2 db3-id :perms/view-data :blocked)
+        (is (= #{db1-id db2-id}
+               (fetch-visible-db-ids [db1-id db2-id db3-id]
+                                     {:user-id (mt/user->id :rasta) :is-superuser? false}
+                                     default-permission-mapping
+                                     :metabase_database.id)))))))
 
-          (testing "Non-superuser should only see databases they have permissions for"
-            (let [user-info {:user-id user-id :is-superuser? false}
-                  permission-mapping {:perms/view-data :unrestricted
-                                      :perms/create-queries :query-builder}]
-              (is (= #{db1-id db2-id}
-                     (fetch-visible-ids user-info permission-mapping :id))
-                  "Non-superuser should only see databases with sufficient permissions")))
+(deftest visible-filter-clause-column-expression-test
+  (testing "Should work with column expressions"
+    (mt/with-no-data-perms-for-all-users!
+      (mt/with-temp [:model/Database {db1-id :id} {:name "Database 1"}
+                     :model/Database {db2-id :id} {:name "Database 2"}
+                     :model/Database {db3-id :id} {:name "Database 3"}
+                     :model/Table _ {:db_id db1-id :name "Table1"}
+                     :model/Table _ {:db_id db2-id :name "Table2"}
+                     :model/Table _ {:db_id db3-id :name "Table3"}
+                     :model/PermissionsGroup pg1 {}
+                     :model/PermissionsGroup pg2 {}]
+        (perms/add-user-to-group! (mt/user->id :rasta) pg1)
+        (perms/add-user-to-group! (mt/user->id :rasta) pg2)
+        (t2/delete! :model/DataPermissions :db_id [:in [db1-id db2-id db3-id]])
+        (data-perms/set-database-permission! pg1 db1-id :perms/view-data :unrestricted)
+        (data-perms/set-database-permission! pg1 db1-id :perms/create-queries :query-builder)
+        (data-perms/set-database-permission! pg2 db2-id :perms/view-data :unrestricted)
+        (data-perms/set-database-permission! pg2 db2-id :perms/create-queries :query-builder)
+        (data-perms/set-database-permission! pg1 db3-id :perms/view-data :blocked)
+        (data-perms/set-database-permission! pg2 db3-id :perms/view-data :blocked)
+        (is (= #{db1-id db2-id}
+               (fetch-visible-db-ids [db1-id db2-id db3-id]
+                                     {:user-id (mt/user->id :rasta) :is-superuser? false}
+                                     default-permission-mapping
+                                     [:coalesce :id :metabase_database.id])))))))
 
-          (testing "Using qualified column name"
-            (let [user-info {:user-id user-id :is-superuser? false}
-                  permission-mapping {:perms/view-data :unrestricted
-                                      :perms/create-queries :query-builder}]
-              (is (= #{db1-id db2-id}
-                     (fetch-visible-ids user-info permission-mapping :metabase_database.id))
-                  "Should work with qualified column names")))
+(deftest visible-filter-clause-view-data-only-test
+  (testing "Requiring only view-data permissions should include databases where user has view permissions"
+    (mt/with-no-data-perms-for-all-users!
+      (mt/with-temp [:model/Database {db1-id :id} {:name "Database 1"}
+                     :model/Database {db2-id :id} {:name "Database 2"}
+                     :model/Database {db3-id :id} {:name "Database 3"}
+                     :model/Table _ {:db_id db1-id :name "Table1"}
+                     :model/Table _ {:db_id db2-id :name "Table2"}
+                     :model/Table _ {:db_id db3-id :name "Table3"}
+                     :model/PermissionsGroup pg1 {}
+                     :model/PermissionsGroup pg2 {}]
+        (perms/add-user-to-group! (mt/user->id :rasta) pg1)
+        (perms/add-user-to-group! (mt/user->id :rasta) pg2)
+        (t2/delete! :model/DataPermissions :db_id [:in [db1-id db2-id db3-id]])
+        (data-perms/set-database-permission! pg1 db1-id :perms/view-data :unrestricted)
+        (data-perms/set-database-permission! pg1 db1-id :perms/create-queries :query-builder)
+        (data-perms/set-database-permission! pg2 db2-id :perms/view-data :unrestricted)
+        (data-perms/set-database-permission! pg2 db2-id :perms/create-queries :query-builder)
+        (data-perms/set-database-permission! pg1 db3-id :perms/view-data :blocked)
+        (data-perms/set-database-permission! pg2 db3-id :perms/view-data :blocked)
+        (is (= #{db1-id db2-id}
+               (fetch-visible-db-ids [db1-id db2-id db3-id]
+                                     {:user-id (mt/user->id :rasta) :is-superuser? false}
+                                     {:perms/view-data :unrestricted
+                                      :perms/create-queries :no}
+                                     :id)))))))
 
-          (testing "Using column expression"
-            (let [user-info {:user-id user-id :is-superuser? false}
-                  permission-mapping {:perms/view-data :unrestricted
-                                      :perms/create-queries :query-builder}]
-              (is (= #{db1-id db2-id}
-                     (fetch-visible-ids user-info permission-mapping [:coalesce :id :metabase_database.id]))
-                  "Should work with column expressions")))
+(deftest visible-filter-clause-blocked-level-test
+  (testing "Requiring blocked level permissions (most permissive) should include all databases"
+    (mt/with-no-data-perms-for-all-users!
+      (mt/with-temp [:model/Database {db1-id :id} {:name "Database 1"}
+                     :model/Database {db2-id :id} {:name "Database 2"}
+                     :model/Database {db3-id :id} {:name "Database 3"}
+                     :model/Table _ {:db_id db1-id :name "Table1"}
+                     :model/Table _ {:db_id db2-id :name "Table2"}
+                     :model/Table _ {:db_id db3-id :name "Table3"}
+                     :model/PermissionsGroup pg1 {}
+                     :model/PermissionsGroup pg2 {}]
+        (perms/add-user-to-group! (mt/user->id :rasta) pg1)
+        (perms/add-user-to-group! (mt/user->id :rasta) pg2)
+        (t2/delete! :model/DataPermissions :db_id [:in [db1-id db2-id db3-id]])
+        (data-perms/set-database-permission! pg1 db1-id :perms/view-data :unrestricted)
+        (data-perms/set-database-permission! pg1 db1-id :perms/create-queries :query-builder)
+        (data-perms/set-database-permission! pg2 db2-id :perms/view-data :unrestricted)
+        (data-perms/set-database-permission! pg2 db2-id :perms/create-queries :query-builder)
+        (data-perms/set-database-permission! pg1 db3-id :perms/view-data :blocked)
+        (data-perms/set-database-permission! pg2 db3-id :perms/view-data :blocked)
+        (is (= #{db1-id db2-id db3-id}
+               (fetch-visible-db-ids [db1-id db2-id db3-id]
+                                     {:user-id (mt/user->id :rasta) :is-superuser? false}
+                                     {:perms/view-data :blocked
+                                      :perms/create-queries :no}
+                                     :id)))))))
 
-          (testing "Different permission levels"
-            (testing "Requiring only view-data permissions"
-              (let [user-info {:user-id user-id :is-superuser? false}
-                    permission-mapping {:perms/view-data :unrestricted
-                                        :perms/create-queries :no}]
-                (is (= #{db1-id db2-id}
-                       (fetch-visible-ids user-info permission-mapping :id))
-                    "Should include databases where user has view permissions")))
-
-            (testing "Requiring blocked level permissions (most permissive)"
-              (let [user-info {:user-id user-id :is-superuser? false}
-                    permission-mapping {:perms/view-data :blocked
-                                        :perms/create-queries :no}]
-                (is (= #{db1-id db2-id db3-id}
-                       (fetch-visible-ids user-info permission-mapping :id))
-                    "Should include all databases when requiring only blocked level"))))
-
-          (testing "User with no permissions"
-            ;; Remove user from groups we added (avoid touching All Users group)
-            (t2/delete! :model/PermissionsGroupMembership
-                        :user_id user-id
-                        :group_id [:in [(:id pg1) (:id pg2)]])
-
-            (let [user-info {:user-id user-id :is-superuser? false}
-                  permission-mapping {:perms/view-data :unrestricted
-                                      :perms/create-queries :query-builder}]
-              (is (empty? (fetch-visible-ids user-info permission-mapping :id))
-                  "User with no group memberships should see no databases"))))))))
+(deftest visible-filter-clause-no-permissions-test
+  (testing "User with no group memberships should see no databases"
+    (mt/with-no-data-perms-for-all-users!
+      (mt/with-temp [:model/Database {db1-id :id} {:name "Database 1"}
+                     :model/Database {db2-id :id} {:name "Database 2"}
+                     :model/Database {db3-id :id} {:name "Database 3"}
+                     :model/Table _ {:db_id db1-id :name "Table1"}
+                     :model/Table _ {:db_id db2-id :name "Table2"}
+                     :model/Table _ {:db_id db3-id :name "Table3"}
+                     :model/PermissionsGroup pg1 {}
+                     :model/PermissionsGroup pg2 {}]
+        (perms/add-user-to-group! (mt/user->id :rasta) pg1)
+        (perms/add-user-to-group! (mt/user->id :rasta) pg2)
+        (t2/delete! :model/DataPermissions :db_id [:in [db1-id db2-id db3-id]])
+        (data-perms/set-database-permission! pg1 db1-id :perms/view-data :unrestricted)
+        (data-perms/set-database-permission! pg1 db1-id :perms/create-queries :query-builder)
+        (data-perms/set-database-permission! pg2 db2-id :perms/view-data :unrestricted)
+        (data-perms/set-database-permission! pg2 db2-id :perms/create-queries :query-builder)
+        (data-perms/set-database-permission! pg1 db3-id :perms/view-data :blocked)
+        (data-perms/set-database-permission! pg2 db3-id :perms/view-data :blocked)
+        ;; Remove user from groups we added (avoid touching All Users group)
+        (perms-group-membership/with-allow-direct-deletion
+          (t2/delete! :model/PermissionsGroupMembership
+                      :user_id (mt/user->id :rasta)
+                      :group_id [:in [(:id pg1) (:id pg2)]]))
+        (is (empty? (fetch-visible-db-ids [db1-id db2-id db3-id]
+                                          {:user-id (mt/user->id :rasta) :is-superuser? false}
+                                          default-permission-mapping
+                                          :id)))))))
 
 (deftest visible-filter-clause-table-level-permissions-test
-  (testing "Database visible-filter-clause with table-level permissions"
+  (testing "Database should be visible when user has access to at least one table"
     (mt/with-no-data-perms-for-all-users!
       (mt/with-temp [:model/Database {db-id :id} {:name "Test Database"}
                      :model/Table {table1-id :id} {:db_id db-id :name "Table1"}
                      :model/Table {table2-id :id} {:db_id db-id :name "Table2"}
                      :model/Table _ {:db_id db-id :name "Table3"}
                      :model/PermissionsGroup pg {}]
-
         (perms/add-user-to-group! (mt/user->id :rasta) pg)
-
         ;; Clear existing permissions for our test database only
         (t2/delete! :model/DataPermissions :db_id db-id)
-
         ;; Block database-level access
         (data-perms/set-database-permission! pg db-id :perms/view-data :blocked)
         (data-perms/set-database-permission! pg db-id :perms/create-queries :no)
-
-        ;; Grant table-level permissions to only table1 and table2
+        ;; Grant table-level permissions to only table1 and table2 (table3 remains blocked)
         (data-perms/set-table-permission! pg table1-id :perms/view-data :unrestricted)
         (data-perms/set-table-permission! pg table1-id :perms/create-queries :query-builder)
-
         (data-perms/set-table-permission! pg table2-id :perms/view-data :unrestricted)
         (data-perms/set-table-permission! pg table2-id :perms/create-queries :query-builder)
+        (is (contains? (fetch-visible-db-ids [db-id]
+                                             {:user-id (mt/user->id :rasta) :is-superuser? false}
+                                             default-permission-mapping
+                                             :id)
+                       db-id))))))
 
-        ;; table3 remains blocked
+;;; ---------------------------------------- can-read? permission tests ----------------------------------------
 
-        (let [user-id (mt/user->id :rasta)
-              user-info {:user-id user-id :is-superuser? false}
-              permission-mapping {:perms/view-data :unrestricted
-                                  :perms/create-queries :query-builder}
-              filter-clause (mi/visible-filter-clause :model/Database :id user-info permission-mapping)
-              visible-db-ids (t2/select-pks-set :model/Database
-                                                {:where [:and
-                                                         filter-clause
-                                                         [:= :id db-id]]})] ; Only check our test database
+(deftest database-can-read?-with-create-queries-permission-test
+  (testing "User with create-queries permission can read database"
+    (mt/with-temp [:model/Database {db-id :id} {}
+                   :model/Table _ {:db_id db-id :name "Table1"}
+                   :model/PermissionsGroup pg {}]
+      (perms/add-user-to-group! (mt/user->id :rasta) pg)
+      (t2/delete! :model/DataPermissions :db_id db-id)
+      (data-perms/set-database-permission! pg db-id :perms/view-data :unrestricted)
+      (data-perms/set-database-permission! pg db-id :perms/create-queries :query-builder)
+      (mt/with-test-user :rasta
+        (is (true? (mi/can-read? :model/Database db-id)))))))
 
-          (is (contains? visible-db-ids db-id)
-              "Database should be visible when user has access to at least one table"))))))
+(deftest database-can-read?-with-manage-database-permission-test
+  (testing "User with manage-database permission can read database"
+    (mt/with-temp [:model/Database {db-id :id} {}
+                   :model/Table _ {:db_id db-id :name "Table1"}
+                   :model/PermissionsGroup pg {}]
+      (perms/add-user-to-group! (mt/user->id :rasta) pg)
+      (t2/delete! :model/DataPermissions :db_id db-id)
+      (data-perms/set-database-permission! pg db-id :perms/view-data :blocked)
+      (data-perms/set-database-permission! pg db-id :perms/create-queries :no)
+      (data-perms/set-database-permission! pg db-id :perms/manage-database :yes)
+      (mt/with-test-user :rasta
+        (is (true? (mi/can-read? :model/Database db-id)))))))
+
+(deftest database-can-read?-with-manage-table-metadata-on-any-table-test
+  (testing "User with manage-table-metadata on any table can read database"
+    (mt/with-temp [:model/Database {db-id :id} {}
+                   :model/Table {table-id :id} {:db_id db-id :name "Table1"}
+                   :model/PermissionsGroup pg {}]
+      (perms/add-user-to-group! (mt/user->id :rasta) pg)
+      (t2/delete! :model/DataPermissions :db_id db-id)
+      (data-perms/set-database-permission! pg db-id :perms/view-data :blocked)
+      (data-perms/set-database-permission! pg db-id :perms/create-queries :no)
+      (data-perms/set-table-permission! pg table-id :perms/manage-table-metadata :yes)
+      (mt/with-test-user :rasta
+        (is (true? (mi/can-read? :model/Database db-id)))))))
+
+;;; ---------------------------------------- can-query? permission tests ----------------------------------------
+
+(deftest database-can-query?-requires-create-queries-permission-test
+  (testing "User needs create-queries to query database"
+    (mt/with-temp [:model/Database {db-id :id} {}
+                   :model/Table _ {:db_id db-id :name "Table1"}
+                   :model/PermissionsGroup pg {}]
+      (perms/add-user-to-group! (mt/user->id :rasta) pg)
+      (t2/delete! :model/DataPermissions :db_id db-id)
+      (data-perms/set-database-permission! pg db-id :perms/view-data :unrestricted)
+      (data-perms/set-database-permission! pg db-id :perms/create-queries :no)
+      (mt/with-test-user :rasta
+        (is (false? (mi/can-query? :model/Database db-id))))
+      (data-perms/set-database-permission! pg db-id :perms/create-queries :query-builder)
+      (mt/with-test-user :rasta
+        (is (true? (mi/can-query? :model/Database db-id)))))))
+
+(deftest database-can-query?-manage-database-does-not-grant-query-access-test
+  (testing "manage-database alone does NOT grant query access"
+    (mt/with-temp [:model/Database {db-id :id} {}
+                   :model/Table _ {:db_id db-id :name "Table1"}
+                   :model/PermissionsGroup pg {}]
+      (perms/add-user-to-group! (mt/user->id :rasta) pg)
+      (t2/delete! :model/DataPermissions :db_id db-id)
+      (data-perms/set-database-permission! pg db-id :perms/view-data :blocked)
+      (data-perms/set-database-permission! pg db-id :perms/create-queries :no)
+      (data-perms/set-database-permission! pg db-id :perms/manage-database :yes)
+      (mt/with-test-user :rasta
+        (is (false? (mi/can-query? :model/Database db-id)))))))
+
+(deftest router-database-id-is-immutable-test
+  (testing "updating a database's router_database_id throws"
+    (mt/with-temp [:model/Database {router-id :id} {}
+                   :model/Database {normal-id :id} {}]
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo
+           #"router_database_id"
+           (t2/update! :model/Database :id normal-id {:router_database_id router-id})))))
+  (testing "a no-op update that does not touch router_database_id is allowed (destination can still be edited)"
+    (mt/with-temp [:model/Database {router-id :id} {}
+                   :model/Database {dest-id :id} {:router_database_id router-id}]
+      (is (t2/update! :model/Database :id dest-id {:name "renamed-destination"})))))

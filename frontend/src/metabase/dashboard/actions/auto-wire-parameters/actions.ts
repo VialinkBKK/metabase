@@ -6,6 +6,7 @@ import {
 import {
   getAllDashboardCardsWithUnmappedParameters,
   getAutoWiredMappingsForDashcards,
+  getDashcardCards,
   getMatchingParameterOption,
   getParameterMappings,
 } from "metabase/dashboard/actions/auto-wire-parameters/utils";
@@ -19,27 +20,26 @@ import {
   getSelectedTabId,
   getTabs,
 } from "metabase/dashboard/selectors";
-import {
-  findDashCardForInlineParameter,
-  isQuestionDashCard,
-} from "metabase/dashboard/utils";
+import { findDashCardForInlineParameter } from "metabase/dashboard/utils";
 import {
   getMappingOptionByTarget,
   getParameterMappingOptions,
 } from "metabase/parameters/utils/mapping-options";
+import type { Dispatch, GetState, StoreDashcard } from "metabase/redux/store";
+import { isQuestionDashCard } from "metabase/utils/dashboard";
 import type {
+  CardId,
   DashCardId,
   DashboardParameterMapping,
   DashboardTabId,
   ParameterId,
   ParameterTarget,
-  QuestionDashboardCard,
 } from "metabase-types/api";
-import type { Dispatch, GetState, StoreDashcard } from "metabase-types/store";
 
 export function showAutoWireToast(
   parameter_id: ParameterId,
-  dashcard: QuestionDashboardCard,
+  dashcardId: DashCardId,
+  cardId: CardId | null,
   target: ParameterTarget,
   selectedTabId: DashboardTabId,
 ) {
@@ -54,14 +54,24 @@ export function showAutoWireToast(
       return;
     }
 
+    const dashcard = getDashCardById(getState(), dashcardId);
+    if (!dashcard || !isQuestionDashCard(dashcard)) {
+      return;
+    }
+
+    const targetCard = getDashcardCards(dashcard).find(
+      (card) => card.id === cardId,
+    );
+    if (!targetCard) {
+      return;
+    }
+
     const dashcardsToAutoApply = getAllDashboardCardsWithUnmappedParameters({
       dashboards: dashboardState.dashboards,
       dashcards: dashboardState.dashcards,
       dashboardId: dashboardState.dashboardId,
       parameterId: parameter_id,
       selectedTabId,
-      // exclude current dashcard as it's being updated in another action
-      excludeDashcardIds: [dashcard.id],
     });
 
     const dashcards = Object.values(dashboardState.dashcards);
@@ -90,6 +100,7 @@ export function showAutoWireToast(
     const mappingOption = getMatchingParameterOption(
       parameter,
       dashcard,
+      targetCard,
       target,
       questions,
       dashcards,
@@ -101,7 +112,7 @@ export function showAutoWireToast(
       return;
     }
 
-    dispatch(
+    return dispatch(
       showAutoWireParametersToast({
         dashcardAttributes,
         originalDashcardAttributes,

@@ -54,7 +54,7 @@
   (let [error (mr/explain
                [:or
                 :int
-                mbql.s/value]
+                ::mbql.s/value]
                [:value "192.168.1.1" {:base_type :type/FK}])]
     (are [f expected] (= expected
                          (f error))
@@ -71,7 +71,7 @@
                [:map
                 [:x [:or
                      :int
-                     mbql.s/value]]]
+                     ::mbql.s/value]]]
                {:x [:value "192.168.1.1" {:base_type :type/FK}]})]
     (are [f expected] (= expected
                          (f error))
@@ -124,7 +124,7 @@
 
 (deftest ^:parallel ref-test-2
   (are [f expected] (= expected
-                       (f (mr/explain [:or mbql.s/value] [:value "192.168.1.1" {:base_type :type/FK}])))
+                       (f (mr/explain [:or ::mbql.s/value] [:value "192.168.1.1" {:base_type :type/FK}])))
     me/humanize
     [nil nil {:base_type ["Not a valid base type: :type/FK"]}]
 
@@ -167,19 +167,16 @@
                                               :stages   [{:lib/type     :mbql.stage/mbql
                                                           :source-table 1
                                                           :joins        [{:lib/type    :mbql/join
-                                                                          :lib/options {:lib/uuid (str (random-uuid))}
                                                                           :stages      [{}]
                                                                           :conditions  [true]}]}]})]
     (are [f expected] (= expected
                          (f error))
       ;; not sure why these errors are repeated.
       me/humanize
-      {:stages [{:joins [{:stages [{:lib/type    ["missing required key"]
-                                    :malli/error ["Invalid stage :lib/type: expected :mbql.stage/native or :mbql.stage/mbql"
-                                                  "Invalid stage :lib/type: expected :mbql.stage/native or :mbql.stage/mbql"]}]
+      {:stages [{:joins [{:stages [["Invalid stage :lib/type: expected :mbql.stage/native or :mbql.stage/mbql"
+                                    "Invalid stage :lib/type: expected :mbql.stage/native or :mbql.stage/mbql"]]
                           :alias  ["missing required key"]}]}]}
 
       mu.humanize/humanize
-      {:stages [{:joins [{:stages
-                          [[{:lib/type "missing required key"} "Invalid stage :lib/type: expected :mbql.stage/native or :mbql.stage/mbql"]],
-                          :alias "missing required key"}]}]})))
+      {:stages [{:joins [{:stages ["Invalid stage :lib/type: expected :mbql.stage/native or :mbql.stage/mbql"]
+                          :alias  "missing required key"}]}]})))

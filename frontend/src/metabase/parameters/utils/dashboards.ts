@@ -1,11 +1,12 @@
 import _ from "underscore";
 
-import { isQuestionCard, isQuestionDashCard } from "metabase/dashboard/utils";
-import { slugify } from "metabase/lib/formatting";
-import { isNotNull } from "metabase/lib/types";
+import { tag_names } from "cljs/metabase.parameters.shared";
+import type { CardQuestionBuilder } from "metabase/metadata-store";
 import { generateParameterId } from "metabase/parameters/utils/parameter-id";
-import Question from "metabase-lib/v1/Question";
-import type Metadata from "metabase-lib/v1/metadata/Metadata";
+import { isQuestionCard, isQuestionDashCard } from "metabase/utils/dashboard";
+import { slugify } from "metabase/utils/formatting";
+import { isNotNull } from "metabase/utils/types";
+import type Question from "metabase-lib/v1/Question";
 import type {
   FieldFilterUiParameter,
   UiParameter,
@@ -13,6 +14,7 @@ import type {
 import { isFieldFilterParameter } from "metabase-lib/v1/parameters/utils/parameter-type";
 import {
   getParameterTargetField,
+  getTextTagFromTarget,
   isParameterVariableTarget,
 } from "metabase-lib/v1/parameters/utils/targets";
 import type {
@@ -32,7 +34,8 @@ type ExtendedMapping = DashboardParameterMapping & {
   card: Card;
 };
 
-export type NewParameterOpts = Pick<Parameter, "name" | "type" | "sectionId">;
+export type NewParameterOpts = Pick<Parameter, "name" | "type"> &
+  Partial<Omit<Parameter, "name" | "type">>;
 
 export function createParameter(
   opts: NewParameterOpts,
@@ -56,11 +59,10 @@ export function createParameter(
   }
 
   const parameter: Parameter = {
+    ...opts,
     name: "",
     slug: "",
     id: generateParameterId(),
-    type: opts.type,
-    sectionId: opts.sectionId,
   };
 
   return setParameterName(parameter, name);
@@ -132,18 +134,12 @@ export function getSavedDashboardUiParameters(
   dashcards: Dashboard["dashcards"],
   parameters: Dashboard["parameters"],
   parameterFields: Dashboard["param_fields"],
-  metadata: Metadata,
 ): UiParameter[] {
   const mappableDashcards = dashcards.filter(isQuestionDashCard);
   const mappings = getMappings(mappableDashcards);
   const uiParameters: UiParameter[] = (parameters || []).map((parameter) => {
     if (isFieldFilterParameter(parameter)) {
-      return buildSavedDashboardParameter(
-        parameter,
-        mappings,
-        parameterFields,
-        metadata,
-      );
+      return buildSavedDashboardParameter(parameter, mappings, parameterFields);
     }
 
     return {
@@ -157,7 +153,7 @@ export function getSavedDashboardUiParameters(
 export function getUnsavedDashboardUiParameters(
   dashcards: Dashboard["dashcards"],
   parameters: Dashboard["parameters"],
-  metadata: Metadata,
+  buildQuestion: CardQuestionBuilder,
   questions: Record<CardId, Question>,
 ): UiParameter[] {
   const mappableDashcards = dashcards.filter(isQuestionDashCard);
@@ -167,7 +163,7 @@ export function getUnsavedDashboardUiParameters(
       return buildUnsavedDashboardParameter(
         parameter,
         mappings,
-        metadata,
+        buildQuestion,
         questions,
       );
     }
@@ -182,16 +178,14 @@ export function getUnsavedDashboardUiParameters(
 
 export function getDashboardQuestions(
   dashcards: DashboardCard[],
-  metadata: Metadata,
+  buildQuestion: CardQuestionBuilder,
 ) {
   return dashcards.reduce<Record<CardId, Question>>((acc, dashcard) => {
     if (isQuestionDashCard(dashcard)) {
       const cards = [dashcard.card, ...(dashcard.series ?? [])];
 
       for (const card of cards) {
-        const question = isQuestionCard(card)
-          ? new Question(card, metadata)
-          : undefined;
+        const question = isQuestionCard(card) ? buildQuestion(card) : undefined;
         if (question) {
           acc[card.id] = question;
         }
@@ -206,7 +200,6 @@ function buildSavedDashboardParameter(
   parameter: Parameter,
   mappings: ExtendedMapping[],
   fields: Dashboard["param_fields"],
-  metadata: Metadata,
 ) {
   const parameterMappings = mappings.filter(
     (mapping) => mapping.parameter_id === parameter.id,
@@ -214,10 +207,10 @@ function buildSavedDashboardParameter(
   const hasVariableTemplateTagTarget = parameterMappings.some((mapping) =>
     isParameterVariableTarget(mapping.target),
   );
-  const parameterFields = (fields?.[parameter.id] ?? [])
-    .map((field) => metadata.field(field.id))
-    .filter(isNotNull);
-  const uniqueParameterFields = _.uniq(parameterFields, (field) => field.id);
+  const uniqueParameterFields = _.uniq(
+    fields?.[parameter.id] ?? [],
+    (field) => field.id,
+  );
 
   return {
     ...parameter,
@@ -229,7 +222,7 @@ function buildSavedDashboardParameter(
 function buildUnsavedDashboardParameter(
   parameter: Parameter,
   mappings: ExtendedMapping[],
-  metadata: Metadata,
+  buildQuestion: CardQuestionBuilder,
   questions: Record<CardId, Question>,
 ): FieldFilterUiParameter {
   const mappingsForParameter = mappings.filter(
@@ -254,7 +247,7 @@ function buildUnsavedDashboardParameter(
       return null;
     }
 
-    const question = questions[card.id] ?? new Question(card, metadata);
+    const question = questions[card.id] ?? buildQuestion(card);
     try {
       return getParameterTargetField(question, parameter, target);
     } catch (e) {
@@ -324,3 +317,27 @@ export function getFilteringParameterValuesMap(
 
   return filteringParameterValues;
 }
+
+export const getFilteredParameterMappingsForDashcardText = (
+  parameterMappings: DashboardCard["parameter_mappings"],
+  dashcardText: string,
+) => {
+  if (!parameterMappings) {
+    return parameterMappings;
+  }
+
+  const tagNames = tag_names(dashcardText);
+
+  return parameterMappings.filter((mapping) => {
+    const target = mapping.target;
+
+    const textTag = getTextTagFromTarget(target);
+
+    // A different tag type (not a text-tag) or no tag at all means we keep the mapping
+    if (!textTag) {
+      return true;
+    }
+
+    return tagNames.includes(textTag);
+  });
+};

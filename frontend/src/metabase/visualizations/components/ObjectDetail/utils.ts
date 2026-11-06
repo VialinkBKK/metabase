@@ -1,13 +1,9 @@
 import { t } from "ttag";
 
-import {
-  isImplicitDeleteAction,
-  isImplicitUpdateAction,
-} from "metabase/actions/utils";
-import { formatValue, singularize } from "metabase/lib/formatting";
+import * as Urls from "metabase/urls";
+import { singularize } from "metabase/utils/formatting";
+import { formatValue } from "metabase/value-formatting";
 import type Question from "metabase-lib/v1/Question";
-import { canRunAction } from "metabase-lib/v1/actions/utils";
-import type Database from "metabase-lib/v1/metadata/Database";
 import type Table from "metabase-lib/v1/metadata/Table";
 import {
   getIsPKFromTablePredicate,
@@ -15,11 +11,12 @@ import {
   isPK,
 } from "metabase-lib/v1/types/utils/isa";
 import type {
+  Table as ApiTable,
   DatasetColumn,
   DatasetData,
+  NormalizedTable,
   TableId,
   VisualizationSettings,
-  WritebackAction,
 } from "metabase-types/api";
 
 import type { ObjectId } from "./types";
@@ -40,6 +37,7 @@ export const getObjectName = ({
   const entityNameColumn = cols && cols?.findIndex(isEntityName);
 
   if (zoomedRow?.length && zoomedRow[entityNameColumn]) {
+    // Unjustified type cast. FIXME
     return zoomedRow[entityNameColumn] as string;
   }
 
@@ -79,6 +77,7 @@ export const getDisplayId = ({
     const pkColumn = cols[pkColumnIndex];
     const columnSetting = settings?.column?.(pkColumn) ?? {};
 
+    // Unjustified type cast. FIXME
     return formatValue(zoomedRow[pkColumnIndex], {
       ...columnSetting,
       column: pkColumn,
@@ -95,6 +94,7 @@ export const getDisplayId = ({
   const defaultColumn = cols[0];
   const columnSetting = settings?.column?.(defaultColumn) ?? {};
 
+  // Unjustified type cast. FIXME
   return formatValue(zoomedRow[0], {
     ...columnSetting,
     column: defaultColumn,
@@ -116,11 +116,12 @@ export const getIdValue = ({
 
   const { cols, rows } = data;
   const columnIndex = cols.findIndex(getIsPKFromTablePredicate(tableId));
+  // Unjustified type cast. FIXME
   return rows[0][columnIndex] as number;
 };
 
 export function getSingleResultsRow(data: DatasetData) {
-  return data.rows.length === 1 ? data.rows[0] : null;
+  return data.rows.length === 1 ? data.rows[0] : undefined;
 }
 
 export const getSinglePKIndex = (cols: DatasetColumn[]) => {
@@ -133,44 +134,43 @@ export const getSinglePKIndex = (cols: DatasetColumn[]) => {
   return index === -1 ? undefined : index;
 };
 
-export const getActionItems = ({
-  actions,
-  databases,
-  onDelete,
-  onUpdate,
-}: {
-  actions: WritebackAction[];
-  databases: Database[];
-  onDelete: (action: WritebackAction) => void;
-  onUpdate: (action: WritebackAction) => void;
-}) => {
-  const actionItems = [];
-  /**
-   * Public actions require an additional endpoint which is out of scope
-   * of Milestone 1 in #32320 epic.
-   *
-   * @see https://github.com/metabase/metabase/issues/32320
-   * @see https://metaboat.slack.com/archives/C057T1QTB3L/p1689845931726009?thread_ts=1689665950.493399&cid=C057T1QTB3L
-   */
-  const privateActions = actions.filter((action) => !action.public_uuid);
-  const deleteAction = privateActions.find(isValidImplicitDeleteAction);
-  const updateAction = privateActions.find(isValidImplicitUpdateAction);
-
-  if (updateAction && canRunAction(updateAction, databases)) {
-    const action = () => onUpdate(updateAction);
-    actionItems.push({ title: t`Update`, icon: "pencil", action });
+export function getApiTable(
+  table: NormalizedTable | undefined | null,
+): ApiTable | undefined {
+  if (!table) {
+    return undefined;
   }
 
-  if (deleteAction && canRunAction(deleteAction, databases)) {
-    const action = () => onDelete(deleteAction);
-    actionItems.push({ title: t`Delete`, icon: "trash", action });
+  // Unjustified type cast. FIXME
+  const apiTable: ApiTable = {
+    ...table,
+    fields: table.original_fields,
+  } as ApiTable;
+
+  return apiTable;
+}
+
+export function getRowUrl(
+  question: Question,
+  columns: DatasetColumn[],
+  table: ApiTable | undefined,
+  rowId: string | number,
+): string | undefined {
+  const pks = columns.filter(isPK);
+
+  if (pks.length !== 1) {
+    return undefined;
   }
 
-  return actionItems;
-};
+  if (question.type() === "model") {
+    return `/model/${question.slug()}/detail/${rowId}`;
+  }
 
-export const isValidImplicitDeleteAction = (action: WritebackAction): boolean =>
-  isImplicitDeleteAction(action) && !action.archived;
+  if (typeof table?.id === "number") {
+    const tableUrl = Urls.table({ id: table.id, name: table.display_name });
 
-export const isValidImplicitUpdateAction = (action: WritebackAction): boolean =>
-  isImplicitUpdateAction(action) && !action.archived;
+    return `${tableUrl}/detail/${rowId}`;
+  }
+
+  return undefined;
+}

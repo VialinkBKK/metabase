@@ -2,27 +2,40 @@
   (:require
    [medley.core :as m]
    [metabase.api.common :as api]
-   [metabase.legacy-mbql.normalize :as mbql.normalize]
+   [metabase.lib.core :as lib]
+   [metabase.lib.equality :as lib.equality]
+   [metabase.lib.schema :as lib.schema]
+   [metabase.lib.schema.id :as lib.schema.id]
    [metabase.models.interface :as mi]
-   [metabase.query-processor.util :as qp.util]
+   [metabase.queries.schema :as queries.schema]
    [metabase.util :as u]
    [metabase.util.i18n :refer [tru]]
-   [metabase.xrays.automagic-dashboards.core
-    :refer [->related-entity
-            ->root
-            automagic-analysis
-            capitalize-first]]
+   [metabase.util.malli :as mu]
+   [metabase.util.malli.registry :as mr]
+   [metabase.util.malli.schema :as ms]
+   [metabase.xrays.automagic-dashboards.core :refer [->related-entity ->root automagic-analysis capitalize-first]]
    [metabase.xrays.automagic-dashboards.filters :as filters]
    [metabase.xrays.automagic-dashboards.names :as names]
    [metabase.xrays.automagic-dashboards.populate :as populate]
+   [metabase.xrays.automagic-dashboards.schema :as ads]
    [metabase.xrays.automagic-dashboards.util :as magic.util]
    [metabase.xrays.related :as related]))
 
 (def ^:private ^{:arglists '([root])} comparison-name
   (comp capitalize-first (some-fn :comparison-name :full-name)))
 
-(defn- dashboard->cards
-  [dashboard]
+(def ^:private ComparisonEntityInstance
+  "An instance `->root` can turn into a `left`/`right` side of a comparison."
+  [:or
+   :metabase.warehouse-schema.schema/table
+   :metabase.segments.schema/segment
+   ::queries.schema/card
+   :metabase.warehouse-schema.schema/field
+   ::queries.schema/query
+   ::ads/adhoc-question])
+
+(mu/defn- dashboard->cards :- [:sequential ::ads/card]
+  [dashboard :- ::ads/dashboard]
   (->> dashboard
        :dashcards
        (map (fn [{:keys [size_y card col row series] :as dashcard}]
@@ -31,7 +44,10 @@
                      :series   series
                      :height   size_y
                      :position (+ (* row populate/grid-width) col))))
-       (sort-by :position)))
+       (sort-by :position)
+       (map (fn [dashcard]
+              (cond-> dashcard
+                (nil? (:dataset_query dashcard)) (dissoc :dataset_query))))))
 
 (defn- clone-card
   [card]
@@ -42,35 +58,71 @@
              :collection_id nil
              :id            (gensym))))
 
-(def ^:private ^{:arglists '([card])} display-type
-  (comp qp.util/normalize-token :display))
+(mr/def ::processed-card
+  "A processed \"card\" map as it flows through this namespace: the [[clone-card]] keys, plus the render-stage
+  additions [[dashboard->cards]] assocs onto it."
+  [:map {:closed true}
+   [:id                     {:optional true} [:or symbol? ::lib.schema.id/card]]
+   [:dataset_query          {:optional true} ::ads/query]
+   [:description            {:optional true} [:maybe :string]]
+   [:display                {:optional true} [:maybe [:or :keyword :string]]]
+   [:name                   {:optional true} [:maybe :string]]
+   [:result_metadata        {:optional true} [:maybe ::queries.schema/card.result-metadata]]
+   [:visualization_settings {:optional true} ms/VisualizationSettings]
+   [:text                   {:optional true} [:maybe :string]]
+   [:series                 {:optional true} [:maybe [:sequential [:ref ::processed-card]]]]
+   [:height                 {:optional true} number?]
+   [:position               {:optional true} number?]
+   [:collection_id          {:optional true} [:maybe ::lib.schema.id/collection]]
+   [:creator_id             {:optional true} [:maybe ::lib.schema.id/user]]
+   [:query_type             {:optional true} [:maybe [:or :keyword :string]]]
+   [:database_id            {:optional true} [:maybe ::lib.schema.id/database]]
+   [:table_id               {:optional true} [:maybe ::lib.schema.id/table]]])
 
-(defn- add-filter-clauses
+(def ^:private Card
+  "See [[::processed-card]]."
+  ::processed-card)
+
+(def ^:private CardOrProcessed
+  "A card as [[metabase.xrays.automagic-dashboards.populate/dashboard->cards]] renders it, or the narrower
+  [[Card]]/[[::processed-card]] shape [[clone-card]] reduces it to. The functions below run on values from either
+  stage of the pipeline."
+  [:or ::ads/card Card])
+
+(mu/defn- display-type :- [:maybe :keyword]
+  [card :- CardOrProcessed]
+  (keyword (:display card)))
+
+(mu/defn- add-filter-clauses :- ::ads/query
   "Add `new-filter-clauses` to a query. There is actually an `mbql.u/add-filter-clause` function we should be using
   instead, but that validates its input and output, and the queries that come in here aren't always valid (for
   example, missing `:database`). If we can, it would be nice to use that instead of reinventing the wheel here."
-  [{{existing-filter-clause :filter} :query, :as query}, new-filter-clauses]
-  (let [clauses           (filter identity (cons existing-filter-clause new-filter-clauses))
-        new-filter-clause (when (seq clauses)
-                            (mbql.normalize/normalize-fragment [:query :filter] (cons :and clauses)))]
-    (cond-> query
-      (seq new-filter-clause) (assoc-in [:query :filter] new-filter-clause))))
+  [query              :- ::ads/query
+   new-filter-clauses :- [:maybe [:sequential [:maybe ::ads/filter-clause]]]]
+  (reduce (fn [query filter-clause]
+            (cond-> query
+              filter-clause
+              (lib/filter filter-clause)))
+          query
+          new-filter-clauses))
 
-(defn- inject-filter
+(mu/defn- inject-filter
   "Inject filter clause into card."
-  [{:keys [query-filter cell-query] :as root} card]
+  [{:keys [query-filter cell-query] :as root} :- ::ads/root
+   card                                       :- CardOrProcessed]
   (-> card
-      (update :dataset_query #(add-filter-clauses % [query-filter cell-query]))
+      (update :dataset_query #(add-filter-clauses % (cons cell-query query-filter)))
       (update :series (partial map (partial inject-filter root)))))
 
-(defn- multiseries?
-  [card]
+(mu/defn- multiseries?
+  [card :- CardOrProcessed]
   (or (-> card :series not-empty)
-      (-> card (get-in [:dataset_query :query :aggregation]) count (> 1))
-      (-> card (get-in [:dataset_query :query :breakout]) count (> 1))))
+      (when-let [query (not-empty (:dataset_query card))]
+        (or (-> query lib/aggregations count (> 1))
+            (-> query lib/breakouts count (> 1))))))
 
-(defn- overlay-comparison?
-  [card]
+(mu/defn- overlay-comparison?
+  [card :- CardOrProcessed]
   (and (-> card display-type (#{:bar :line}))
        (not (multiseries? card))))
 
@@ -81,7 +133,7 @@
           card-left                (->> card (inject-filter left) clone-card)
           card-right               (->> card (inject-filter right) clone-card)
           [color-left color-right] (->> [left right]
-                                        (map #(get-in % [:dataset_query :query :filter]))
+                                        (map #(some-> % :dataset_query lib/filters))
                                         populate/map-to-colors)]
       (if (overlay-comparison? card)
         (let [card   (-> card-left
@@ -90,7 +142,7 @@
               series (-> card-right
                          (update :name #(format "%s (%s)" % (comparison-name right)))
                          vector)]
-          (update dashboard :dashcards conj (merge (populate/card-defaults)
+          (update dashboard :dashcards conj (merge (populate/dashcard-defaults)
                                                    {:col                    0
                                                     :row                    row
                                                     :size_x                 populate/grid-width
@@ -110,7 +162,7 @@
                              (not (multiseries? card-right))
                              (assoc-in [:visualization_settings :graph.colors] [color-right]))]
           (-> dashboard
-              (update :dashcards conj (merge (populate/card-defaults)
+              (update :dashcards conj (merge (populate/dashcard-defaults)
                                              {:col                    0
                                               :row                    row
                                               :size_x                 width
@@ -119,7 +171,7 @@
                                               :card_id                (:id card-left)
                                               :series                 series-left
                                               :visualization_settings {}}))
-              (update :dashcards conj (merge (populate/card-defaults)
+              (update :dashcards conj (merge (populate/dashcard-defaults)
                                              {:col                    width
                                               :row                    row
                                               :size_x                 width
@@ -128,7 +180,6 @@
                                               :card_id                (:id card-right)
                                               :series                 series-right
                                               :visualization_settings {}}))))))
-
     (populate/add-text-card dashboard {:text                   (:text card)
                                        :width                  (/ populate/grid-width 2)
                                        :height                 (:height card)
@@ -164,21 +215,25 @@
                                                 (/ populate/grid-width 2))]
     [dashboard (max height-left height-right)]))
 
-(defn- series-labels
-  [card]
-  (get-in card [:visualization_settings :graph.series_labels]
-          (map (comp capitalize-first names/metric-name)
-               (get-in card [:dataset_query :query :aggregation]))))
+(mu/defn- series-labels
+  [card :- CardOrProcessed]
+  (let [database-id (get-in card [:dataset_query :database])]
+    (get-in card [:visualization_settings :graph.series_labels]
+            (map (comp capitalize-first (partial names/metric-name database-id))
+                 (lib/aggregations (:dataset_query card))))))
 
-(defn- unroll-multiseries
-  [card]
+(mu/defn- unroll-multiseries
+  [card :- CardOrProcessed]
   (if (and (multiseries? card)
            (-> card :display (= :line)))
     (for [[aggregation label] (map vector
-                                   (get-in card [:dataset_query :query :aggregation])
+                                   (lib/aggregations (:dataset_query card))
                                    (series-labels card))]
       (-> card
-          (assoc-in [:dataset_query :query :aggregation] [aggregation])
+          (update :dataset_query (fn [query]
+                                   (-> query
+                                       lib/remove-all-aggregations
+                                       (lib/aggregate aggregation))))
           (assoc :name label)
           (m/dissoc-in [:visualization_settings :graph.series_labels])))
     [card]))
@@ -191,8 +246,10 @@
        distinct
        (map (partial magic.util/->field segment))))
 
-(defn- update-related
-  [related left right]
+(mu/defn- update-related
+  [related :- ::ads/related
+   left    :- ::ads/root
+   right   :- ::ads/root]
   (-> related
       (update :related (comp distinct conj) (-> right :entity ->related-entity))
       (assoc :compare (concat
@@ -227,64 +284,79 @@
   (and ((some-fn :cell-query :query-filter) left)
        (not ((some-fn :cell-query :query-filter) right))))
 
-(defn comparison-dashboard
+(mu/defn comparison-dashboard
   "Create a comparison dashboard based on dashboard `dashboard` comparing subsets of
    the dataset defined by segments `left` and `right`."
-  [dashboard left right opts]
-  (let [left               (-> left
-                               ->root
-                               (merge (:left opts)))
-        right              (-> right
-                               ->root
-                               (merge (:right opts)))
-        left               (cond-> left
-                             (-> opts :left :cell-query)
-                             (assoc :comparison-name (->> opts
-                                                          :left
-                                                          :cell-query
-                                                          (names/cell-title left))))
-        right              (cond-> right
-                             (part-vs-whole-comparison? left right)
-                             (assoc :comparison-name (condp mi/instance-of? (:entity right)
-                                                       :model/Table
-                                                       (tru "All {0}" (:short-name right))
-
-                                                       (tru "{0}, all {1}"
-                                                            (comparison-name right)
-                                                            (names/source-name right)))))
-        segment-dashboards (->> (concat (segment-constituents left)
-                                        (segment-constituents right))
-                                distinct
-                                (map #(automagic-analysis % {:source       (:source left)
-                                                             :rules-prefix ["comparison"]})))]
-    (assert (or (= (:source left) (:source right))
-                (= (-> left :source :table_id) (-> right :source u/the-id))))
-    (->> (concat segment-dashboards [dashboard])
-         (reduce (fn [dashboard-1 dashboard-2]
-                   (if dashboard-1
-                     (populate/merge-dashboards dashboard-1 dashboard-2 {:skip-titles? true})
-                     dashboard-2))
-                 nil)
-         dashboard->cards
-         (m/distinct-by (some-fn :dataset_query hash))
-         (transduce (mapcat unroll-multiseries)
-                    (fn
-                      ([]
-                       (let [title (tru "Comparison of {0} and {1}"
-                                        (comparison-name left)
-                                        (comparison-name right))]
-                         (-> {:name              title
-                              :transient_name    title
-                              :transient_filters nil
-                              :param_fields      nil
-                              :description       (tru "Automatically generated comparison dashboard comparing {0} and {1}"
-                                                      (comparison-name left)
-                                                      (comparison-name right))
-                              :creator_id        api/*current-user-id*
-                              :parameters        []
-                              :related           (update-related (:related dashboard) left right)}
-                             (add-title-row left right))))
-                      ([[dashboard _row]] dashboard)
-                      ([[dashboard row] card]
-                       [(comparison-row dashboard row left right card)
-                        (+ row (:height card))]))))))
+  [dashboard :- ::ads/dashboard
+   left      :- ComparisonEntityInstance
+   right     :- ComparisonEntityInstance
+   opts      :- [:map {:closed true}
+                 [:left  {:optional true} [:map {:closed true}
+                                           [:cell-query {:optional true} ::ads/root.cell-query-input]]]
+                 [:right {:optional true} [:map {:closed true}
+                                           [:cell-query {:optional true} ::ads/root.cell-query-input]]]]]
+  ;; disable ref validation because X-Rays does stuff in a wacko manner, it adds a bunch of filters and whatever that
+  ;; use columns from joins before adding the joins themselves (same with expressions), which is technically invalid
+  ;; at the time it happens but ends up resulting in a valid query at the end of the day. Maybe one day we can rework
+  ;; this code to be saner
+  (binding [lib.schema/*HACK-disable-ref-validation* true]
+    (let [opts               (-> opts
+                                 (m/update-existing-in [:left  :cell-query] (partial lib/normalize ::ads/root.cell-query))
+                                 (m/update-existing-in [:right :cell-query] (partial lib/normalize ::ads/root.cell-query)))
+          left               (-> left
+                                 ->root
+                                 (merge (:left opts)))
+          right              (-> right
+                                 ->root
+                                 (merge (:right opts)))
+          left               (cond-> left
+                               (-> opts :left :cell-query)
+                               (assoc :comparison-name (->> opts
+                                                            :left
+                                                            :cell-query
+                                                            (names/cell-title left))))
+          right              (cond-> right
+                               (part-vs-whole-comparison? left right)
+                               (assoc :comparison-name (if (mi/instance-of? :model/Table (:entity right))
+                                                         (tru "All {0}" (:short-name right))
+                                                         (tru "{0}, all {1}"
+                                                              (comparison-name right)
+                                                              (names/source-name right)))))
+          segment-dashboards (->> (concat (segment-constituents left)
+                                          (segment-constituents right))
+                                  distinct
+                                  (map #(automagic-analysis % {:source       (:source left)
+                                                               :rules-prefix ["comparison"]})))]
+      (assert (or (lib.equality/= (get-in left [:source :dataset_query])
+                                  (get-in right [:source :dataset_query]))
+                  (= (-> left :source :table_id)
+                     (-> right :source u/the-id))))
+      (->> (concat segment-dashboards [dashboard])
+           (reduce (fn [dashboard-1 dashboard-2]
+                     (if dashboard-1
+                       (populate/merge-dashboards dashboard-1 dashboard-2 {:skip-titles? true})
+                       dashboard-2))
+                   nil)
+           dashboard->cards
+           (m/distinct-by (some-fn :dataset_query hash))
+           (transduce (mapcat unroll-multiseries)
+                      (fn
+                        ([]
+                         (let [title (tru "Comparison of {0} and {1}"
+                                          (comparison-name left)
+                                          (comparison-name right))]
+                           (-> {:name              title
+                                :transient_name    title
+                                :transient_filters nil
+                                :param_fields      nil
+                                :description       (tru "Automatically generated comparison dashboard comparing {0} and {1}"
+                                                        (comparison-name left)
+                                                        (comparison-name right))
+                                :creator_id        api/*current-user-id*
+                                :parameters        []
+                                :related           (update-related (:related dashboard) left right)}
+                               (add-title-row left right))))
+                        ([[dashboard _row]] dashboard)
+                        ([[dashboard row] card]
+                         [(comparison-row dashboard row left right card)
+                          (+ row (:height card))])))))))

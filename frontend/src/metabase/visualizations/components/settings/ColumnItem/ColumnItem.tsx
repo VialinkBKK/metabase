@@ -1,9 +1,15 @@
 import cx from "classnames";
 
 import CS from "metabase/css/core/index.css";
-import type { AccentColorOptions } from "metabase/lib/colors/types";
-import type { IconProps } from "metabase/ui";
-import { Flex, Group, Icon, Text } from "metabase/ui";
+import {
+  Flex,
+  type FlexProps,
+  Group,
+  Icon,
+  type IconProps,
+  Text,
+} from "metabase/ui";
+import type { AccentColorOptions } from "metabase/ui/colors/types";
 
 import { ChartSettingActionIcon } from "../ChartSettingActionIcon";
 import { ChartSettingColorPicker } from "../ChartSettingColorPicker";
@@ -23,8 +29,9 @@ export interface ColumnItemProps {
   onRemove?: (target: HTMLElement) => void;
   onEdit?: (target: HTMLElement) => void;
   onEnable?: (target: HTMLElement) => void;
-  onColorChange?: (newColor: string) => void;
+  onColorChange?: (hexValue: string, colorName?: string) => void;
   accentColorOptions?: AccentColorOptions;
+  onDragStart?: FlexProps["onDragStart"];
 }
 
 export const ColumnItem = ({
@@ -42,11 +49,12 @@ export const ColumnItem = ({
   onEnable,
   onColorChange,
   accentColorOptions,
+  onDragStart,
 }: ColumnItemProps) => (
   <Flex
     w="100%"
-    bg="bg-white"
-    c="text-medium"
+    bg="background_page-primary"
+    c="text-secondary"
     className={cx(
       CS.overflowHidden,
       CS.bordered,
@@ -63,10 +71,12 @@ export const ColumnItem = ({
     data-testid={draggable ? `draggable-item-${title}` : null}
     data-enabled={!!onRemove}
     px="sm"
-    py="xs"
+    py="xxs"
     my="sm"
+    draggable={draggable}
+    onDragStart={onDragStart}
   >
-    <Group wrap="nowrap" gap="xs" p="xs">
+    <Group wrap="nowrap" gap="xxs" p="xxs">
       {draggable && (
         <Icon
           className={cx(CS.flexNoShrink, ColumnItemS.ColumnItemDragHandle)}
@@ -77,19 +87,20 @@ export const ColumnItem = ({
       {onColorChange && color && (
         <ChartSettingColorPicker
           value={color}
+          forwardColorName
           onChange={onColorChange}
           pillSize="small"
           accentColorOptions={accentColorOptions}
         />
       )}
     </Group>
-    <Group className={CS.flex1} px="xs" wrap="nowrap">
+    <Group className={CS.flex1} px="xxs" wrap="nowrap">
       {icon && <Icon name={icon} className={CS.flexNoShrink} />}
       <Text lh="normal" fw="bold" className={CS.textWrap}>
         {title}
       </Text>
     </Group>
-    <Group wrap="nowrap" gap="sm" p="xs">
+    <Group wrap="nowrap" gap="sm" p="xxs">
       {onEdit && (
         <ChartSettingActionIcon
           icon="ellipsis"

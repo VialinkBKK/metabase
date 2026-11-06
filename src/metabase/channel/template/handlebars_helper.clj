@@ -1,6 +1,6 @@
 (ns metabase.channel.template.handlebars-helper
-  (:refer-clojure :exclude [hash])
   (:require
+   [clojure.string :as str]
    [java-time.api :as t]
    [metabase.channel.urls :as urls]
    [metabase.util.date-2 :as u.date])
@@ -97,6 +97,22 @@
   [_context _params _kparams _options]
   (t/instant))
 
+(defhelper initials
+  "Return up to two uppercased initials from a full name. Splits by whitespace and hyphen."
+  [name _params _kparams _options]
+  #_{:clj-kondo/ignore [:discouraged-var]}
+  (some->> name (re-seq #"\b(\w)") (take 2) (map second) (str/join "") str/upper-case))
+
+(defhelper mailto-url
+  "Return a `mailto:` URL for an email address.
+  Percent-encodes only `%`, `?` and `#`, which a mail client would otherwise read as an escape, the start of the
+  headers, or a fragment. Every other address comes out unchanged.
+
+  {{mailto-url \"x?cc=y@corp.com\"}}
+  ;; => \"mailto:x%3Fcc=y@corp.com\""
+  [email _params _kparams _options]
+  (str "mailto:" (some-> email (str/escape {\% "%25" \? "%3F" \# "%23"}))))
+
 ;; Metabase specifics
 
 (defhelper card-url
@@ -124,5 +140,7 @@
   {"equals"        equals
    "format-date"   format-date
    "now"           now
+   "initials"      initials
+   "mailto-url"    mailto-url
    "card-url"      card-url
    "dashboard-url" dashboard-url})

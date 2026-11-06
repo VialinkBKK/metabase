@@ -1,20 +1,18 @@
-import type { WithRouterProps } from "react-router";
-
 import { useDashboardContext } from "metabase/dashboard/context";
 import { useLocationSync } from "metabase/dashboard/hooks";
 import type { RefreshPeriod } from "metabase/dashboard/types";
-import type { DisplayTheme } from "metabase/public/lib/types";
+import type { Location } from "metabase/router";
 
 export const useDashboardLocationSync = ({
   location,
-}: Pick<WithRouterProps, "location">) => {
+}: {
+  location: Location;
+}) => {
   const {
     refreshPeriod,
     onRefreshPeriodChange,
     isFullscreen,
     onFullscreenChange,
-    theme,
-    setTheme,
   } = useDashboardContext();
 
   useLocationSync<RefreshPeriod>({
@@ -28,13 +26,6 @@ export const useDashboardLocationSync = ({
     key: "fullscreen",
     value: isFullscreen,
     onChange: (value) => onFullscreenChange(value ?? false),
-    location,
-  });
-
-  useLocationSync<DisplayTheme>({
-    key: "theme",
-    value: theme,
-    onChange: (value) => setTheme(value ?? "light"),
     location,
   });
 };

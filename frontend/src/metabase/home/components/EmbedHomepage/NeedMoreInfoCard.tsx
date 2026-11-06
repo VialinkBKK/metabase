@@ -1,6 +1,6 @@
 import { jt, t } from "ttag";
 
-import ExternalLink from "metabase/common/components/ExternalLink";
+import { ExternalLink } from "metabase/common/components/ExternalLink";
 import { Card, Text } from "metabase/ui";
 
 type NeedMoreInfoCardProps = {
@@ -12,10 +12,10 @@ export const NeedMoreInfoCard = ({
   embeddingDocsUrl,
   analyticsDocsUrl,
 }: NeedMoreInfoCardProps) => (
-  <Card px="xl">
-    <Text c="text-dark" fw="bold">{t`Need more information?`}</Text>
-    <Text c="text-light" size="sm">
-      {/* eslint-disable-next-line no-literal-metabase-strings -- only visible to admins */}
+  <Card px="xxl">
+    <Text c="text-primary" fw="bold">{t`Need more information?`}</Text>
+    <Text c="text-secondary" size="sm">
+      {/* eslint-disable-next-line metabase/no-literal-metabase-strings -- only visible to admins */}
       {jt`Explore the ${(
         <ExternalLink key="embedding-docs" href={embeddingDocsUrl}>
           {t`embedding documentation`}

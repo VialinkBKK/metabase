@@ -26,7 +26,7 @@ Instance size: the sizing of the RDS instance depends on the number of Metabase 
 
 ![RDS Instance size](images/RDSInstanceSize.png)
 
-Availability & Durability: on production deployments, you **should** be using a Multi-AZ (Availability Zone) cluster, as this will ensure that the database does not goes down in case there is an issue on a single availability zone.
+Availability & Durability: on production deployments, you **should** be using a Multi-AZ (Availability Zone) cluster, as this will ensure that the database does not go down in case there is an issue on a single availability zone.
 
 ![RDS MultiAZ](images/RDSMultiAZ.png)
 
@@ -51,7 +51,7 @@ Once the database status is `Available`, you need to click on the DB identifier:
 
 ![RDS DB Identifier](images/RDSDBIdentifier.png)
 
-On the page that appears after you click on the database identifer, you will see on the center of the page the **Connectivity & Security** section. This section will provide you with the **Endpoint** that Metabase needs to connect to the application database we just created.
+On the page that appears after you click on the database identifier, you will see on the center of the page the **Connectivity & Security** section. This section will provide you with the **Endpoint** that Metabase needs to connect to the application database we just created.
 
 ![RDS Connection Data](images/RDSConnectionData.png)
 
@@ -73,4 +73,4 @@ On the edit page, you need to delete the IP address that appears as default, the
 
 ## Add the RDS instance as the application database with environment variables
 
-After having finished all the previous steps, go to the your Metabase deployment and add the RDS instance as the Application Database with [Environment variables](../configuring-metabase/environment-variables.md).
+After having finished all the previous steps, go to your Metabase deployment and add the RDS instance as the Application Database with [Environment variables](../configuring-metabase/environment-variables.md).

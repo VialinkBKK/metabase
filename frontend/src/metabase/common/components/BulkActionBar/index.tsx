@@ -1,2 +1,2 @@
 export * from "./BulkActionBar";
-export * from "./BulkActionBar.styled";
+export * from "./BulkActionButton";

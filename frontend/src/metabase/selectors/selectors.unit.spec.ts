@@ -1,16 +1,13 @@
+import { createMockSettingsState, createMockState } from "__support__/state";
 import {
   createMockTokenFeatures,
   createMockTokenStatus,
 } from "metabase-types/api/mocks";
-import {
-  createMockSettingsState,
-  createMockState,
-} from "metabase-types/store/mocks";
 
 import {
   getDocsUrl,
   getIsPaidPlan,
-  getStoreUrlFromState,
+  getStoreUrl,
   getUpgradeUrl,
 } from "./settings";
 
@@ -136,6 +133,30 @@ describe("getDocsUrl", () => {
       "https://www.metabase.com/docs/v0.41/foo/bar.html#baz",
     );
   });
+
+  it("handles docs site search with utm params", () => {
+    const state = createMockState({
+      settings: createMockSettingsState({
+        "token-features": createMockTokenFeatures({ hosting: false }),
+      }),
+    });
+
+    const url = new URL(
+      getDocsUrl(state, {
+        searchQuery: "kitten meow",
+        utm: {
+          utm_medium: "command-palette",
+          utm_campaign: "docs-search",
+        },
+      }),
+    );
+    expect(url.pathname).toBe("/search");
+    expect(url.searchParams.get("query")).toBe("kitten meow");
+    expect(url.searchParams.get("utm_source")).toBe("product");
+    expect(url.searchParams.get("utm_medium")).toBe("command-palette");
+    expect(url.searchParams.get("utm_campaign")).toBe("docs-search");
+    expect(url.searchParams.get("source_plan")).toBe("oss");
+  });
 });
 
 describe("getStoreUrlFromState", () => {
@@ -146,12 +167,29 @@ describe("getStoreUrlFromState", () => {
       }),
     });
 
-    expect(getStoreUrlFromState(state)).toBe(
-      "https://test-store.metabase.com/",
-    );
+    expect(getStoreUrl(state)).toBe("https://test-store.metabase.com/");
 
-    expect(getStoreUrlFromState(state, "account/manage/plans")).toBe(
+    expect(getStoreUrl(state, "account/manage/plans")).toBe(
       "https://test-store.metabase.com/account/manage/plans",
+    );
+  });
+
+  it("should return for falsey values", () => {
+    const stateUndefined = createMockState({
+      settings: createMockSettingsState({
+        "store-url": undefined,
+      }),
+    });
+
+    const stateCorruptedString = createMockState({
+      settings: createMockSettingsState({
+        "store-url": "false",
+      }),
+    });
+
+    expect(getStoreUrl(stateUndefined)).toBe("https://store.metabase.com/");
+    expect(getStoreUrl(stateCorruptedString)).toBe(
+      "https://store.metabase.com/",
     );
   });
 });

@@ -16,7 +16,7 @@ redirect_from:
 
 # Migrate to Metabase Cloud
 
-> If you're running Metabase 49 or lower, see [this guide](./guide-pre-50.md)
+> If you're running Metabase 49 or lower, see [this guide](https://www.metabase.com/docs/latest/cloud/migrate/guide-pre-50)
 
 The migration from a self-hosted Metabase to Metabase Cloud will keep all of your questions, dashboards, people, settings---everything in your existing Metabase.
 
@@ -32,27 +32,22 @@ You'll kick off the migration process in your self-hosted Metabase, and finish u
 
 ### Initiate your migration
 
-In your Metabase, go to **Admin settings** > **Settings** > **Cloud**.
+1. In your Metabase, go to **Admin** > **Settings**.
+2. In the left sidebar, click **Cloud** and then **Try for free**.
+3. Metabase will prompt you with a modal to let you know that your Metabase will be read-only while it automates the migration. Click **Migrate now**.   
+4. Metabase will take a snapshot of your application database (all your questions, models, dashboards, etc.). While it's snapshotting, it'll display a banner to let people know that they won't be able to create anything new. People will still be able to view questions and dashboards during this time.
 
-In the **Migrate to Metabase Cloud** section, click on the **Get started** button.
+  ![Read-only banner](../images/read-only-banner.png)
 
-![Migrate to Metabase Cloud button](../images/migrate-button.png)
+  Once the snapshot upload completes:
 
-Metabase will prompt you with a modal to let you know that your Metabase will be read-only while it automates the migration. Click **Migrate now**.
-
-Metabase will take a snapshot of your application database (all your questions, models, dashboards, etc.). While it's snapshotting, it'll display a banner to let people know that they won't be able to create anything new. People will still be able to view questions and dashboards during this time.
-
-![Read-only banner](../images/read-only-banner.png)
-
-Once the snapshot upload completes:
-
-![Snapshot uploaded](../images/snapshot-uploaded.png)
+  ![Snapshot uploaded](../images/snapshot-uploaded.png)
 
 ### Set up your account and choose your plan and deployment
 
-While Metabase prepping the migration, click on the **Go to Metabase Store** button to sign in to or set up your account.
+While Metabase is prepping the migration, click on the **Go to Metabase Store** button to sign in to or set up your account.
 
-Choose your plan: [Starter](/product/starter) or [Pro](/product/pro). You can choose monthly or annual billing (annual will save you 10%).
+Choose your plan: [Starter](https://www.metabase.com/product/starter) or [Pro](https://www.metabase.com/product/pro). You can choose monthly or annual billing (annual will save you 10%).
 
 Choose your deployment: you can specify your DNS alias and select your hosting region.
 
@@ -72,11 +67,11 @@ Welcome to Metabase Cloud!
 
 When migrating, you may get an automatic upgrade. If the current version of Metabase Cloud is higher than the version you were using, your Metabase will be upgraded automatically to the higher version.
 
-If the default version on Metabase Cloud is the same or lower than your current version, you're migration will maintain the same version you've been running.
+If the default version on Metabase Cloud is the same or lower than your current version, your migration will maintain the same version you've been running.
 
 ## Follow up after the migration
 
-- **If you're using Google Sign-in**, you'll need to go to [Google Developers Console](https://console.developers.google.com/) and add your new Metabase Cloud URL to the Authorized JavaScript Origins of the Google Auth Client ID.
+- **If you're using Google Sign-in**, you'll need to go to [Google Developers Console](https://console.cloud.google.com/apis/dashboard) and add your new Metabase Cloud URL to the Authorized JavaScript Origins of the Google Auth Client ID.
 - **For Pro and Enterprise customers using SAML SSO**, you'll need to update your settings with your identity provider to change the Redirect URL and the Base URL to your new Metabase Cloud URL, otherwise your identity provider will still redirect people to your old Metabase instance. See [Authenticating with SAML](../../people-and-groups/authenticating-with-saml.md) for details on how to set these URLs.
 
 ### Tell your team about the new Metabase address
@@ -93,4 +88,4 @@ If you were self-hosting via a third-party, be sure to clean up and cancel any s
 
 ## Need help?
 
-If you run into any trouble, just [send us an email](/help/).
+If you run into any trouble, just [send us an email](https://www.metabase.com/help-premium).

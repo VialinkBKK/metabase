@@ -1,19 +1,24 @@
-import { useState } from "react";
+import type { ReactNode } from "react";
 import { t } from "ttag";
 
 import { archiveAndTrack } from "metabase/archive/analytics";
-import ModalContent from "metabase/common/components/ModalContent";
-import { FormMessage } from "metabase/forms";
-import { Button, FocusTrap, Group } from "metabase/ui";
+import {
+  Form,
+  FormErrorMessage,
+  FormProvider,
+  FormSubmitButton,
+} from "metabase/forms";
+import { Button, Modal, Text } from "metabase/ui";
 
 interface ArchiveModalProps {
   title?: string;
-  message: React.ReactNode;
+  message?: ReactNode;
   model: "card" | "model" | "metric" | "dashboard" | "collection";
-  modelId: number;
+  // null matches SimpleEventSchema's target_id for entities without a numeric id
+  modelId: number | null;
   isLoading?: boolean;
   onArchive: () => Promise<void>;
-  onClose?: () => void;
+  onClose: () => void;
 }
 
 export const ArchiveModal = ({
@@ -25,7 +30,7 @@ export const ArchiveModal = ({
   onClose,
   onArchive,
 }: ArchiveModalProps) => {
-  const [error, setError] = useState();
+  const archiveButtonLabel = t`Move to trash`;
 
   const archive = async () => {
     await archiveAndTrack({
@@ -33,38 +38,31 @@ export const ArchiveModal = ({
       model,
       modelId,
       triggeredFrom: "detail_page",
-    })
-      .catch((error) => setError(error))
-      .finally(() => {
-        onClose?.();
-      });
+    });
+    onClose();
   };
 
   return (
-    <ModalContent
-      title={title || t`Trash this?`}
-      footer={[
-        error ? <FormMessage key="message" formError={error} /> : null,
-        <FocusTrap key="buttons">
-          <Group gap="0.5rem">
-            <Button key="cancel" onClick={onClose}>
-              {t`Cancel`}
-            </Button>
-            <Button
-              key="archive"
-              color="error"
+    <Modal opened title={title || t`Trash this?`} onClose={onClose}>
+      <FormProvider initialValues={{}} onSubmit={archive}>
+        <Form>
+          <Text>{message}</Text>
+          <Modal.Footer>
+            <FormErrorMessage flex={1} />
+            <Button onClick={onClose}>{t`Cancel`}</Button>
+            <FormSubmitButton
+              color="negative"
               variant="filled"
-              onClick={archive}
-              loading={isLoading}
+              label={archiveButtonLabel}
+              activeLabel={archiveButtonLabel}
+              successLabel={archiveButtonLabel}
+              failedLabel={archiveButtonLabel}
+              disabled={isLoading}
               data-autofocus
-            >
-              {t`Move to trash`}
-            </Button>
-          </Group>
-        </FocusTrap>,
-      ]}
-    >
-      {message}
-    </ModalContent>
+            />
+          </Modal.Footer>
+        </Form>
+      </FormProvider>
+    </Modal>
   );
 };

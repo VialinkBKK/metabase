@@ -1,21 +1,24 @@
-import { isPivotGroupColumn } from "metabase/lib/data_grid";
-import { isNotNull } from "metabase/lib/types";
-import { isCartesianChart } from "metabase/visualizations";
-import { getComputedSettingsForSeries } from "metabase/visualizations/lib/settings/visualization";
+import type { VisualizerVizDefinitionWithColumnsAndPreloadedDatasets } from "metabase/redux/store/visualizer";
+import { isNotNull } from "metabase/utils/types";
+import { isPivotGroupColumn } from "metabase/visualizations/lib/data_grid";
 import {
+  type ComputedVisualizationSettings,
+  getComputedSettingsForSeries,
   getDefaultDimensionFilter,
   getDefaultMetricFilter,
-} from "metabase/visualizations/shared/settings/cartesian-chart";
-import type { ComputedVisualizationSettings } from "metabase/visualizations/types";
+  getSeriesWithDisplay,
+  isCartesianChart,
+} from "metabase/viz-core";
 import * as Lib from "metabase-lib";
+import { getColumnNameFromKey } from "metabase-lib/v1/queries/utils/column-key";
 import type {
   Card,
   Dataset,
   DatasetColumn,
   VisualizationDisplay,
 } from "metabase-types/api";
-import type { VisualizerVizDefinitionWithColumnsAndFallbacks } from "metabase-types/store/visualizer";
 
+import { DEFAULT_VISUALIZER_DISPLAY } from "../constants";
 import {
   createDimensionColumn,
   createMetricColumn,
@@ -26,11 +29,9 @@ import {
   copyColumn,
   createVisualizerColumnReference,
   extractReferencedColumns,
+  rewriteRemappedReferences,
 } from "./column";
-import {
-  DEFAULT_VISUALIZER_DISPLAY,
-  isVisualizerSupportedVisualization,
-} from "./dashboard-card-supports-visualizer";
+import { isVisualizerSupportedVisualization } from "./dashboard-card-supports-visualizer";
 import { createDataSource, createDataSourceNameRef } from "./data-source";
 import { updateVizSettingsWithRefs } from "./update-viz-settings-with-refs";
 import { getColumnVizSettings } from "./viz-settings";
@@ -82,12 +83,20 @@ function pickColumns(
   }
 
   if (isCartesianChart(display)) {
-    return originalColumns.filter((col) => {
-      return (
-        settings["graph.metrics"]?.includes(col.name) ||
-        settings["graph.dimensions"]?.includes(col.name)
-      );
-    });
+    const tooltipColumns = (settings["graph.tooltip_columns"] || []).map(
+      getColumnNameFromKey,
+    );
+
+    const isSelected = (name?: string) =>
+      name != null &&
+      (settings["graph.metrics"]?.includes(name) ||
+        settings["graph.dimensions"]?.includes(name) ||
+        tooltipColumns.includes(name));
+
+    // Keep the display-value column paired with any selected dim.
+    return originalColumns.filter(
+      (col) => isSelected(col.name) || isSelected(col.remapped_from),
+    );
   }
 
   return originalColumns;
@@ -96,21 +105,19 @@ function pickColumns(
 export function getInitialStateForCardDataSource(
   card: Card,
   dataset: Dataset,
-): VisualizerVizDefinitionWithColumnsAndFallbacks {
+): VisualizerVizDefinitionWithColumnsAndPreloadedDatasets {
   const {
     data: { cols: originalColumns },
   } = dataset;
 
-  const state: VisualizerVizDefinitionWithColumnsAndFallbacks = {
+  const state: VisualizerVizDefinitionWithColumnsAndPreloadedDatasets = {
     display: isVisualizerSupportedVisualization(card.display)
       ? card.display
       : DEFAULT_VISUALIZER_DISPLAY,
     columns: [],
     columnValuesMapping: {},
-    settings: {
-      "card.title": card.name,
-    },
-    datasetFallbacks: { [card.id]: dataset },
+    settings: {},
+    preloadedDatasets: { [card.id]: dataset },
   };
 
   const dataSource = createDataSource("card", card.id, card.name);
@@ -150,15 +157,15 @@ export function getInitialStateForCardDataSource(
   }
 
   const computedSettings: ComputedVisualizationSettings =
-    getComputedSettingsForSeries([
-      {
-        ...dataset,
-        // Using state.display to get viz settings
-        // relevant to a new visualization vs. original card
-        // (e.g. if a card is a smartscalar, it won't have any relevant viz settings)
-        card: { ...card, display: state.display },
-      },
-    ]);
+    getComputedSettingsForSeries(
+      // Using state.display to get viz settings
+      // relevant to a new visualization vs. original card
+      // (e.g. if a card is a smartscalar, it won't have any relevant viz settings)
+      getSeriesWithDisplay(
+        [{ ...dataset, card }],
+        state.display ?? card.display,
+      ),
+    );
 
   const columnsToRefs: Record<string, string> = {};
   const columns = pickColumns(card.display, originalColumns, computedSettings);
@@ -176,6 +183,11 @@ export function getInitialStateForCardDataSource(
     columnsToRefs[column.name] = columnRef.name;
   });
 
+  const columnRenames = new Map(Object.entries(columnsToRefs));
+  state.columns = state.columns.map((col) =>
+    rewriteRemappedReferences(col, columnRenames),
+  );
+
   const entries = getColumnVizSettings(state.display!)
     .map((setting) => {
       const originalValue = computedSettings[setting];
@@ -185,7 +197,7 @@ export function getInitialStateForCardDataSource(
       }
 
       if (Array.isArray(originalValue)) {
-        // When there're no sensible metrics/dimensions,
+        // When there are no sensible metrics/dimensions,
         // "graph.dimensions" and "graph.metrics" are `[null]`
         if (originalValue.filter(Boolean).length === 0) {
           return;
@@ -222,7 +234,6 @@ export function getInitialStateForCardDataSource(
   state.settings = {
     ...updateVizSettingsWithRefs(card.visualization_settings, columnsToRefs),
     ...Object.fromEntries(entries),
-    "card.title": card.name,
   };
 
   return state;

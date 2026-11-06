@@ -11,10 +11,13 @@
    [malli.core :as mc]
    [medley.core :as m]
    [metabase.config.core :as config]
+   [metabase.request.schema :as request.schema]
+   [metabase.server.instance :as server.instance]
    [metabase.server.middleware.session :as mw.session]
-   [metabase.server.test-handler :as server.test-handler]
+   [metabase.server.streaming-response :as streaming-response]
    [metabase.test-runner.assert-exprs :as test-runner.assert-exprs]
    [metabase.test.initialize :as initialize]
+   [metabase.test.server.handler :as test.server.handler]
    [metabase.util :as u]
    [metabase.util.date-2 :as u.date]
    [metabase.util.json :as json]
@@ -23,11 +26,16 @@
    [metabase.util.malli.humanize :as mu.humanize]
    [metabase.util.malli.registry :as mr]
    [metabase.util.malli.schema :as ms]
-   [peridot.multipart]
-   [ring.util.codec :as codec])
+   [ring.util.codec :as codec]
+   [ring.util.mime-type :as mime-type])
   (:import
-   (java.io ByteArrayInputStream InputStream)
-   (metabase.server.streaming_response StreamingResponse)))
+   (jakarta.servlet.http HttpServletResponse)
+   (java.io ByteArrayInputStream ByteArrayOutputStream File InputStream)
+   (java.nio.charset Charset)
+   (metabase.server.streaming_response StreamingResponse)
+   (org.apache.http HttpEntity)
+   (org.apache.http.entity ContentType)
+   (org.apache.http.entity.mime MultipartEntityBuilder)))
 
 (set! *warn-on-reflection* true)
 
@@ -52,18 +60,68 @@
                               [(encode-key-value k value-or-values)]))))))
 
 (defn build-url
-  "Build an API URL for `localhost` and `MB_JETTY_PORT` with `query-parameters`.
+  "Build an API URL for `localhost` with `query-parameters`. Uses the actual port from the running Jetty server
+  (supporting port 0 / OS-assigned random ports), falling back to `MB_JETTY_PORT` config if the server isn't started.
 
     (build-url \"db/1\" {:x true}) -> \"http://localhost:3000/api/db/1?x=true\""
   [url query-parameters]
   {:pre [(string? url) (u/maybe? map? query-parameters)]}
-  (let [url (if (= (first url) \/) url (str "/" url))]
+  (let [url  (if (= (first url) \/) url (str "/" url))
+        port (or (server.instance/server-port)
+                 (config/config-str :mb-jetty-port))]
     (str "http://localhost:"
-         (config/config-str :mb-jetty-port)
+         port
          *url-prefix*
          url
          (when (seq query-parameters)
            (str "?" (build-query-string query-parameters))))))
+
+;; Multipart body params. Adapted from https://github.com/xeqi/peridot which looks abandoned, and we only need this
+;; little thing from there.
+
+(defn- ensure-string
+  "Ensures that the resulting key is a form-encoded string."
+  ^String [k]
+  (codec/form-encode (if (keyword? k) (name k) (str k))))
+
+(defmulti add-part
+  {:arglists '([builder key value])
+   :private true}
+  (fn [_builder _key value] (type value)))
+
+(defmethod add-part File [^MultipartEntityBuilder m k ^File f]
+  (let [mime-type (mime-type/ext-mime-type (.getName f))
+        ctype (ContentType/create ^String mime-type "UTF-8")]
+    (.addBinaryBody m (ensure-string k) f ctype (.getName f))))
+
+(defmethod add-part InputStream [^MultipartEntityBuilder m k ^InputStream v]
+  (.addBinaryBody m (ensure-string k) v ContentType/APPLICATION_OCTET_STREAM "input-stream.tmp"))
+
+(defmethod add-part byte/1 [^MultipartEntityBuilder m k ^bytes v]
+  (.addBinaryBody m (ensure-string k) v ContentType/APPLICATION_OCTET_STREAM "byte-array.tmp"))
+
+(defmethod add-part :default [^MultipartEntityBuilder m k v]
+  (.addTextBody m (ensure-string k) v (ContentType/create "text/plain" "UTF-8")))
+
+(defn- multipart-entity [params]
+  (let [builder (MultipartEntityBuilder/create)]
+    (.setCharset builder (Charset/forName "UTF-8"))
+    (doseq [[k v] params]
+      (add-part builder k v))
+    (.build builder)))
+
+(defn build-multipart [params]
+  (let [^HttpEntity mpe (multipart-entity params)
+        length          (.getContentLength mpe)
+        ctype           (.getValue (.getContentType mpe))]
+    {:body (let [out (ByteArrayOutputStream.)]
+             (.writeTo mpe out)
+             (.close out)
+             (io/input-stream (.toByteArray out)))
+     :content-length length
+     :content-type   ctype
+     :headers        {"content-type"   ctype
+                      "content-length" (str length)}}))
 
 (defn- build-body-params [http-body content-type]
   (when http-body
@@ -75,7 +133,7 @@
       {:body (ByteArrayInputStream. (.getBytes (json/encode http-body) "UTF-8"))}
 
       (= "multipart/form-data" content-type)
-      (peridot.multipart/build http-body)
+      (build-multipart http-body)
 
       (= "application/x-www-form-urlencoded" content-type)
       {:body (ByteArrayInputStream. (.getBytes ^String (codec/form-encode http-body) "UTF-8"))}
@@ -214,8 +272,11 @@
   (when expected-status-code
     (is (= expected-status-code
            actual-status-code)
-        (format "%s %s expected a status code of %d, got %d."
-                method-name url expected-status-code actual-status-code))))
+        (format "%s %s expected a status code of %d, got %d.\nResponse body: %s"
+                method-name url expected-status-code actual-status-code
+                ;; micro-optimization: don't stringify the body unless this assertion will actually fail
+                (when (not= expected-status-code actual-status-code)
+                  body)))))
 
 (def ^:private method->request-fn
   {:get    http/get
@@ -224,15 +285,29 @@
    :patch  http/patch
    :delete http/delete})
 
+(def ^:private RequestOptions
+  "The clj-http request options this test client actually uses."
+  [:map {:closed true}
+   [:headers            {:optional true} [:map-of :string [:maybe :string]]]
+   [:as                 {:optional true} :keyword]
+   [:content-type       {:optional true} [:or :string :keyword]]
+   [:cookie-store       {:optional true} (ms/InstanceOfClass org.apache.http.client.CookieStore)]
+   [:cookies            {:optional true} [:map-of :string ::request.schema/cookie-attrs]]
+   [:redirect-strategy  {:optional true} :keyword]
+   [:decompress-body    {:optional true} :boolean]
+   [:form-params        {:optional true} [:map {:closed true}
+                                          [:SAMLResponse :string]
+                                          [:RelayState   {:optional true} [:maybe :string]]]]])
+
 (def ^:private ClientParamsMap
   [:map {:closed true}
-   [:credentials      {:optional true} [:maybe [:or ms/UUIDString map?]]]
+   [:credentials      {:optional true} [:maybe [:or ms/UUIDString Credentials]]]
    [:method                            (into [:enum] (keys method->request-fn))]
    [:expected-status  {:optional true} [:maybe ms/PositiveInt]]
    [:url                               ms/NonBlankString]
-   [:http-body        {:optional true} [:maybe [:or map? vector?]]]
-   [:query-parameters {:optional true} [:maybe map?]]
-   [:request-options  {:optional true} [:maybe map?]]])
+   [:http-body        {:optional true} [:maybe ms/HttpRequestBody]]
+   [:query-parameters {:optional true} [:maybe ms/HttpQueryParams]]
+   [:request-options  {:optional true} [:maybe RequestOptions]]])
 
 (mu/defn- -client
   ;; Since the params for this function can get a little complicated make sure we validate them
@@ -263,36 +338,50 @@
     (update response :body parse-response)))
 
 (defn- read-streaming-response
+  "Read a streaming response, returning a map with `:body` and optionally `:status` if the streaming body
+   changed it (e.g. via `write-error!` setting a 4xx/5xx status)."
   [streaming-response content-type]
   (with-open [os (java.io.ByteArrayOutputStream.)]
-    (let [f             (.f ^StreamingResponse streaming-response)
-          canceled-chan (a/promise-chan)]
-      (f os canceled-chan)
-      (cond-> (.toByteArray os)
-        (some #(re-find % content-type) [#"json" #"text"])
-        (String. "UTF-8")))))
+    (let [f              (.f ^StreamingResponse streaming-response)
+          canceled-chan  (a/promise-chan)
+          status-atom    (atom nil)
+          mock-response  (reify HttpServletResponse
+                           (isCommitted [_] false)
+                           (setStatus [_ status] (reset! status-atom status))
+                           (setContentType [_ _])
+                           (setHeader [_ _ _]))]
+      (binding [streaming-response/*response* mock-response]
+        ;; hand `f` the same kind of output stream the Jetty path does, so it carries the response's
+        ;; `:error-response-fn` to `write-error!`
+        (f (#'streaming-response/delay-output-stream
+            (delay os)
+            (:error-response-fn (.options ^StreamingResponse streaming-response)))
+           canceled-chan))
+      {:body   (cond-> (.toByteArray os)
+                 (some #(re-find % content-type) [#"json" #"text"])
+                 (String. "UTF-8"))
+       :status @status-atom})))
 
 (defn- coerce-mock-response-body
   [response]
-  (update response
-          :body
-          (fn [body]
-            (cond
-              ;; read the text response
-              (instance? InputStream body)
-              (with-open [r (io/reader body)]
-                (slurp r))
+  (let [body (:body response)]
+    (cond
+      (instance? InputStream body)
+      (update response :body (fn [b] (with-open [r (io/reader b)] (slurp r))))
 
-              ;; read byte array stuffs like image
-              (instance? (Class/forName "[B") body)
-              (String. ^bytes body "UTF-8")
+      (instance? (Class/forName "[B") body)
+      (update response :body (fn [b] (String. ^bytes b "UTF-8")))
 
-              ;; Most APIs that execute a request returns a streaming response
-              (instance? StreamingResponse body)
-              (read-streaming-response body (get-in response [:headers "Content-Type"]))
+      ;; Most APIs that execute a request returns a streaming response.
+      ;; read-streaming-response returns {:body ..., :status ...} where :status may be
+      ;; non-nil if the streaming body set it (e.g. via write-error! on permission failure).
+      (instance? StreamingResponse body)
+      (let [{:keys [body status]} (read-streaming-response body (get-in response [:headers "Content-Type"]))]
+        (cond-> (assoc response :body body)
+          status (assoc :status status)))
 
-              :else
-              body))))
+      :else
+      response)))
 
 (defn- build-mock-request
   [{:keys [query-parameters url credentials http-body method request-options]}]
@@ -312,16 +401,17 @@
                            (str "/"))
         content-type     (get-in request-options [:headers "content-type"] "application/json")]
     (m/deep-merge
-     {:accept         "json"
-      :headers        {"content-type"                        content-type
-                       @#'mw.session/metabase-session-header (when credentials
-                                                               (if (map? credentials)
-                                                                 (authenticate credentials)
-                                                                 credentials))}
+     {:headers        (u/assoc-dissoc {"content-type" content-type}
+                                      @#'mw.session/metabase-session-header
+                                      (when credentials
+                                        (if (map? credentials)
+                                          (authenticate credentials)
+                                          credentials)))
       :query-string   (build-query-string query-parameters)
+      :remote-addr    "127.0.0.1"
       :request-method method
       :uri            (str *url-prefix* url)}
-     request-options
+     (select-keys request-options [:headers :cookies])
      (build-body-params http-body content-type))))
 
 (mu/defn- -mock-client
@@ -334,7 +424,7 @@
         _           (log/debug method-name (pr-str url) (pr-str request))
         thunk       (fn []
                       (try
-                        ((server.test-handler/test-handler) request coerce-mock-response-body (fn raise [e] (throw e)))
+                        ((test.server.handler/test-handler) request coerce-mock-response-body (fn raise [e] (throw e)))
                         (catch clojure.lang.ExceptionInfo e
                           (log/debug e method-name url)
                           (ex-data e))
@@ -383,6 +473,7 @@
       (:url parsed)              (update :url url-escape)
       ;; un-nest {:request-options {:request-options <my-options>}} => {:request-options <my-options>}
       (:request-options parsed)  (update :request-options :request-options)
+      (map? (:http-body parsed)) (update :http-body update-keys u/qualified-name)
       ;; convert query parameters into a flat map [{:k :a, :v 1} {:k :b, :v 2} {:k :b, :v 3}] => {:a 1, :b [2 3]}
       (:query-parameters parsed) (update :query-parameters (fn [query-params]
                                                              (update-vals (->> query-params
@@ -404,8 +495,12 @@
   [& args]
   (let [parsed (parse-http-client-args args)]
     (log/trace parsed)
-    (u/with-timeout response-timeout-ms
-      (-mock-client parsed))))
+    ;; despite no timeout, it is still important to run the server logic in a future, to ensure any server-set .interrupted flag
+    ;; does not influence subsequent client calls.
+    (try
+      @(future (-mock-client parsed))
+      (catch java.util.concurrent.ExecutionException ex
+        (throw (ex-cause ex))))))
 
 (defn client-real-response
   "Identical to `real-client` except returns the full HTTP response map, not just the body of the response."

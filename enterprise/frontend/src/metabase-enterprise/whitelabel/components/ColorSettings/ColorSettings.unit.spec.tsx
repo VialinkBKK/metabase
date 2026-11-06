@@ -2,97 +2,89 @@ import userEvent from "@testing-library/user-event";
 import Color from "color";
 
 import { render, screen } from "__support__/ui";
-import { color, colors } from "metabase/lib/colors/palette";
+import { color } from "metabase/ui/colors/palette";
+import type { ColorSettings as ColorSettingsType } from "metabase-types/api";
 
 import { ColorSettings } from "./ColorSettings";
 
+const BRAND = "#123456";
+const ACCENT1 = "#2A9D8F";
+const NEW_ACCENT1 = "#E76F51";
+const NEW_SUMMARIZE = "#8E44AD";
+
+const DEFAULT_COLORS = {
+  brand: BRAND,
+  accent1: ACCENT1,
+};
+
+interface SetupOpts {
+  initialColors?: ColorSettingsType;
+}
+
+const setup = ({ initialColors = DEFAULT_COLORS }: SetupOpts = {}) => {
+  const onChange = jest.fn();
+
+  render(<ColorSettings initialColors={initialColors} onChange={onChange} />);
+
+  return { onChange };
+};
+
 describe("ColorSettings", () => {
-  const initialColors = {
-    brand: color("success"),
-    accent1: color("text-medium"),
-  };
-
   it("should update brand colors", async () => {
-    const onChange = jest.fn();
+    const { onChange } = setup();
 
-    render(
-      <ColorSettings
-        initialColors={initialColors}
-        originalColors={colors}
-        onChange={onChange}
-      />,
+    const input = screen.getByPlaceholderText(
+      Color(color("core-summarize")).hex(),
     );
-
-    const input = screen.getByPlaceholderText(color("summarize"));
     await userEvent.clear(input);
-    await userEvent.type(input, color("error"));
+    await userEvent.type(input, NEW_SUMMARIZE);
 
     expect(onChange).toHaveBeenLastCalledWith({
-      brand: color("success"),
-      /* Needs to convert this to hex because the input is transform to hex,
-       * but we want to use hsla for our new colors, this is to allow better text search. */
-      summarize: Color(color("error")).hex(),
-      accent1: color("text-medium"),
+      brand: BRAND,
+      summarize: NEW_SUMMARIZE,
+      accent1: ACCENT1,
     });
   });
 
+  it("should drop the key when a brand color is cleared", async () => {
+    const { onChange } = setup();
+
+    await userEvent.clear(screen.getByDisplayValue(BRAND));
+
+    expect(onChange).toHaveBeenLastCalledWith({ accent1: ACCENT1 });
+  });
+
   it("should update chart colors", async () => {
-    const onChange = jest.fn();
+    const { onChange } = setup();
 
-    render(
-      <ColorSettings
-        initialColors={initialColors}
-        originalColors={colors}
-        onChange={onChange}
-      />,
-    );
-
-    const input = screen.getByDisplayValue(color("text-medium"));
+    const input = screen.getByDisplayValue(ACCENT1);
     await userEvent.clear(input);
-    await userEvent.type(input, color("text-light"));
+    await userEvent.type(input, NEW_ACCENT1);
 
     expect(onChange).toHaveBeenLastCalledWith({
-      brand: color("success"),
-      accent1: color("text-light"),
+      brand: BRAND,
+      accent1: NEW_ACCENT1,
     });
   });
 
   it("should reset chart colors", async () => {
-    const onChange = jest.fn();
-
-    render(
-      <ColorSettings
-        initialColors={initialColors}
-        originalColors={colors}
-        onChange={onChange}
-      />,
-    );
+    const { onChange } = setup();
 
     await userEvent.click(screen.getByText("Reset to default colors"));
     await userEvent.click(screen.getByText("Reset"));
 
-    expect(onChange).toHaveBeenLastCalledWith({
-      brand: color("success"),
-    });
+    expect(onChange).toHaveBeenLastCalledWith({ brand: BRAND });
   });
 
   it("should generate chart colors", async () => {
-    const onChange = jest.fn();
-
-    render(
-      <ColorSettings
-        initialColors={initialColors}
-        originalColors={colors}
-        onChange={onChange}
-      />,
-    );
+    const { onChange } = setup();
 
     await userEvent.click(screen.getByText("Generate chart colors"));
 
     expect(onChange).toHaveBeenLastCalledWith({
-      brand: color("success"),
+      brand: BRAND,
       accent0: expect.any(String),
-      accent1: color("text-medium"),
+      accent1: ACCENT1,
       accent2: expect.any(String),
       accent3: expect.any(String),
       accent4: expect.any(String),

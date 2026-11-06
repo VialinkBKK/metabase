@@ -10,6 +10,7 @@
    [metabase.driver.sql-jdbc.execute :as sql-jdbc.execute]
    [metabase.driver.sql.query-processor :as sql.qp]
    [metabase.lib.schema.common :as lib.schema.common]
+   [metabase.query-processor.schema :as qp.schema]
    [metabase.test :as mt]
    [metabase.test.data.interface :as tx]
    [metabase.test.data.sql :as sql.tx]
@@ -19,10 +20,14 @@
    [metabase.util :as u]
    [metabase.util.honey-sql-2 :as h2x]
    [metabase.util.log :as log]
-   [metabase.util.malli :as mu]
-   [metabase.util.malli.registry :as mr]))
+   [metabase.util.malli :as mu]))
 
 (set! *warn-on-reflection* true)
+
+(def ^:dynamic *disable-fk-checks*
+  "When bound to `true`, drivers that support it (e.g., MySQL) will disable foreign key checks during data insertion.
+   This is useful for tests that need to insert self-referencing data in a single batch."
+  false)
 
 (defmulti row-xform
   "Return a transducer that should be applied to each row when loading test data. Default is [[identity]], e.g. apply no
@@ -91,7 +96,7 @@
   []
   (let [id-counter (atom 0)]
     (map (fn [row]
-           (assoc row :id (swap! id-counter inc))))))
+           (assoc row "id" (swap! id-counter inc))))))
 
 (defn maybe-add-ids-xform
   "Like [[add-ids-xform]], but only adds `:id` to tables that don't have a `:pk` column."
@@ -104,8 +109,7 @@
   "Transform applied by default that converts each row from a vector to a map keyed by `:field-name` from the table
   definition."
   [tabledef]
-  (let [fields-for-insert (mapv (comp keyword :field-name)
-                                (:field-definitions tabledef))]
+  (let [fields-for-insert (mapv :field-name (:field-definitions tabledef))]
     (map (fn [row]
            (zipmap fields-for-insert row)))))
 
@@ -116,45 +120,38 @@
                      (ddl.i/format-name driver (u/qualified-name component)))]
     (sql.qp/->honeysql driver (apply h2x/identifier :table components))))
 
-(mr/def ::rf
-  [:function
-   [:=> [:cat]           :any]
-   [:=> [:cat :any]      :any]
-   [:=> [:cat :any :any] :any]])
-
-(mr/def ::xform
-  [:=> [:cat ::rf] ::rf])
-
 (mu/defn- reducible-chunked-rows :- (lib.schema.common/instance-of-class clojure.lang.IReduceInit)
-  [rows        :- [:sequential :any]    ; rows is allowed to be empty.
+  [rows        :- [:sequential [:or [:sequential ::tx/dataset-value] [:map-of :string ::tx/dataset-value]]]    ; rows is allowed to be empty.
    chunk-size  :- [:maybe [:int {:min 1}]]
-   row-xform   :- ::xform
-   chunk-xform :- ::xform]
+   row-xform   :- ::qp.schema/xform
+   chunk-xform :- ::qp.schema/xform]
   (let [xform (comp (map (fn [chunk]
                            (into [] row-xform chunk)))
                     chunk-xform)]
     (reify clojure.lang.IReduceInit
       (reduce [_this rf init]
-        (let [rf (xform rf)]
-          (if chunk-size
-            (transduce
-             (partition-all chunk-size)
-             ;; we are very deliberately not passing `rf` directly here, because calling the completing arity with it
-             ;; breaks things since we're not supposed to be doing that inside `reduce`. We have to use `transduce` here
-             ;; to get the `partition-all` transducer to work correctly tho which is why we're not just using reduce
-             (fn
-               ([acc]
-                acc)
-               ([acc chunk]
-                (rf acc chunk)))
-             init
-             rows)
-            (rf init rows)))))))
+        (if (empty? rows)
+          init
+          (let [rf (xform rf)]
+            (if chunk-size
+              (transduce
+               (partition-all chunk-size)
+               ;; we are very deliberately not passing `rf` directly here, because calling the completing arity with it
+               ;; breaks things since we're not supposed to be doing that inside `reduce`. We have to use `transduce` here
+               ;; to get the `partition-all` transducer to work correctly tho which is why we're not just using reduce
+               (fn
+                 ([acc]
+                  acc)
+                 ([acc chunk]
+                  (rf acc chunk)))
+               init
+               rows)
+              (rf init rows))))))))
 
 (mu/defn- reducible-chunks  :- (lib.schema.common/instance-of-class clojure.lang.IReduceInit)
   [driver   :- :keyword
-   dbdef    :- [:map [:database-name :string]]
-   tabledef :- [:map [:table-name :string]]]
+   dbdef    :- tx/DatabaseDefinitionSchema
+   tabledef :- tx/TableDefinitionSchema]
   (let [rows        (:rows tabledef)
         chunk-size  (chunk-size driver dbdef tabledef)
         row-xform   (comp
@@ -177,12 +174,13 @@
      init
      (reducible-chunks driver dbdef tabledef))))
 
-;;; default impl
-(mu/defmethod do-insert! :sql-jdbc/test-extensions
+(mu/defn do-insert*!
   [driver                    :- :keyword
    ^java.sql.Connection conn :- (lib.schema.common/instance-of-class java.sql.Connection)
-   table-identifier
-   rows]
+   table-identifier          :- ::h2x/expr
+   rows                      :- [:sequential [:map-of :string ::tx/dataset-value]]
+   {:keys [transaction?] :or {transaction? true}} :- [:maybe [:map {:closed true}
+                                                              [:transaction? {:optional true} [:maybe :boolean]]]]]
   (let [statements (ddl/insert-rows-dml-statements driver table-identifier rows)]
     ;; `set-parameters` might try to look at DB timezone; we don't want to do that while loading the data because the
     ;; DB hasn't been synced yet
@@ -201,14 +199,24 @@
         (try
           ;; TODO - why don't we use [[execute/execute-sql!]] here like we do below?
           ;; Tech Debt Issue: #39375
-          (jdbc/execute! {:connection conn} sql-args {:set-parameters (fn [stmt params]
-                                                                        (sql-jdbc.execute/set-parameters! driver stmt params))})
+          (jdbc/execute! {:connection conn
+                          :transaction? transaction?}
+                         sql-args {:set-parameters (fn [stmt params]
+                                                     (sql-jdbc.execute/set-parameters! driver stmt params))})
           (catch Throwable e
             (throw (ex-info (format "INSERT FAILED: %s" (ex-message e))
                             {:driver   driver
                              :sql-args (into [(str/split-lines (app-db/format-sql (first sql-args)))]
                                              (rest sql-args))}
                             e))))))))
+
+;;; default impl
+(mu/defmethod do-insert! :sql-jdbc/test-extensions
+  [driver                    :- :keyword
+   ^java.sql.Connection conn :- (lib.schema.common/instance-of-class java.sql.Connection)
+   table-identifier
+   rows]
+  (do-insert*! driver conn table-identifier rows nil))
 
 (defonce ^:private reference-load-durations
   (delay (edn/read-string (slurp "test_resources/load-durations.edn"))))
@@ -224,7 +232,9 @@
      {:write? true}
      (fn [^java.sql.Connection conn]
        ;; make sure we're committing right away, and NOT trying to execute these in a transaction
-       (.setAutoCommit conn true)
+       (try (.setAutoCommit conn true)
+            (catch Throwable __
+              (log/debugf "`.setAutoCommit` failed with engine `%s`" (name driver))))
        (doseq [statement statements]
          (execute/execute-sql! driver conn statement))))))
 
@@ -236,20 +246,21 @@
 
 (defn- create-db-load-data!
   "Load the data for each Table."
-  [driver ^java.sql.Connection conn {:keys [table-definitions] :as dbdef}]
-  (doseq [tabledef table-definitions
-          :let     [reference-duration (or (some-> (get @reference-load-durations [(:database-name dbdef) (:table-name tabledef)])
-                                                   u/format-nanoseconds)
-                                           "NONE")]]
-    (u/profile (format "load-data for %s %s %s (reference H2 duration: %s)"
-                       (name driver) (:database-name dbdef) (:table-name tabledef) reference-duration)
-      (try
-        (load-data-for-table-definition! driver conn dbdef tabledef)
-        (catch Throwable e
-          (throw (ex-info (format "Error loading data: %s" (ex-message e))
-                          {:driver driver, :tabledef (update tabledef :rows (fn [rows]
-                                                                              (concat (take 10 rows) ['...])))}
-                          e)))))))
+  [driver ^java.sql.Connection conn {:keys [table-definitions options] :as dbdef}]
+  (binding [*disable-fk-checks* (get options :disable-fk-checks false)]
+    (doseq [tabledef table-definitions
+            :let     [reference-duration (or (some-> (get @reference-load-durations [(:database-name dbdef) (:table-name tabledef)])
+                                                     u/format-nanoseconds)
+                                             "NONE")]]
+      (u/profile (format "load-data for %s %s %s (reference H2 duration: %s)"
+                         (name driver) (:database-name dbdef) (:table-name tabledef) reference-duration)
+        (try
+          (load-data-for-table-definition! driver conn dbdef tabledef)
+          (catch Throwable e
+            (throw (ex-info (format "Error loading data: %s" (ex-message e))
+                            {:driver driver, :tabledef (update tabledef :rows (fn [rows]
+                                                                                (concat (take 10 rows) ['...])))}
+                            e))))))))
 
 (defn create-db!
   "Default implementation of [[tx/create-db!]] for SQL drivers. Loads test data into a data

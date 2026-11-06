@@ -1,18 +1,24 @@
+import { createAction as createTypedAction } from "@reduxjs/toolkit";
+
 import { SIDEBAR_NAME } from "metabase/dashboard/constants";
-import { createAction, createThunkAction } from "metabase/lib/redux";
-import type { DashCardId } from "metabase-types/api";
+import { createAction, createThunkAction } from "metabase/redux";
 import type {
   DashboardSidebarName,
+  DashboardSidebarState,
   Dispatch,
   GetState,
-} from "metabase-types/store";
+} from "metabase/redux/store";
+import type { DashCardId } from "metabase-types/api";
 
 import { getSidebar } from "../selectors";
 
 import { closeAutoApplyFiltersToast } from "./parameters";
 
 export const SET_SIDEBAR = "metabase/dashboard/SET_SIDEBAR";
-export const setSidebar = createAction(SET_SIDEBAR);
+export const setSidebar = createTypedAction<{
+  name: DashboardSidebarName;
+  props?: DashboardSidebarState["props"];
+}>(SET_SIDEBAR);
 
 export const CLOSE_SIDEBAR = "metabase/dashboard/CLOSE_SIDEBAR";
 export const closeSidebar = createAction(CLOSE_SIDEBAR);

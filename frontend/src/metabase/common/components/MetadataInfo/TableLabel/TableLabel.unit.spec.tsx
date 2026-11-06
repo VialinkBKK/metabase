@@ -1,12 +1,12 @@
+import { createMockMetadataFromState } from "__support__/metadata";
+import { createMockState } from "__support__/state";
 import { createMockEntitiesState } from "__support__/store";
 import { renderWithProviders, screen } from "__support__/ui";
-import { checkNotNull } from "metabase/lib/types";
-import { getMetadata } from "metabase/selectors/metadata";
+import { checkNotNull } from "metabase/utils/types";
 import type { Table } from "metabase-types/api";
 import { createMockTable } from "metabase-types/api/mocks";
-import { createMockState } from "metabase-types/store/mocks";
 
-import TableLabel from "./TableLabel";
+import { TableLabel } from "./TableLabel";
 
 interface SetupOpts {
   table: Table;
@@ -19,7 +19,7 @@ const setup = ({ table }: SetupOpts) => {
     }),
   });
 
-  const metadata = getMetadata(state);
+  const metadata = createMockMetadataFromState(state);
 
   renderWithProviders(
     <TableLabel table={checkNotNull(metadata.table(table.id))} />,

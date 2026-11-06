@@ -1,19 +1,30 @@
 (ns metabase.models.interface
+  "Stuff useful to ALL models.
+
+    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    !!!                                                                                             !!!
+    !!! PLEASE DON'T ADD NEW TRANSFORMS HERE, GO PUT THEM IN RELEVANT MODULES THAT USE THEM INSTEAD !!!
+    !!!                                                                                             !!!
+    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
   (:require
    [buddy.core.codecs :as codecs]
    [clojure.core.memoize :as memoize]
+   [clojure.edn :as edn]
    [clojure.set :as set]
    [clojure.spec.alpha :as s]
    [clojure.string :as str]
    [clojure.walk :as walk]
+   [malli.core :as mc]
+   [malli.transform :as mtx]
    [medley.core :as m]
-   [metabase.legacy-mbql.normalize :as mbql.normalize]
-   [metabase.lib.binning :as lib.binning]
+   [metabase.app-db.core :as mdb]
+   [metabase.dependencies.hooks :as dependencies.hooks]
+   ;; Toucan out-transforms normalize stored legacy MBQL on read; needed until the app db is MBQL 5
+   ^{:clj-kondo/ignore [:discouraged-namespace]} [metabase.legacy-mbql.normalize :as mbql.normalize]
+   ;; stored card queries/refs are still legacy MBQL; validated against the legacy schema on read/write
+   ^{:clj-kondo/ignore [:discouraged-namespace]} [metabase.legacy-mbql.schema :as mbql.s]
    [metabase.lib.core :as lib]
-   [metabase.lib.metadata.protocols :as lib.metadata.protocols]
-   [metabase.lib.normalize :as lib.normalize]
-   [metabase.lib.schema.metadata :as lib.schema.metadata]
-   [metabase.lib.temporal-bucket :as lib.temporal-bucket]
+   [metabase.models.db :as models.db]
    [metabase.models.dispatch :as models.dispatch]
    [metabase.models.json-migration :as jm]
    [metabase.models.resolution]
@@ -28,15 +39,20 @@
    [metabase.util.string :as string]
    [methodical.core :as methodical]
    [potemkin :as p]
+   [toucan2.connection :as t2.conn]
    [toucan2.core :as t2]
    [toucan2.model :as t2.model]
+   [toucan2.pipeline :as t2.pipeline]
    [toucan2.protocols :as t2.protocols]
+   [toucan2.tools.before-delete :as t2.before-delete]
    [toucan2.tools.before-insert :as t2.before-insert]
+   [toucan2.tools.before-update :as t2.before-update]
    [toucan2.tools.hydrate :as t2.hydrate]
-   [toucan2.tools.identity-query :as t2.identity-query]
    [toucan2.util :as t2.u])
   (:import
    (java.sql Blob)
+   (java.time OffsetDateTime ZoneOffset)
+   (java.time.temporal ChronoUnit)
    (toucan2.instance Instance)))
 
 (set! *warn-on-reflection* true)
@@ -52,10 +68,11 @@
   model
   instance])
 
+#_{:clj-kondo/ignore [:metabase/discourage-dynamic-vars]}
 (def ^:dynamic *deserializing?*
   "This is dynamically bound to true when deserializing. A few pieces of the Toucan magic are undesirable for
-  deserialization. Most notably, we don't want to generate an `:entity_id`, as that would lead to duplicated entities
-  on a future deserialization."
+  deserialization and are skipped based on this var. (Entity ids are not one of them: the insert hook generates an
+  `:entity_id` whenever it is missing, deserializing or not — ingested entities carry their own.)"
   false)
 
 (def ^{:arglists '([x & _args])} dispatch-on-model
@@ -153,7 +170,7 @@
     (try
       (json/decode s keywordize-keys?)
       (catch Throwable e
-        (log/error e "Error parsing JSON")
+        (log/errorf "Error parsing JSON: %s" (ex-message e))
         s))
     s))
 
@@ -193,107 +210,31 @@
   {:in  json-in-with-eliding
    :out json-out-with-keywordization})
 
-(defn- serialize-mlv2-query
-  "Saving MLv2 queries​ we can assume MLv2 queries are normalized enough already, but remove the metadata provider before
-  saving it, because it's not something that lends itself well to serialization."
-  [query]
-  (dissoc query :lib/metadata))
-
-(defn- deserialize-mlv2-query
-  "Reading MLv2 queries​: normalize them, then attach a MetadataProvider based on their Database."
-  [query]
-  (let [metadata-provider (if (lib.metadata.protocols/metadata-provider? (:lib/metadata query))
-                            ;; in case someone passes in an already-normalized query to [[maybe-normalize-query]] below,
-                            ;; preserve the existing metadata provider.
-                            (:lib/metadata query)
-                            ((requiring-resolve 'metabase.lib-be.metadata.jvm/application-database-metadata-provider)
-                             (u/the-id (some #(get query %) [:database "database"]))))]
-    (lib/query metadata-provider query)))
-
-(mu/defn maybe-normalize-query
-  "For top-level query maps like `Card.dataset_query`. Normalizes them on the way in & out."
-  [in-or-out :- [:enum :in :out]
-   query]
-  (letfn [(normalize [query]
-            (let [f (if (= (lib/normalized-query-type query) :mbql/query)
-                      ;; MLv2 queries
-                      (case in-or-out
-                        :in  serialize-mlv2-query
-                        :out deserialize-mlv2-query)
-                      ;; legacy queries: just normalize them with the legacy normalization code for now... in the near
-                      ;; future we'll probably convert to MLv2 before saving so everything in the app DB is MLv2
-                      (case in-or-out
-                        :in  mbql.normalize/normalize
-                        :out mbql.normalize/normalize))]
-              (f query)))]
-    (cond-> query
-      (and (map? query) (seq query))
-      normalize)))
-
 (defn catch-normalization-exceptions
   "Wraps normalization fn `f` and returns a version that gracefully handles Exceptions during normalization. When
   invalid queries (etc.) come out of the Database, it's best we handle normalization failures gracefully rather than
   letting the Exception cause the entire API call to fail because of one bad object. (See #8914 for more details.)"
   [f]
-  (fn [query]
+  (fn [x]
     (try
-      (doall (f query))
+      (doall (f x))
       (catch Throwable e
-        (log/errorf e "Unable to normalize:\n%s" (u/pprint-to-str 'red query))
+        (log/errorf "Unable to normalize: %s" (ex-message e))
         nil))))
 
-(defn normalize-parameters-list
-  "Normalize `parameters` or `parameter-mappings` when coming out of the application database or in via an API request."
-  [parameters]
-  (or (mbql.normalize/normalize-fragment [:parameters] parameters)
-      []))
-
-(defn- keywordize-temporal_units
-  [parameter]
-  (m/update-existing parameter :temporal_units (fn [units] (mapv keyword units))))
-
-(defn normalize-card-parameters-list
-  "Normalize `parameters` of actions, cards, and dashboards when coming out of the application database."
-  [parameters]
-  (->> parameters
-       normalize-parameters-list
-       (mapv keywordize-temporal_units)))
-
-(def transform-metabase-query
-  "Transform for metabase-query."
-  {:in  (comp json-in (partial maybe-normalize-query :in))
-   :out (comp (catch-normalization-exceptions (partial maybe-normalize-query :out)) json-out-without-keywordization)})
-
-(def transform-parameters-list
-  "Transform for parameters list."
-  {:in  (comp json-in normalize-parameters-list)
-   :out (comp (catch-normalization-exceptions normalize-parameters-list) json-out-with-keywordization)})
-
-(def transform-card-parameters-list
-  "Transform for parameters list."
-  {:in  (comp json-in normalize-card-parameters-list)
-   :out (comp (catch-normalization-exceptions normalize-card-parameters-list) json-out-with-keywordization)})
-
-(def transform-field-ref
+(def ^{:deprecated "0.57.0"} transform-legacy-field-ref
   "Transform field refs"
   {:in  json-in
-   :out (comp (catch-normalization-exceptions mbql.normalize/normalize-field-ref) json-out-with-keywordization)})
-
-(defn- normalize-result-metadata-column [col]
-  (if (:lib/type col)
-    (lib.normalize/normalize ::lib.schema.metadata/column col)
-    (-> col
-        mbql.normalize/normalize-source-metadata
-        ;; This is necessary, because in the wild, there may be cards created prior to this change.
-        lib.temporal-bucket/ensure-temporal-unit-in-display-name
-        lib.binning/ensure-binning-in-display-name)))
+   ;; inside the deprecated transform itself; legacy refs from the app DB need the legacy normalizer
+   :out (comp (catch-normalization-exceptions #_{:clj-kondo/ignore [:deprecated-var]} mbql.normalize/normalize-field-ref)
+              json-out-with-keywordization)})
 
 (defn- result-metadata-out
   "Transform the Card result metadata as it comes out of the DB. Convert columns to keywords where appropriate."
   [metadata]
   ;; TODO -- can we make this whole thing a lazy seq?
   (when-let [metadata (not-empty (json-out-with-keywordization metadata))]
-    (not-empty (mapv normalize-result-metadata-column metadata))))
+    (not-empty (mapv lib/normalize-result-metadata-column metadata))))
 
 (def transform-result-metadata
   "Transform for card.result_metadata like columns."
@@ -305,109 +246,287 @@
   {:in  u/qualified-name
    :out keyword})
 
+(def transform-boolean
+  "Transform for booleans; a boolean computed in SQL comes back as a number from MySQL and MariaDB."
+  {:in  identity
+   :out (fn [v] (if (number? v) (pos? v) v))})
+
+(def transform-trim
+  "Transform that trims whitespace on input and output. Useful for fixed-width char columns that pad with spaces."
+  {:in  str/trim
+   :out str/trim})
+
 (def transform-json-no-keywordization
   "Transform for json-no-keywordization"
   {:in  json-in
    :out json-out-without-keywordization})
 
+(def transform-edn
+  "Transform that stores Clojure data as EDN strings. Preserves keywords, sets, and other
+   types that JSON cannot represent. Strings are assumed to already be EDN and passed through."
+  {:in  (fn [v] (cond (nil? v)    nil
+                      (string? v) v
+                      :else       (pr-str v)))
+   :out (fn [s] (when (string? s) (edn/read-string s)))})
+
 (mu/defn assert-enum
   "Assert that a value is one of the values in `enum`."
-  [enum :- [:set :any]
-   value]
+  [enum  :- [:set [:maybe [:or :keyword :string]]]
+   value :- [:maybe [:or :keyword :string]]]
   (when-not (contains? enum value)
     (throw (ex-info (format "Invalid value %s. Must be one of %s" value (str/join ", " enum)) {:status-code 400
                                                                                                :value       value}))))
 
+(mu/defn assert-optional-enum
+  "Assert that a value is one of the values in `enum` or `nil`."
+  [enum :- [:set [:or :keyword :string]]
+   value :- [:maybe [:or :keyword :string]]]
+  (when (some? value)
+    (assert-enum enum value)))
+
 (mu/defn assert-namespaced
   "Assert that a value is a namespaced keyword under `qualified-ns`."
   [qualified-ns :- string?
-   value]
+   value        :- [:or :keyword :string]]
   (when-not (= qualified-ns (-> value keyword namespace))
     (throw (ex-info (format "Must be a namespaced keyword under :%s, got: %s" qualified-ns value) {:status-code 400
                                                                                                    :value       value}))))
 
+(defn transform-validator-with-fixes
+  "Like [[transform-validator]], but applies `fixes` (a fn of old-value->new-value) before validation on both read
+   and write. Use this when an enum has been renamed and old values may still exist in the database or in
+   serialization exports."
+  [tf assert-fn fixes]
+  (-> tf
+      (update :out (fn [f]
+                     (fn [x]
+                       (let [out (fixes (f x))]
+                         (assert-fn out)
+                         out))))
+      (update :in (fn [f]
+                    (fn [x]
+                      (let [x (fixes x)]
+                        (assert-fn x)
+                        (f x)))))))
+
 (defn transform-validator
   "Given a transform, returns a transform that call `assert-fn` on the \"out\" value.
 
-  E.g: A keyword transfomer that throw an error if the value is not namespaced
+  E.g: A keyword transformer that throw an error if the value is not namespaced
     (transform-validator
       transform-keyword (fn [x]
       (when-not (-> x namespace some?)
         (throw (ex-info \"Value is not namespaced\")))))"
   [tf assert-fn]
-  (-> tf
-      ;; deserialization
-      (update :out (fn [f]
-                     (fn [x]
-                       (let [out (f x)]
-                         (assert-fn out)
-                         out))))
-      ;; serialization
-      (update :in (fn [f]
-                    (fn [x]
-                      (assert-fn x)
-                      (f x))))))
+  (transform-validator-with-fixes tf assert-fn identity))
 
 (def encrypted-json-in
   "Serialize encrypted json."
   (comp encryption/maybe-encrypt json-in))
 
 (defn encrypted-json-out
-  "Deserialize encrypted json."
+  "Deserialize encrypted json, requiring the value to be encrypted when `MB_ENCRYPTION_SECRET_KEY` is set (see
+  [[encryption/maybe-decrypt]]): a plaintext value at rest is rejected. A value that decrypts (or, with no key set,
+  passes through) but is not valid JSON is logged and returned as-is rather than crashing the read."
   [v]
   (let [decrypted (encryption/maybe-decrypt v)]
     (try
-      (json/decode+kw decrypted)
+      (some-> decrypted json/decode+kw)
       (catch Throwable e
         (if (or (encryption/possibly-encrypted-string? decrypted)
                 (encryption/possibly-encrypted-bytes? decrypted))
-          (log/error e "Could not decrypt encrypted field! Have you forgot to set MB_ENCRYPTION_SECRET_KEY?")
-          (log/error e "Error parsing JSON"))  ; same message as in `json-out`
+          (log/error "Could not decrypt encrypted field! Have you forgot to set MB_ENCRYPTION_SECRET_KEY?")
+          (log/errorf "Error parsing JSON: %s" (ex-message e)))
         v))))
 
-;; cache the decryption/JSON parsing because it's somewhat slow (~500µs vs ~100µs on a *fast* computer)
-;; cache the decrypted JSON for one hour
-(def ^:private cached-encrypted-json-out (memoize/ttl encrypted-json-out :ttl/threshold (* 60 60 1000)))
+(def ^:private cached-encrypted-json-out
+  (memoize/ttl encrypted-json-out :ttl/threshold (* 60 60 1000)))
 
-(def transform-encrypted-json
-  "Transform for encrypted json."
+(defn decrypt-error-context
+  "Wrap a decrypting transform `out-fn` so a failure names `source` (a \"table.column\" string) in the exception
+  message. The reader of an encrypted-at-rest column otherwise fails with a bare \"Expected an encrypted value...\"
+  that cannot be traced to a row without a debugger: only the message survives into the logs (ex-data is not
+  logged), so the source has to be part of it. The message never includes the value."
+  [source out-fn]
+  (fn [v]
+    (try
+      (out-fn v)
+      (catch Throwable e
+        (throw (ex-info (format "Error decrypting %s: %s" source (ex-message e))
+                        {:source source}
+                        e))))))
+
+(defn transform-encrypted-json
+  "Encrypted-json transform for the column named by `source` (a \"table.column\" string, used in decrypt error
+  messages). When `MB_ENCRYPTION_SECRET_KEY` is set, a plaintext value at rest is rejected on read."
+  [source]
   {:in  encrypted-json-in
-   :out cached-encrypted-json-out})
+   :out (decrypt-error-context source cached-encrypted-json-out)})
 
+(def ^:private json-schema-transformer
+  "The same [[malli.transform/json-transformer]] [[metabase.api.macros]] decodes request bodies with, so a
+  value has one JSON shape rather than one for the wire and another for the app DB."
+  (mtx/json-transformer))
+
+(defn- json-schema-encoder [schema]
+  (mr/cached ::json-schema-encoder schema #(mc/encoder schema json-schema-transformer)))
+
+(defn- json-schema-decoder [schema]
+  (mr/cached ::json-schema-decoder schema #(mc/decoder schema json-schema-transformer)))
+
+(defn transform-json-with-schema
+  "Like [[transform-json]], but runs the value through `schema`'s malli JSON encoder and decoder, so a column
+  can hold keywords and anything else JSON cannot carry on its own. `source` is a \"table.column\" string,
+  named in the log message when a blob cannot be read.
+
+  Values always go through `schema`; there is no string passthrough, since an already-encoded string would
+  skip the decode this transform exists to do.
+
+  An unreadable blob reads as `nil` rather than throwing, so one bad row cannot break a whole `t2/select`. It
+  is logged at `:log-level` (`:warn` by default); pass `:error` when a failure carries a security
+  consequence."
+  ([source schema]
+   (transform-json-with-schema source schema nil))
+
+  ([source schema {:keys [log-level] :or {log-level :warn}}]
+   {:in  (fn [v]
+           (when (some? v)
+             (json/encode ((json-schema-encoder schema) v))))
+    :out (fn [s]
+           (when (string? s)
+             (try
+               ((json-schema-decoder schema) (json/decode+kw s))
+               (catch Throwable e
+                 (if (= log-level :error)
+                   (log/errorf e "Failed to parse %s; returning nil" source)
+                   (log/warnf e "Failed to parse %s; returning nil" source))
+                 nil))))}))
+
+(defn transform-encrypted-json-with-schema
+  "[[transform-json-with-schema]] for a column that is also encrypted at rest. [[decrypt-error-context]] names
+  the column when a decrypt fails, instead of a bare \"Expected an encrypted value\".
+
+  Unlike [[transform-encrypted-json]], the decrypt is not memoized: that cache holds both ciphertext and
+  decoded value for an hour, which is the wrong trade for the unbounded blobs these columns tend to hold."
+  ([source schema]
+   (transform-encrypted-json-with-schema source schema nil))
+
+  ([source schema opts]
+   (let [{:keys [in out]} (transform-json-with-schema source schema opts)]
+     {:in  (comp encryption/maybe-encrypt in)
+      :out (comp out (decrypt-error-context source encryption/maybe-decrypt))})))
+
+(defn transform-encrypted-text
+  "Whole-column encrypted text transform for the column named by `source` (a \"table.column\" string, used in decrypt
+  error messages). When `MB_ENCRYPTION_SECRET_KEY` is set, a plaintext value at rest is rejected on read (see
+  [[encryption/maybe-decrypt]]) — a value written outside the encrypting path cannot stand in for a properly
+  encrypted one."
+  [source]
+  {:in  encryption/maybe-encrypt
+   :out (decrypt-error-context source encryption/maybe-decrypt)})
+
+;;; TODO (Cam 10/27/25) -- this stuff should be moved into a different module instead of the general models interface,
+;;; either `queries` or a new module along with [[metabase.models.visualization-settings]].
+(mr/def ::viz-settings-ref
+  "Apparently in some cases legacy viz settings keys can be wrapped in `[:ref ...]` e.g.
+
+    [:ref [:field 1 nil]]"
+  [:tuple
+   {:decode/normalize vec}
+   [:= {:decode/normalize keyword} :ref]
+   [:ref ::mbql.s/Reference]])
+
+(mr/def ::viz-settings-name
+  "Apparently in some cases legacy viz settings keys can be wrapped in `[:ref ...]` e.g.
+
+    [:ref [:field 1 nil]]"
+  [:tuple
+   {:decode/normalize vec}
+   [:= {:decode/normalize keyword} :name]
+   :string])
+
+;;; TODO (Cam 2026-02-18) move this out of the `models` module, it should either go into its own
+;;; `visualization-settings` module or into `queries` (so it can live with Saved Questions and friends). See
+;;; also [[metabase.models.visualization-settings]].
 (defn normalize-visualization-settings
   "The frontend uses JSON-serialized versions of MBQL clauses as keys in `:column_settings`. This normalizes them
-   to modern MBQL clauses so things work correctly."
+   to MBQL 4 clauses so things work correctly."
   [viz-settings]
   (letfn [(normalize-column-settings-key [k]
-            (some-> k u/qualified-name json/decode mbql.normalize/normalize json/encode))
+            (some-> k
+                    u/qualified-name
+                    json/decode
+                    ((fn [x]
+                       (cond
+                         (not (sequential? x)) x
+                         (= (first x) "ref")   (lib/normalize ::viz-settings-ref x)
+                         (= (first x) "name")  (lib/normalize ::viz-settings-name x)
+                         :else                 (try
+                                                 (mbql.normalize/normalize x)
+                                                 (catch Throwable e
+                                                   (log/debugf "Error normalizing column settings key %s: %s" (pr-str x) (ex-message e))
+                                                   nil)))))
+                    json/encode))
           (normalize-column-settings [column-settings]
-            (into {} (for [[k v] column-settings]
-                       [(normalize-column-settings-key k) (walk/keywordize-keys v)])))
+            (into {} (for [[k v] column-settings
+                           ;; remove nil (bad) keys
+                           :let  [k (normalize-column-settings-key k)]
+                           :when (some? k)]
+                       [k (walk/keywordize-keys v)])))
           (mbql-field-clause? [form]
             (and (vector? form)
-                 (#{"field-id" "fk->" "datetime-field" "joined-field" "binning-strategy" "field"
-                    "aggregation" "expression"}
+                 (#{"field-id"
+                    "fk->"
+                    "datetime-field"
+                    "joined-field"
+                    "binning-strategy"
+                    "field"
+                    "aggregation"
+                    "expression"}
                   (first form))))
           (normalize-mbql-clauses [form]
-            (walk/postwalk
-             (fn [form]
-               (try
-                 (cond-> form
-                   (mbql-field-clause? form) mbql.normalize/normalize)
-                 (catch Exception e
-                   (log/warnf "Unable to normalize visualization-settings part %s: %s"
-                              (u/pprint-to-str 'red form)
-                              (ex-message e))
-                   form)))
-             form))]
-    (cond-> (walk/keywordize-keys (dissoc viz-settings "column_settings" "graph.metrics"))
-      ;; "key" is an old unused value
-      true                                 (m/update-existing :table.columns (fn [cols] (mapv #(dissoc % :key) cols)))
-      (get viz-settings "column_settings") (assoc :column_settings (normalize-column-settings (get viz-settings "column_settings")))
-      true                                 normalize-mbql-clauses
-      ;; exclude graph.metrics from normalization as it may start with
-      ;; the word "expression" but it is not MBQL (metabase#15882)
-      (get viz-settings "graph.metrics")   (assoc :graph.metrics (get viz-settings "graph.metrics")))))
+            (cond
+              (mbql-field-clause? form)
+              (try
+                (mbql.normalize/normalize form)
+                (catch Exception e
+                  (log/warnf "Unable to normalize visualization-settings part %s: %s"
+                             (pr-str form)
+                             (ex-message e))
+                  form))
+
+              (sequential? form)
+              (into (empty form) (map normalize-mbql-clauses) form)
+
+              (map? form)
+              (into (empty form)
+                    (map (fn [[k v]]
+                           ;; don't recurse into `:columns` if they are COLUMN NAMES! -- if the first column name is
+                           ;; something like "expression" then we don't want to accidentally treat it as an
+                           ;; `:expression` ref. Some `:columns` lists is viz settings do contain MBQL clauses
+                           ;; tho :unamused:
+                           (let [column-names? (and (= k :columns)
+                                                    (sequential? v)
+                                                    (every? (complement mbql-field-clause?) v))]
+                             [k (cond-> v
+                                  (not column-names?) normalize-mbql-clauses)])))
+                    form)
+
+              :else
+              form))]
+    (->
+     viz-settings
+     (dissoc "column_settings" "graph.metrics")
+     walk/keywordize-keys
+     ;; "key" is an old unused value
+     (m/update-existing :table.columns (fn [cols] (mapv #(dissoc % :key) cols)))
+     (cond-> (get viz-settings "column_settings")
+       (assoc :column_settings (normalize-column-settings (get viz-settings "column_settings"))))
+     normalize-mbql-clauses
+     ;; exclude graph.metrics from normalization as it may start with the word "expression" but it is not
+     ;; MBQL (metabase#15882)
+     (cond-> (get viz-settings "graph.metrics")
+       (assoc :graph.metrics (get viz-settings "graph.metrics"))))))
 
 (jm/def-json-migration migrate-viz-settings*)
 
@@ -457,10 +576,12 @@
     (blob->bytes v)
     v))
 
-(def transform-secret-value
-  "Transform for secret value."
+(defn transform-secret-value
+  "Transform for a secret `^bytes` column named by `source` (a \"table.column\" string, used in decrypt error
+  messages). When `MB_ENCRYPTION_SECRET_KEY` is set, a plaintext value at rest is rejected on read."
+  [source]
   {:in  (comp encryption/maybe-encrypt-bytes codecs/to-bytes)
-   :out (comp encryption/maybe-decrypt maybe-blob->bytes)})
+   :out (decrypt-error-context source (comp encryption/maybe-decrypt-bytes maybe-blob->bytes))})
 
 #_(defn decompress
     "Decompress `compressed-bytes`."
@@ -478,6 +599,12 @@
     {:in identity
      :out decompress})
 
+;;; !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+;;; !!!                                                                                             !!!
+;;; !!! PLEASE DON'T ADD NEW TRANSFORMS HERE, GO PUT THEM IN RELEVANT MODULES THAT USE THEM INSTEAD !!!
+;;; !!!                                                                                             !!!
+;;; !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
 ;; --- predefined hooks
 
 (defmulti non-timestamped-fields
@@ -494,7 +621,20 @@
   and H2 and `now(6)` for MySQL/MariaDB (`now()` for MySQL only return second resolution; `now(6)` uses the
   max (nanosecond) resolution)."
   []
-  (h2x/current-datetime-honeysql-form ((requiring-resolve 'metabase.app-db.core/db-type))))
+  (h2x/current-datetime-honeysql-form (mdb/db-type)))
+
+(defn ->integer
+  "Return a HoneySQL form casting `expr` to an integer in the app DB: `SIGNED` for MySQL/MariaDB, which have no
+  `INTEGER` cast type."
+  [expr]
+  [:cast expr (case (mdb/db-type)
+                :mysql :signed
+                :integer)])
+
+(defn current-timestamp
+  "The current moment in UTC at the microsecond precision of the app DB's timestamp columns, so it reads back unchanged."
+  []
+  (.truncatedTo (OffsetDateTime/now ZoneOffset/UTC) ChronoUnit/MICROS))
 
 (defn- add-created-at-timestamp [obj & _]
   (cond-> obj
@@ -538,12 +678,8 @@
       add-updated-at-timestamp))
 
 (defn- add-entity-id [obj & _]
-  (if (or (contains? obj :entity_id)
-          *deserializing?*)
-    ;; Don't generate a new entity_id if either: (a) there's already one set; or (b) we're deserializing.
-    ;; Generating them at deserialization time can lead to duplicated entities if they're deserialized again.
-    obj
-    (assoc obj :entity_id (u/generate-nano-id))))
+  (cond-> obj
+    (nil? (:entity_id obj)) (assoc :entity_id (u/generate-nano-id))))
 
 (t2/define-before-insert :hook/entity-id
   [instance]
@@ -554,6 +690,37 @@
 (methodical/prefer-method! #'t2.before-insert/before-insert :hook/updated-at-timestamped? :hook/entity-id)
 (methodical/prefer-method! #'t2.before-insert/before-insert :hook/created-at-timestamped? :hook/entity-id)
 
+(t2/define-before-insert :hook/dependencies
+  [instance]
+  (dependencies.hooks/before-insert &model instance)
+  instance)
+
+(t2/define-before-update :hook/dependencies
+  [instance]
+  (dependencies.hooks/before-update &model instance)
+  instance)
+
+(methodical/defmethod t2.pipeline/transduce-query :around [:toucan.query-type/update.* :hook/dependencies :default]
+  "Run the before-update hooks of a `:hook/dependencies` model in the transaction of its UPDATE, which Toucan otherwise
+  opens only after them, so the dependency marks commit or roll back with the UPDATE and after-commit work sees it."
+  [rf query-type model parsed-args resolved-query]
+  (t2.conn/with-transaction [_conn nil {:nested-transaction-rule :ignore}]
+    (next-method rf query-type model parsed-args resolved-query)))
+
+(t2/define-before-delete :hook/dependencies
+  [instance]
+  instance)
+
+(methodical/defmethod t2.before-delete/before-delete :before :hook/dependencies
+  [model instance]
+  (dependencies.hooks/before-delete model instance)
+  instance)
+
+(doseq [hook [:hook/timestamped? :hook/created-at-timestamped? :hook/updated-at-timestamped? :hook/entity-id]]
+  (methodical/prefer-method! #'t2.before-insert/before-insert hook :hook/dependencies))
+
+(doseq [hook [:hook/timestamped? :hook/updated-at-timestamped?]]
+  (methodical/prefer-method! #'t2.before-update/before-update hook :hook/dependencies))
 ;; --- helper fns
 (defn changes-with-pk
   "The row merged with the changes in pre-update hooks.
@@ -568,7 +735,7 @@
   {:pre [(map? row-map)]}
   (let [model (t2/resolve-model modelable)]
     (try
-      (t2/select-one model (t2.identity-query/identity-query [row-map]))
+      (models.db/after-select-via-identity-query {:model model :row row-map})
       (catch Throwable e
         (throw (ex-info (format "Error doing after-select for model %s: %s" model (ex-message e))
                         {:model model}
@@ -619,12 +786,37 @@
   {:arglists '([instance] [model pk])}
   dispatch-on-model)
 
+(defmulti can-query?
+  "Return whether [[metabase.api.common/*current-user*]] has *query* permissions for an object (i.e., can run
+  queries against it). This is separate from [[can-read?]] which determines if the user can see the object's
+  metadata.
+
+  For data model entities like Tables and Databases, `can-read?` means 'can see metadata' while `can-query?`
+  means 'can execute queries against'. For collection entities, `can-query?` typically falls back to `can-read?`.
+
+  The default implementation falls back to [[can-read?]] for backward compatibility."
+  {:arglists '([instance] [model pk])}
+  dispatch-on-model)
+
+(defmethod can-query? :default
+  ;; Default implementation: fall back to can-read? for backward compatibility
+  ([instance]
+   (can-read? instance))
+  ([model pk]
+   (can-read? model pk)))
+
+;; only reached through the :can_write hydration key, never called by name
 #_{:clj-kondo/ignore [:unused-private-var]}
 (define-simple-hydration-method ^:private hydrate-can-write
   :can_write
   "Hydration method for `:can_write`."
   [instance]
   (can-write? instance))
+
+(methodical/defmethod t2/simple-hydrate [:default :can_query]
+  "Hydration method for `:can_query`. Returns whether the current user can execute queries against this object."
+  [_model k instance]
+  (assoc instance k (can-query? instance)))
 
 (defmulti can-create?
   "NEW! Check whether or not current user is allowed to CREATE a new instance of `model` with properties in map
@@ -663,10 +855,12 @@
          "Please consider adding one. See dox for `can-update?` for more details."))))
 
 (defmulti visible-filter-clause
-  "Return a honey SQL query fragment that will limit another query to only selecting records visible to the supplied user
-  by filtering on a supplied column or honeysql expression, using a the map of permission type->minimum permission-level.
+  "Return a map with:
+   - :clause - honey SQL WHERE clause fragment to filter records visible to the user
+   - :with - optional vector of CTE definitions [[name query] ...] to be merged into the query
 
-  Defaults to returning a no-op false statement 0=1."
+  Uses the map of permission type->minimum permission-level for filtering.
+  Defaults to returning a no-op false statement {:clause [:= 0 1]}."
   {:arglists '([model column-or-exp user-info perm-type->perm-level])}
   dispatch-on-model)
 
@@ -693,17 +887,19 @@
     a-model       :- qualified-keyword?
     object-id     :- [:or pos-int? string?]]
    (or (current-user-has-root-permissions?)
-       (check-perms-with-fn fn-symb read-or-write (t2/select-one a-model (first (t2/primary-keys a-model)) object-id))))
+       (check-perms-with-fn fn-symb read-or-write (models.db/entity-by-pk a-model (first (t2/primary-keys a-model)) object-id))))
 
   ([fn-symb       :- qualified-symbol?
     read-or-write :- [:enum :read :write]
-    object        :- :map]
+    object        :- [:maybe [:fn {:error/message "a Toucan instance or model-like record"}
+                              #(some? (t2.protocols/model %))]]]
    (and object
         (check-perms-with-fn fn-symb (perms-objects-set object read-or-write))))
 
   ([fn-symb   :- qualified-symbol?
     perms-set :- [:set :string]]
-   (let [f (requiring-resolve fn-symb)]
+   ;; resolves the permissions implementation lazily to avoid a models -> permissions load cycle
+   (let [f #_{:clj-kondo/ignore [:metabase/modules]} (requiring-resolve fn-symb)]
      (assert f)
      (u/prog1 (f (current-user-permissions-set) perms-set)
        (log/tracef "Perms check: %s -> %s" (pr-str (list fn-symb (current-user-permissions-set) perms-set)) <>)))))
@@ -757,7 +953,7 @@
 
 (defmethod visible-filter-clause :default
   [_m _column-or-expression _user-info _perm-type->perm-level]
-  [:= [:inline 0] [:inline 1]])
+  {:clause [:= [:inline 0] [:inline 1]]})
 
 ;;;; [[to-json]]
 
@@ -787,6 +983,11 @@
   [_original-model dest-key _hydrated-key]
   [(u/->snake_case_en (keyword (str (name dest-key) "_id")))])
 
+(mr/def ::hydratable-item
+  "An item to hydrate: usually a Toucan instance, but callers may pass a plain map (or nil, for a sparse position)
+  since this helper only assocs a hydration key onto it."
+  [:maybe [:map {:closed false, ::mr/deliberately-open true, :description "a Toucan instance or a plain map"}]])
+
 (mu/defn instances-with-hydrated-data
   ;; TODO: this example is wrong, we don't get a vector of tables
   "Helper function to write batched hydrations.
@@ -801,11 +1002,13 @@
            {:id 2 :tables [...tables-from-db-2]}]
 
   - key->hydrated-items-fn: is a function that returns a map with key is `instance-key` and value is the hydrated data of that instance."
-  [instances                      :- [:sequential :any]
+  [instances                      :- [:sequential ::hydratable-item]
    hydration-key                  :- :keyword
    instance-key->hydrated-data-fn :- fn?
    instance-key                   :- :keyword
-   & [{:keys [default] :as _options}]]
+   & [{:keys [default] :as _options}] :- [:* [:map {:closed true}
+                                              [:default {:optional true}
+                                               [:maybe [:or :boolean number? [:map {:closed true}] [:= []]]]]]]]
   (when (seq instances)
     (let [key->hydrated-items (instance-key->hydrated-data-fn)]
       (for [item instances]

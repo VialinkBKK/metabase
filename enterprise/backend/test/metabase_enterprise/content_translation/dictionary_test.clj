@@ -82,7 +82,6 @@
     (is (#'dictionary/is-msgstr-usable "Hello"))
     (is (#'dictionary/is-msgstr-usable "Hello, world!"))
     (is (#'dictionary/is-msgstr-usable "123")))
-
   (testing "Unusable translations"
     (is (not (#'dictionary/is-msgstr-usable "")))
     (is (not (#'dictionary/is-msgstr-usable "   ")))
@@ -112,12 +111,23 @@
     (testing "Reads CSV with invalid header row and throws informative error"
       (let [file (.getBytes "Language,String,\"Translation\"X")] ; character outside quotation marks
         (is (thrown-with-msg?
-             Exception #"Row 1.*CSV error.*unexpected character.*X"
+             Exception #"Error parsing CSV at row 1.*unexpected character.*X"
+             (dictionary/read-and-import-csv! file)))))
+    (testing "Reads CSV with invalid header name and throws informative error"
+      (let [file (.getBytes "Loca,String,Translation\nes-mx,hello,hola")] ; bad header
+        (is (thrown-with-msg?
+             Exception #"This file could not be uploaded due to the following error\(s\):"
              (dictionary/read-and-import-csv! file)))))
     (testing "Reads CSV with invalid data row and throws informative error"
       (let [file (.getBytes "Language,String,Translation\nde,Title,Titel\nde,Vendor,\"Anbieter\"X")] ; character outside quotation marks
         (is (thrown-with-msg?
-             Exception #"Row 3.*CSV error.*unexpected character.*X"
+             Exception #"Error parsing CSV at row 3.*unexpected character.*X"
+             (dictionary/read-and-import-csv! file)))))
+    (testing "Parse-error row number counts logical rows, not physical lines (a quoted multi-line row counts as 1)"
+      ;; Header (row 1) + a 2-physical-line quoted row (row 2) + a broken row (row 3) → error should name row 3.
+      (let [file (.getBytes "Language,String,Translation\nde,\"line one\nline two\",Titel\nde,Vendor,\"Anbieter\"X")]
+        (is (thrown-with-msg?
+             Exception #"Error parsing CSV at row 3.*unexpected character.*X"
              (dictionary/read-and-import-csv! file)))))))
 
 (deftest read-and-import-csv-with-and-without-header-test
@@ -131,7 +141,6 @@
           (let [translations (get-translations)]
             (is (some #(and (= (:locale %) "es") (= (:msgid %) "Hello") (= (:msgstr %) "Hola")) translations))
             (is (some #(and (= (:locale %) "fr") (= (:msgid %) "Goodbye") (= (:msgstr %) "Au revoir")) translations))))))
-
     (testing "CSV without header row is imported correctly"
       (mt/with-premium-features #{:content-translation}
         (let [csv-without-header "de,Thank you,Danke\nit,Good morning,Buongiorno"
@@ -141,7 +150,6 @@
           (let [translations (get-translations)]
             (is (some #(and (= (:locale %) "de") (= (:msgid %) "Thank you") (= (:msgstr %) "Danke")) translations))
             (is (some #(and (= (:locale %) "it") (= (:msgid %) "Good morning") (= (:msgstr %) "Buongiorno")) translations))))))
-
     (testing "CSV with headers in different order is imported correctly"
       (mt/with-premium-features #{:content-translation}
         (let [csv-different-order "Translation,Language,String\nHola,es,Hello\nAu revoir,fr,Goodbye"
@@ -152,24 +160,120 @@
             (is (some #(and (= (:locale %) "es") (= (:msgid %) "Hello") (= (:msgstr %) "Hola")) translations))
             (is (some #(and (= (:locale %) "fr") (= (:msgid %) "Goodbye") (= (:msgstr %) "Au revoir")) translations))))))))
 
-(deftest ^:parallel format-row-test
+(deftest read-and-import-csv-multiline-fields-test
+  (ct-utils/with-clean-translations!
+    (testing "CSV with newlines inside quoted fields is imported with the newlines preserved (EMB-1654)"
+      (mt/with-premium-features #{:content-translation}
+        ;; The msgid mirrors the shape of a multi-line markdown text card: a heading followed by
+        ;; an image link, separated by a real newline. Before the fix, the file-level reader split
+        ;; on every physical newline and each half failed to parse as its own CSV row.
+        (let [msgid "##### in partnership with ▸\n[![Logo](https://example.com/logo.png)](https://example.com)"
+              msgstr "##### en partenariat avec ▸\n[![Logo](https://example.com/logo.png)](https://example.com)"
+              csv (str "Language,String,Translation\n"
+                       "fr,\"" msgid "\",\"" msgstr "\"")
+              file (.getBytes csv)]
+          (dictionary/read-and-import-csv! file)
+          (is (= 1 (count-translations)))
+          (let [translation (first (get-translations))]
+            (is (= "fr" (:locale translation)))
+            (is (= msgid (:msgid translation)))
+            (is (= msgstr (:msgstr translation)))))))))
+
+(deftest read-and-import-csv-different-locale-headers-test
+  (ct-utils/with-clean-translations!
+    (testing "CSV with 'locale' header is imported correctly"
+      (mt/with-premium-features #{:content-translation}
+        (let [csv-with-locale "locale,string,translation\nes,Hello,Hola\nfr,Goodbye,Au revoir"
+              file (.getBytes csv-with-locale)]
+          (dictionary/read-and-import-csv! file)
+          (is (= 2 (count-translations)))
+          (let [translations (get-translations)]
+            (is (some #(and (= (:locale %) "es") (= (:msgid %) "Hello") (= (:msgstr %) "Hola")) translations))
+            (is (some #(and (= (:locale %) "fr") (= (:msgid %) "Goodbye") (= (:msgstr %) "Au revoir")) translations))))))
+    (testing "CSV with 'locale code' header is imported correctly"
+      (mt/with-premium-features #{:content-translation}
+        (let [csv-with-locale-code "locale code,string,translation\nde,Thank you,Danke\nit,Good morning,Buongiorno"
+              file (.getBytes csv-with-locale-code)]
+          (dictionary/read-and-import-csv! file)
+          (is (= 2 (count-translations)))
+          (let [translations (get-translations)]
+            (is (some #(and (= (:locale %) "de") (= (:msgid %) "Thank you") (= (:msgstr %) "Danke")) translations))
+            (is (some #(and (= (:locale %) "it") (= (:msgid %) "Good morning") (= (:msgstr %) "Buongiorno")) translations))))))
+    (testing "CSV with 'language' header is imported correctly"
+      (mt/with-premium-features #{:content-translation}
+        (let [csv-with-language "language,string,translation\npt_BR,Welcome,Bem-vindo\nzh_CN,Hello,你好"
+              file (.getBytes csv-with-language)]
+          (dictionary/read-and-import-csv! file)
+          (is (= 2 (count-translations)))
+          (let [translations (get-translations)]
+            (is (some #(and (= (:locale %) "pt_BR") (= (:msgid %) "Welcome") (= (:msgstr %) "Bem-vindo")) translations))
+            (is (some #(and (= (:locale %) "zh_CN") (= (:msgid %) "Hello") (= (:msgstr %) "你好")) translations))))))))
+
+(deftest ^:parallel format-row-locale-standardization-test
   (testing "Format function standardizes locale"
     (is (=
          ["pt_BR" "msgid" "msgstr"]
-         (#'dictionary/format-row [:language :string :translation] ["pt-br" "msgid" "msgstr"])))
+         (#'dictionary/format-row ["language" "string" "translation"] ["pt-br" "msgid" "msgstr"])))
     (is (=
          ["pt_BR" "msgid" "msgstr"]
-         (#'dictionary/format-row [:language :string :translation] ["Pt-bR" "msgid" "msgstr"])))
+         (#'dictionary/format-row ["language" "string" "translation"] ["Pt-bR" "msgid" "msgstr"])))
     (is (=
          ["pt_BR" "msgid" "msgstr"]
-         (#'dictionary/format-row [:language :string :translation] ["pt_br" "msgid" "msgstr"])))
+         (#'dictionary/format-row ["language" "string" "translation"] ["pt_br" "msgid" "msgstr"])))
     (is (=
          ["zh_CN" "msgid" "msgstr"]
-         (#'dictionary/format-row [:language :string :translation] ["ZH-cn" "msgid" "msgstr"]))))
+         (#'dictionary/format-row ["language" "string" "translation"] ["ZH-cn" "msgid" "msgstr"])))))
+
+(deftest ^:parallel format-row-trimming-test
   (testing "Format function trims all fields"
     (is (=
          ["pt_BR" "msgid" "msgstr"]
-         (#'dictionary/format-row [:language :string :translation] [" pt-BR " "msgid " " msgstr"])))))
+         (#'dictionary/format-row ["language" "string" "translation"] [" pt-BR " "msgid " " msgstr"])))))
+
+(deftest ^:parallel format-row-header-names-test
+  (testing "Format function works with different locale header names"
+    (is (=
+         ["pt_BR" "msgid" "msgstr"]
+         (#'dictionary/format-row ["locale" "string" "translation"] ["pt-br" "msgid" "msgstr"])))
+    (is (=
+         ["pt_BR" "msgid" "msgstr"]
+         (#'dictionary/format-row ["locale code" "string" "translation"] ["pt-br" "msgid" "msgstr"])))
+    (is (=
+         ["pt_BR" "msgid" "msgstr"]
+         (#'dictionary/format-row ["language" "string" "translation"] ["pt-br" "msgid" "msgstr"])))))
+
+(deftest ^:parallel format-row-field-order-test
+  (testing "Format function extracts fields in correct order regardless of input order"
+    (is (=
+         ["es" "Hello" "Hola"]
+         (#'dictionary/format-row ["language" "string" "translation"] ["es" "Hello" "Hola"])))
+    (is (=
+         ["es" "Hello" "Hola"]
+         (#'dictionary/format-row ["string" "language" "translation"] ["Hello" "es" "Hola"])))
+    (is (=
+         ["es" "Hello" "Hola"]
+         (#'dictionary/format-row ["translation" "string" "language"] ["Hola" "Hello" "es"])))
+    (is (=
+         ["es" "Hello" "Hola"]
+         (#'dictionary/format-row ["string" "translation" "language"] ["Hello" "Hola" "es"])))
+    (is (=
+         ["es" "Hello" "Hola"]
+         (#'dictionary/format-row ["language" "translation" "string"] ["es" "Hola" "Hello"])))
+    (is (=
+         ["es" "Hello" "Hola"]
+         (#'dictionary/format-row ["translation" "language" "string"] ["Hola" "es" "Hello"])))))
+
+(deftest ^:parallel format-row-mixed-headers-order-test
+  (testing "Format function works with different locale header names in different orders"
+    (is (=
+         ["fr" "Goodbye" "Au revoir"]
+         (#'dictionary/format-row ["locale" "string" "translation"] ["fr" "Goodbye" "Au revoir"])))
+    (is (=
+         ["fr" "Goodbye" "Au revoir"]
+         (#'dictionary/format-row ["string" "locale" "translation"] ["Goodbye" "fr" "Au revoir"])))
+    (is (=
+         ["fr" "Goodbye" "Au revoir"]
+         (#'dictionary/format-row ["locale code" "translation" "string"] ["fr" "Au revoir" "Goodbye"])))))
 
 (deftest import-translations-success-test
   (ct-utils/with-clean-translations!
@@ -181,7 +285,6 @@
                     ["pt-br" "Thank you" "Obrigado"]]]
           (#'dictionary/import-translations! rows)
           (is (= 4 (count-translations)) "All translations should be imported")
-
           (let [translations (get-translations)]
             (is (some #(and (= (:locale %) "es")
                             (= (:msgid %) "Hello")
@@ -210,6 +313,21 @@
             (is (not (some #(= (:msgstr %) "") translations)))
             (is (not (some #(= (:msgstr %) "   ") translations)))
             (is (not (some #(= (:msgstr %) ",,,") translations)))))))))
+
+(deftest import-translations-failure-leaves-existing-untouched-test
+  (ct-utils/with-clean-translations!
+    (testing "A failed import leaves previously stored translations intact"
+      (mt/with-premium-features #{:content-translation}
+        (#'dictionary/import-translations! [["de" "Cat" "Katze"]])
+        (is (= 1 (count-translations)))
+        (is (thrown-with-msg?
+             clojure.lang.ExceptionInfo
+             #"The file could not be uploaded due to the following error"
+             (#'dictionary/import-translations! [["invalidlocale" "Dog" "Hund"]])))
+        (is (= 1 (count-translations)) "original row survives the failed import")
+        (let [translations (get-translations)]
+          (is (some #(and (= (:locale %) "de") (= (:msgid %) "Cat") (= (:msgstr %) "Katze")) translations))
+          (is (not (some #(= (:msgid %) "Dog") translations))))))))
 
 (deftest import-translations-error-test
   (ct-utils/with-clean-translations!

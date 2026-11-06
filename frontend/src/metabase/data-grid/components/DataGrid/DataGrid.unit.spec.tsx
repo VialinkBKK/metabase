@@ -1,3 +1,4 @@
+import Color from "color";
 import { type MouseEvent, useMemo } from "react";
 
 import {
@@ -10,6 +11,7 @@ import {
 } from "__support__/ui";
 import {
   type ColumnOptions,
+  type DataGridTheme,
   type RowIdColumnOptions,
   useDataGridInstance,
 } from "metabase/data-grid";
@@ -53,6 +55,11 @@ interface TestDataGridProps {
   enableRowId?: boolean;
   sortableColumns?: boolean;
   wrapableColumns?: string[];
+  enableSelection?: boolean;
+  striped?: boolean;
+  theme?: DataGridTheme;
+  pinnedTopRowsCount?: number;
+  pinnedLeftColumnsCount?: number;
 }
 
 const TestDataGrid = ({
@@ -66,6 +73,11 @@ const TestDataGrid = ({
   enableRowId = false,
   sortableColumns = false,
   wrapableColumns = [],
+  enableSelection = false,
+  striped = false,
+  theme,
+  pinnedTopRowsCount,
+  pinnedLeftColumnsCount,
 }: TestDataGridProps) => {
   const columns: ColumnOptions<SampleDataType>[] = useMemo(
     () => [
@@ -116,11 +128,12 @@ const TestDataGrid = ({
     [sortableColumns, wrapableColumns],
   );
 
-  const rowId: RowIdColumnOptions | undefined = useMemo(
+  const rowId = useMemo<RowIdColumnOptions | undefined>(
     () =>
       enableRowId
         ? {
             variant: "indexExpand",
+            expandedIndex: undefined,
           }
         : undefined,
     [enableRowId],
@@ -134,11 +147,16 @@ const TestDataGrid = ({
     onColumnReorder,
     onColumnResize,
     rowId,
+    enableSelection,
+    pinnedTopRowsCount,
+    pinnedLeftColumnsCount,
   });
 
   return (
     <DataGrid
       {...tableProps}
+      striped={striped}
+      theme={theme}
       onHeaderCellClick={onHeaderCellClick}
       onBodyCellClick={onBodyCellClick}
       onAddColumnClick={onAddColumnClick}
@@ -222,18 +240,14 @@ describe("DataGrid", () => {
       jest.runAllTimers();
     });
 
-    const rows = screen.getAllByRole("row").slice(1); // Skip header row
+    const body = screen.getByTestId("table-body");
+    const rowIdCells = body.querySelectorAll('[data-testid="row-id-cell"]');
 
-    expect(rows.length).toBeGreaterThan(0);
+    expect(rowIdCells).toHaveLength(sampleData.length);
 
-    rows.forEach((row, index) => {
-      const cells = within(row).getAllByRole("gridcell");
-      expect(cells[0]).toHaveTextContent(String(index + 2));
+    rowIdCells.forEach((cell, index) => {
+      expect(cell).toHaveTextContent(String(index + 1));
     });
-
-    const firstRow = rows[0];
-    const cellsInRow = within(firstRow).getAllByRole("gridcell");
-    expect(cellsInRow.length).toBe(4); // 3 data columns + 1 row ID column
   });
 
   it("displays proper sort indicators for sortable columns", () => {
@@ -261,5 +275,269 @@ describe("DataGrid", () => {
 
     expect(idSortIcon).toBeDefined();
     expect(nameSortIcon).toBeDefined();
+  });
+
+  it("renders pinned rows in a separate sticky section", () => {
+    const pinnedTopRowsCount = 2;
+    renderWithProviders(
+      <TestDataGrid pinnedTopRowsCount={pinnedTopRowsCount} />,
+    );
+    act(() => {
+      jest.runAllTimers();
+    });
+
+    const pinnedPinnedQuadrant = screen.queryByTestId("pinned-pinned-quadrant");
+    expect(pinnedPinnedQuadrant).not.toBeInTheDocument();
+
+    const pinnedCenterQuadrant = screen.getByTestId("pinned-center-quadrant");
+    const pinnedRows = pinnedCenterQuadrant.querySelectorAll('[role="row"]');
+    expect(pinnedRows).toHaveLength(pinnedTopRowsCount);
+
+    const centerCenterQuadrant = screen.getByTestId("center-center-quadrant");
+    const centerRows = centerCenterQuadrant.querySelectorAll('[role="row"]');
+    expect(centerRows).toHaveLength(sampleData.length - pinnedTopRowsCount);
+  });
+
+  it("renders pinned columns in a separate sticky section", () => {
+    renderWithProviders(<TestDataGrid pinnedLeftColumnsCount={1} />);
+    act(() => {
+      jest.runAllTimers();
+    });
+
+    const headerPinnedQuadrant = screen.getByTestId("header-pinned-quadrant");
+    const pinnedHeaderCells = headerPinnedQuadrant.querySelectorAll(
+      '[data-testid="header-cell"]',
+    );
+    expect(pinnedHeaderCells).toHaveLength(1);
+    expect(pinnedHeaderCells[0]).toHaveTextContent("ID");
+
+    const headerCenterQuadrant = screen.getByTestId("header-center-quadrant");
+    const centerHeaderCells = headerCenterQuadrant.querySelectorAll(
+      '[data-testid="header-cell"]',
+    );
+    expect(centerHeaderCells).toHaveLength(3);
+
+    const centerPinnedQuadrant = screen.getByTestId("center-pinned-quadrant");
+    const pinnedBodyCells =
+      centerPinnedQuadrant.querySelectorAll('[role="gridcell"]');
+    expect(pinnedBodyCells.length).toBeGreaterThan(0);
+  });
+
+  it("renders both pinned rows and pinned columns together", () => {
+    renderWithProviders(
+      <TestDataGrid pinnedTopRowsCount={1} pinnedLeftColumnsCount={1} />,
+    );
+    act(() => {
+      jest.runAllTimers();
+    });
+
+    const pinnedPinnedQuadrant = screen.getByTestId("pinned-pinned-quadrant");
+    const pinnedPinnedCells =
+      pinnedPinnedQuadrant.querySelectorAll('[role="gridcell"]');
+    expect(pinnedPinnedCells).toHaveLength(1);
+
+    const pinnedCenterQuadrant = screen.getByTestId("pinned-center-quadrant");
+    const pinnedCenterCells =
+      pinnedCenterQuadrant.querySelectorAll('[role="gridcell"]');
+    expect(pinnedCenterCells).toHaveLength(3);
+
+    const centerPinnedQuadrant = screen.getByTestId("center-pinned-quadrant");
+    const centerPinnedRows =
+      centerPinnedQuadrant.querySelectorAll('[role="row"]');
+    expect(centerPinnedRows).toHaveLength(sampleData.length - 1);
+
+    const centerCenterQuadrant = screen.getByTestId("center-center-quadrant");
+    const centerCenterRows =
+      centerCenterQuadrant.querySelectorAll('[role="row"]');
+    expect(centerCenterRows).toHaveLength(sampleData.length - 1);
+  });
+
+  it("unpins columns that exceed 90% of container width", () => {
+    renderWithProviders(<TestDataGrid pinnedLeftColumnsCount={2} />);
+    act(() => {
+      jest.runAllTimers();
+    });
+
+    const headerPinnedQuadrant = screen.getByTestId("header-pinned-quadrant");
+    const pinnedHeaderCells = headerPinnedQuadrant.querySelectorAll(
+      '[data-testid="header-cell"]',
+    );
+    expect(pinnedHeaderCells).toHaveLength(1);
+    expect(pinnedHeaderCells[0]).toHaveTextContent("ID");
+  });
+
+  it("unpins rows that exceed 80% of container height", () => {
+    renderWithProviders(<TestDataGrid pinnedTopRowsCount={5} />);
+    act(() => {
+      jest.runAllTimers();
+    });
+
+    const pinnedCenterQuadrant = screen.getByTestId("pinned-center-quadrant");
+    const pinnedRows = pinnedCenterQuadrant.querySelectorAll('[role="row"]');
+    expect(pinnedRows.length).toBeLessThan(5);
+    expect(pinnedRows.length).toBe(3);
+
+    const centerCenterQuadrant = screen.getByTestId("center-center-quadrant");
+    const centerRows = centerCenterQuadrant.querySelectorAll('[role="row"]');
+    expect(centerRows).toHaveLength(sampleData.length - 3);
+  });
+
+  it("renders center section rows when all columns are pinned", () => {
+    renderWithProviders(<TestDataGrid pinnedLeftColumnsCount={4} />);
+    act(() => {
+      jest.runAllTimers();
+    });
+
+    const centerCenterQuadrant = screen.getByTestId("center-center-quadrant");
+    const centerRows = centerCenterQuadrant.querySelectorAll('[role="row"]');
+
+    expect(centerRows.length).toBeGreaterThan(0);
+
+    centerRows.forEach((row) => {
+      expect(row).toHaveAttribute("data-index");
+    });
+  });
+
+  it("can copy selected cells with headers included", async () => {
+    const writeTextMock = jest.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, {
+      clipboard: {
+        writeText: writeTextMock,
+      },
+    });
+
+    renderWithProviders(
+      <TestDataGrid sortableColumns={true} enableSelection={true} />,
+    );
+
+    act(() => {
+      jest.runAllTimers();
+    });
+
+    const bodyCells = screen
+      .getByTestId("table-body")
+      .querySelectorAll("[data-selectable-cell]");
+
+    // Find cells by their content
+    const cellsArray = Array.from(bodyCells);
+    const firstCell = cellsArray.find((cell) => cell.textContent === "Item 1");
+    const lastCell = cellsArray.find((cell) => cell.textContent === "Clothing");
+
+    // Select first cell and extend to last desired cell
+    fireEvent.mouseDown(firstCell!);
+    fireEvent.mouseUp(firstCell!);
+    fireEvent.mouseDown(lastCell!, { shiftKey: true });
+    fireEvent.mouseUp(lastCell!);
+
+    // Trigger copy
+    fireEvent.keyDown(window, { key: "c", metaKey: true });
+
+    // Assert clipboard was called and data copied
+    expect(writeTextMock).toHaveBeenCalledTimes(1);
+    const copiedText = writeTextMock.mock.calls[0][0];
+
+    const lines = copiedText.split("\n");
+    expect(lines.length).toBe(3);
+
+    // Should have headers
+    expect(lines[0]).toBe("Name\tCategory");
+    // And selected data rows
+    expect(lines[1]).toBe("Item 1\tElectronics");
+    expect(lines[2]).toBe("Item 2\tClothing");
+  });
+
+  it("uses correct ARIA roles for grid structure (#70547)", () => {
+    renderWithProviders(<TestDataGrid />);
+
+    const rows = within(screen.getByRole("grid")).getAllByRole("row");
+    expect(rows.length).toBeGreaterThan(1);
+
+    const headerRow = rows[0];
+    const bodyRows = rows.slice(1);
+
+    const columnHeaders = within(headerRow).getAllByRole("columnheader");
+    expect(columnHeaders.length).toBeGreaterThan(0);
+
+    bodyRows.forEach((row) => {
+      const cells = within(row).getAllByRole("gridcell");
+      expect(cells.length).toBeGreaterThan(0);
+    });
+  });
+
+  it("applies striped class to alternating rows when enabled", () => {
+    renderWithProviders(<TestDataGrid striped={true} />);
+
+    const bodyRows = screen
+      .getByTestId("table-body")
+      .querySelectorAll('[role="row"]');
+
+    expect(bodyRows[0]).not.toHaveAttribute("data-row-striped", "true");
+    expect(bodyRows[1]).toHaveAttribute("data-row-striped", "true");
+    expect(bodyRows[2]).not.toHaveAttribute("data-row-striped", "true");
+  });
+
+  it("does not apply striped class when disabled", () => {
+    renderWithProviders(<TestDataGrid striped={false} />);
+
+    const bodyRows = screen
+      .getByTestId("table-body")
+      .querySelectorAll('[role="row"]');
+
+    bodyRows.forEach((row) => {
+      expect(row).not.toHaveAttribute("data-row-striped", "true");
+    });
+  });
+
+  describe("striped rows with a theme", () => {
+    const theme: DataGridTheme = {
+      stripedBackgroundColor: "rgb(10, 20, 30)",
+      cell: { backgroundColor: "rgb(40, 50, 60)" },
+    };
+
+    function getCellBackgroundColor(rowIndex: number, columnId: string) {
+      const row = screen
+        .getByTestId("table-body")
+        .querySelectorAll('[role="row"]')[rowIndex];
+      const cell = row.querySelector<HTMLElement>(
+        `[data-column-id="${columnId}"] [data-testid="body-cell-container"]`,
+      );
+      return cell?.style.getPropertyValue("--cell-bg-color");
+    }
+
+    it("paints striped cells with the theme stripe color", () => {
+      renderWithProviders(<TestDataGrid striped theme={theme} />);
+
+      expect(getCellBackgroundColor(0, "name")).toBe("rgb(40, 50, 60)");
+      expect(getCellBackgroundColor(1, "name")).toBe("rgb(10, 20, 30)");
+      expect(getCellBackgroundColor(2, "name")).toBe("rgb(40, 50, 60)");
+    });
+
+    it("keeps column background colors on striped rows", () => {
+      renderWithProviders(<TestDataGrid striped theme={theme} />);
+
+      expect(getCellBackgroundColor(1, "category")).toBe("rgb(246, 255, 237)");
+    });
+
+    it("derives a stripe color from the cell background when none is set", () => {
+      const cellBackgroundColor = "rgb(40, 50, 60)";
+      renderWithProviders(
+        <TestDataGrid
+          striped
+          theme={{ cell: { backgroundColor: cellBackgroundColor } }}
+        />,
+      );
+
+      const stripe = getCellBackgroundColor(1, "name") ?? "";
+      expect(stripe).not.toBe(cellBackgroundColor);
+      expect(Color(stripe).lightness()).toBeGreaterThan(
+        Color(cellBackgroundColor).lightness(),
+      );
+    });
+
+    it("ignores the stripe color when striping is disabled", () => {
+      renderWithProviders(<TestDataGrid striped={false} theme={theme} />);
+
+      expect(getCellBackgroundColor(1, "name")).toBe("rgb(40, 50, 60)");
+    });
   });
 });

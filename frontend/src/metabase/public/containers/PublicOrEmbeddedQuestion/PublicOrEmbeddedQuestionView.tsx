@@ -3,36 +3,31 @@ import { updateIn } from "icepick";
 import type { Dispatch, SetStateAction } from "react";
 
 import { LoadingAndErrorWrapper } from "metabase/common/components/LoadingAndErrorWrapper";
+import { PLUGIN_CONTENT_TRANSLATION } from "metabase/content-translation/plugins";
 import CS from "metabase/css/core/index.css";
-import { PLUGIN_CONTENT_TRANSLATION } from "metabase/plugins";
+import type { DisplayTheme } from "metabase/embedding/types";
+import { useQuestionFromCard } from "metabase/metadata-store";
 import { EmbedFrame } from "metabase/public/components/EmbedFrame";
-import type {
-  DisplayTheme,
-  EmbedResourceDownloadOptions,
-} from "metabase/public/lib/types";
-import { PublicOrEmbeddedQuestionDownloadPopover } from "metabase/query_builder/components/QuestionDownloadPopover/QuestionDownloadPopover";
-import { PublicMode } from "metabase/visualizations/click-actions/modes/PublicMode";
+import { PublicOrEmbeddedQuestionDownloadPopover } from "metabase/query_builder";
 import Visualization from "metabase/visualizations/components/Visualization";
 import Question from "metabase-lib/v1/Question";
-import type Metadata from "metabase-lib/v1/metadata/Metadata";
 import type { UiParameter } from "metabase-lib/v1/parameters/types";
 import type {
   Card,
   Dataset,
-  DatasetQuery,
+  EmbedResourceDownloadOptions,
   ParameterId,
   ParameterValuesMap,
   RawSeries,
   VisualizationSettings,
 } from "metabase-types/api";
 
+import { publicClickActionMode } from "../../PublicMode";
+
 export interface PublicOrEmbeddedQuestionViewProps {
   initialized: boolean;
-  card: Card<DatasetQuery> | null;
-  metadata: Metadata;
+  card: Card | null;
   result: Dataset | null;
-  uuid: string;
-  token: string;
   getParameters: () => UiParameter[];
   parameterValues: ParameterValuesMap;
   setParameterValue: (parameterId: ParameterId, value: any) => Promise<void>;
@@ -41,16 +36,13 @@ export interface PublicOrEmbeddedQuestionViewProps {
   hide_parameters: string | null;
   theme: DisplayTheme | undefined;
   titled: boolean;
-  setCard: Dispatch<SetStateAction<Card<DatasetQuery> | null>>;
+  setCard: Dispatch<SetStateAction<Card | null>>;
   downloadsEnabled: EmbedResourceDownloadOptions;
 }
 
 export function PublicOrEmbeddedQuestionView({
   card,
-  metadata,
   result,
-  uuid,
-  token,
   getParameters,
   parameterValues,
   setParameterValue,
@@ -62,25 +54,28 @@ export function PublicOrEmbeddedQuestionView({
   setCard,
   downloadsEnabled,
 }: PublicOrEmbeddedQuestionViewProps) {
-  const question = new Question(card, metadata);
+  // EmbedFrame lays out a question frame before the card loads.
+  const question = useQuestionFromCard(card) ?? new Question(null);
+
+  const isTable = question.display() === "table";
+  const downloadInFooter = !titled && isTable;
 
   const questionResultDownloadButton =
     result && downloadsEnabled.results ? (
       <PublicOrEmbeddedQuestionDownloadPopover
         className={cx(
           CS.m1,
-          CS.textMediumHover,
-          CS.hoverChild,
-          CS.hoverChildSmooth,
+          !downloadInFooter && CS.textMediumHover,
+          !downloadInFooter && CS.hoverChild,
+          !downloadInFooter && CS.hoverChildSmooth,
         )}
         question={question}
         result={result}
-        uuid={uuid}
-        token={token}
-        floating={!titled}
+        floating={!titled && !isTable}
       />
     ) : null;
 
+  // Unjustified type cast. FIXME
   const untranslatedRawSeries = [{ card, data: result?.data }] as RawSeries;
   const rawSeries = PLUGIN_CONTENT_TRANSLATION.useTranslateSeries(
     untranslatedRawSeries,
@@ -102,7 +97,7 @@ export function PublicOrEmbeddedQuestionView({
       hide_parameters={hide_parameters}
       theme={theme}
       titled={titled}
-      headerButtons={questionResultDownloadButton}
+      headerButtons={downloadInFooter ? null : questionResultDownloadButton}
       // We don't support PDF downloads on questions
       pdfDownloadsEnabled={false}
     >
@@ -114,7 +109,6 @@ export function PublicOrEmbeddedQuestionView({
       >
         {() => (
           <Visualization
-            isNightMode={theme === "night"}
             error={result?.error?.toString()}
             rawSeries={rawSeries}
             className={cx(CS.full, CS.flexFull, CS.z1)}
@@ -131,15 +125,16 @@ export function PublicOrEmbeddedQuestionView({
             }}
             gridUnit={12}
             showTitle={false}
-            mode={PublicMode}
+            mode={publicClickActionMode}
             // Why do we need `isDashboard` when this is a standalone question?
             // `isDashboard` is used by Visualization to change some visual behaviors
             // including the "No results" message
             isDashboard
-            metadata={metadata}
+            isStandaloneQuestion
             onChangeCardAndRun={() => {}}
-            token={token}
-            uuid={uuid}
+            tableFooterExtraButtons={
+              downloadInFooter ? questionResultDownloadButton : null
+            }
           />
         )}
       </LoadingAndErrorWrapper>

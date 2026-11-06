@@ -1,15 +1,14 @@
-import { getVisualization } from "metabase/visualizations";
-import type { VisualizationSettingDefinition } from "metabase/visualizations/types";
+import {
+  type VisualizationSettingDefinition,
+  getVisualization,
+} from "metabase/viz-core";
 import type { VisualizationDisplay } from "metabase-types/api";
 
-import {
-  DEFAULT_VISUALIZER_DISPLAY,
-  isVisualizerSupportedVisualization,
-} from "./dashboard-card-supports-visualizer";
+import { DEFAULT_VISUALIZER_DISPLAY } from "../constants";
 
-const isDataSetting = ({
-  widget,
-}: VisualizationSettingDefinition<unknown, unknown>) => {
+import { isVisualizerSupportedVisualization } from "./dashboard-card-supports-visualizer";
+
+const isDataSetting = ({ widget }: VisualizationSettingDefinition) => {
   // TODO Come up with a better condition
   return widget === "field" || widget === "fields";
 };

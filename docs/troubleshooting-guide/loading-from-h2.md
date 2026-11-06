@@ -14,11 +14,11 @@ You've installed Metabase, but:
 
 ## Are you currently using H2 as your application database?
 
-**Root cause:** Metabase stores information about users, questions, and so on in a database of its own called the "application database", or "app database" for short. By default Metabase uses H2 for the application database, but we don't recommended it for production---because it's an on-disk database, it's sensitive to filesystem errors, such as a drive being corrupted or a file not being flushed properly.
+**Root cause:** Metabase stores information about users, questions, and so on in a database of its own called the "application database", or "app database" for short. By default Metabase uses H2 for the application database, but we don't recommend it for production---because it's an on-disk database, it's sensitive to filesystem errors, such as a drive being corrupted or a file not being flushed properly.
 
 **Steps to take:**
 
-1. To check what you're using as the app database, go to **Admin Panel**, open the **Troubleshooting** tab, scroll down to "Diagnostic Info", and look for the `application-database` key in the JSON it displays.
+1. To check what you're using as the app database, go to **Admin Panel**, open the **Tools** tab, scroll down to "Diagnostic Info", and look for the `application-database` key in the JSON it displays.
 2. See [Migrating from H2](../installation-and-operation/migrating-from-h2.md) for instructions on how to migrate to a more robust app database.
 
 ## Are you trying to migrate the application database from H2 to something else?
@@ -80,7 +80,7 @@ liquibase.exception.DatabaseException: liquibase.exception.LockException: Could 
 
 ## Is the app database corrupted?
 
-**Root cause:** H2 is less reliable than production-quality database management systems, and sometimes the database itself becomes corrupted. This can result in loss of data in the app database, but can _not_ damage data in the databases that Metabase is connected.
+**Root cause:** H2 is less reliable than production-quality database management systems, and sometimes the database itself becomes corrupted. This can result in loss of data in the app database, but can _not_ damage data in the databases that Metabase is connected to.
 
 **Steps to take:** Error messages can vary depending on how the app database was corrupted, but in most cases the log message will mention `h2`. A typical command and message are:
 

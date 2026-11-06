@@ -1,11 +1,6 @@
 import * as Lib from "metabase-lib";
-import {
-  SAMPLE_METADATA,
-  columnFinder,
-  createQuery,
-  createQueryWithClauses,
-} from "metabase-lib/test-helpers";
-import type { Series } from "metabase-types/api";
+import { SAMPLE_METADATA, SAMPLE_PROVIDER } from "metabase-lib/test-helpers";
+import type { Series, TestBreakoutSpec } from "metabase-types/api";
 import {
   createMockCard,
   createMockColumn,
@@ -13,7 +8,11 @@ import {
   createMockTableColumnOrderSetting,
   createMockVisualizationSettings,
 } from "metabase-types/api/mocks";
-import { SAMPLE_DB_ID } from "metabase-types/api/mocks/presets";
+import {
+  ORDERS,
+  ORDERS_ID,
+  SAMPLE_DB_ID,
+} from "metabase-types/api/mocks/presets";
 
 import {
   type ColumnInfo,
@@ -77,6 +76,126 @@ describe("syncVizSettings", () => {
           { name: "ID", enabled: true },
           { name: "ID_3", enabled: false },
           { name: "ID_2", enabled: true },
+        ],
+      });
+    });
+
+    it("should place a new column after its preceding column instead of appending it (metabase#82476)", () => {
+      const oldColumns: ColumnInfo[] = ["a", "b", "c", "d", "e"].map(
+        (name) => ({ name, key: name }),
+      );
+      const newColumns: ColumnInfo[] = ["a", "b", "z", "c", "d", "e"].map(
+        (name) => ({ name, key: name }),
+      );
+      const oldSettings = createMockVisualizationSettings({
+        "table.columns": [
+          createMockTableColumnOrderSetting({ name: "a", enabled: true }),
+          createMockTableColumnOrderSetting({ name: "b", enabled: true }),
+          createMockTableColumnOrderSetting({ name: "c", enabled: false }),
+          createMockTableColumnOrderSetting({ name: "d", enabled: true }),
+          createMockTableColumnOrderSetting({ name: "e", enabled: true }),
+        ],
+      });
+
+      const newSettings = syncVizSettings(oldSettings, newColumns, oldColumns, {
+        placeNewColumnsInQueryOrder: true,
+      });
+      expect(newSettings).toEqual({
+        "table.columns": [
+          { name: "a", enabled: true },
+          { name: "b", enabled: true },
+          { name: "z", enabled: true },
+          { name: "c", enabled: false },
+          { name: "d", enabled: true },
+          { name: "e", enabled: true },
+        ],
+      });
+    });
+
+    it("should keep the user's column order when placing a new column", () => {
+      const oldColumns: ColumnInfo[] = ["a", "b", "c", "d"].map((name) => ({
+        name,
+        key: name,
+      }));
+      const newColumns: ColumnInfo[] = ["a", "b", "z", "c", "d"].map(
+        (name) => ({ name, key: name }),
+      );
+      const oldSettings = createMockVisualizationSettings({
+        "table.columns": [
+          createMockTableColumnOrderSetting({ name: "d", enabled: true }),
+          createMockTableColumnOrderSetting({ name: "a", enabled: true }),
+          createMockTableColumnOrderSetting({ name: "b", enabled: true }),
+          createMockTableColumnOrderSetting({ name: "c", enabled: true }),
+        ],
+      });
+
+      const newSettings = syncVizSettings(oldSettings, newColumns, oldColumns, {
+        placeNewColumnsInQueryOrder: true,
+      });
+      expect(newSettings).toEqual({
+        "table.columns": [
+          { name: "d", enabled: true },
+          { name: "a", enabled: true },
+          { name: "b", enabled: true },
+          { name: "z", enabled: true },
+          { name: "c", enabled: true },
+        ],
+      });
+    });
+
+    it("should place a new column first when no column precedes it", () => {
+      const oldColumns: ColumnInfo[] = ["a", "b"].map((name) => ({
+        name,
+        key: name,
+      }));
+      const newColumns: ColumnInfo[] = ["z", "a", "b"].map((name) => ({
+        name,
+        key: name,
+      }));
+      const oldSettings = createMockVisualizationSettings({
+        "table.columns": [
+          createMockTableColumnOrderSetting({ name: "b", enabled: true }),
+          createMockTableColumnOrderSetting({ name: "a", enabled: true }),
+        ],
+      });
+
+      const newSettings = syncVizSettings(oldSettings, newColumns, oldColumns, {
+        placeNewColumnsInQueryOrder: true,
+      });
+      expect(newSettings).toEqual({
+        "table.columns": [
+          { name: "z", enabled: true },
+          { name: "b", enabled: true },
+          { name: "a", enabled: true },
+        ],
+      });
+    });
+
+    it("should keep the query order of adjacent new columns", () => {
+      const oldColumns: ColumnInfo[] = ["a", "b"].map((name) => ({
+        name,
+        key: name,
+      }));
+      const newColumns: ColumnInfo[] = ["a", "y", "z", "b"].map((name) => ({
+        name,
+        key: name,
+      }));
+      const oldSettings = createMockVisualizationSettings({
+        "table.columns": [
+          createMockTableColumnOrderSetting({ name: "a", enabled: true }),
+          createMockTableColumnOrderSetting({ name: "b", enabled: false }),
+        ],
+      });
+
+      const newSettings = syncVizSettings(oldSettings, newColumns, oldColumns, {
+        placeNewColumnsInQueryOrder: true,
+      });
+      expect(newSettings).toEqual({
+        "table.columns": [
+          { name: "a", enabled: true },
+          { name: "y", enabled: true },
+          { name: "z", enabled: true },
+          { name: "b", enabled: false },
         ],
       });
     });
@@ -433,20 +552,77 @@ describe("syncVizSettings", () => {
 
 describe("syncVizSettingsWithQuery", () => {
   describe("table.columns", () => {
+    it("should not duplicate a hidden breakout column when it is removed and added again (metabase#22382)", () => {
+      const createQuery = (breakouts: TestBreakoutSpec[]) =>
+        Lib.createTestQuery(SAMPLE_PROVIDER, {
+          stages: [
+            {
+              source: { type: "table", id: ORDERS_ID },
+              aggregations: [{ type: "operator", operator: "count", args: [] }],
+              breakouts,
+            },
+          ],
+        });
+      const queryWithBreakout = createQuery([
+        { type: "column", name: "CREATED_AT", unit: "month" },
+      ]);
+      const queryWithoutBreakout = createQuery([]);
+      const settingsWithHiddenBreakout = createMockVisualizationSettings({
+        "table.columns": [
+          createMockTableColumnOrderSetting({
+            name: "CREATED_AT",
+            enabled: false,
+          }),
+          createMockTableColumnOrderSetting({ name: "count", enabled: true }),
+        ],
+      });
+
+      const settingsWithoutBreakout = syncVizSettingsWithQuery(
+        settingsWithHiddenBreakout,
+        queryWithoutBreakout,
+        queryWithBreakout,
+      );
+      expect(settingsWithoutBreakout["table.columns"]).toEqual([
+        { name: "count", enabled: true },
+      ]);
+
+      const settingsWithBreakout = syncVizSettingsWithQuery(
+        settingsWithoutBreakout,
+        queryWithBreakout,
+        queryWithoutBreakout,
+      );
+      expect(settingsWithBreakout["table.columns"]).toEqual([
+        { name: "count", enabled: true },
+        { name: "CREATED_AT", enabled: true },
+      ]);
+    });
+
     it("should handle adding new columns with column.name changes", () => {
-      const baseQuery = createQuery();
-      const stageIndex = -1;
-      const availableColumns = Lib.visibleColumns(baseQuery, stageIndex);
-      const findColumn = columnFinder(baseQuery, availableColumns);
-      const oldQuery = Lib.withFields(baseQuery, stageIndex, [
-        findColumn("ORDERS", "ID"),
-        findColumn("PEOPLE", "ID"),
-      ]);
-      const newQuery = Lib.withFields(baseQuery, stageIndex, [
-        findColumn("ORDERS", "ID"),
-        findColumn("PRODUCTS", "ID"),
-        findColumn("PEOPLE", "ID"),
-      ]);
+      const oldQuery = Lib.createTestQuery(SAMPLE_PROVIDER, {
+        stages: [
+          {
+            source: { type: "table", id: ORDERS_ID },
+            fields: [
+              { type: "column", name: "ID" },
+              { type: "column", name: "ID", sourceFieldId: ORDERS.USER_ID },
+            ],
+          },
+        ],
+      });
+
+      const newQuery = Lib.createTestQuery(SAMPLE_PROVIDER, {
+        stages: [
+          {
+            source: { type: "table", id: ORDERS_ID },
+            fields: [
+              { type: "column", name: "ID" },
+              { type: "column", name: "ID", sourceFieldId: ORDERS.PRODUCT_ID },
+              { type: "column", name: "ID", sourceFieldId: ORDERS.USER_ID },
+            ],
+          },
+        ],
+      });
+
       const oldSettings = createMockVisualizationSettings({
         "table.columns": [
           createMockTableColumnOrderSetting({
@@ -477,18 +653,40 @@ describe("syncVizSettingsWithQuery", () => {
 
   describe("graph.metrics", () => {
     it("should handle adding new columns", () => {
-      const oldQuery = createQueryWithClauses({
-        aggregations: [
-          { operatorName: "sum", tableName: "ORDERS", columnName: "TOTAL" },
+      const oldQuery = Lib.createTestQuery(SAMPLE_PROVIDER, {
+        stages: [
+          {
+            source: { type: "table", id: ORDERS_ID },
+            aggregations: [
+              {
+                type: "operator",
+                operator: "sum",
+                args: [{ type: "column", name: "TOTAL" }],
+              },
+            ],
+            breakouts: [{ type: "column", name: "CREATED_AT" }],
+          },
         ],
-        breakouts: [{ tableName: "ORDERS", columnName: "CREATED_AT" }],
       });
-      const newQuery = createQueryWithClauses({
-        aggregations: [
-          { operatorName: "sum", tableName: "ORDERS", columnName: "TOTAL" },
-          { operatorName: "sum", tableName: "ORDERS", columnName: "SUBTOTAL" },
+      const newQuery = Lib.createTestQuery(SAMPLE_PROVIDER, {
+        stages: [
+          {
+            source: { type: "table", id: ORDERS_ID },
+            aggregations: [
+              {
+                type: "operator",
+                operator: "sum",
+                args: [{ type: "column", name: "TOTAL" }],
+              },
+              {
+                type: "operator",
+                operator: "sum",
+                args: [{ type: "column", name: "SUBTOTAL" }],
+              },
+            ],
+            breakouts: [{ type: "column", name: "CREATED_AT" }],
+          },
         ],
-        breakouts: [{ tableName: "ORDERS", columnName: "CREATED_AT" }],
       });
       const oldSettings = createMockVisualizationSettings({
         "graph.metrics": ["sum"],
@@ -562,6 +760,35 @@ describe("syncVizSettingsWithSeries", () => {
           { name: "ID", enabled: true },
           { name: "ID_2", enabled: false },
           { name: "ID_3", enabled: true },
+        ],
+      });
+    });
+
+    it("should place a new column at its query position (metabase#82476)", () => {
+      const seriesWithNewMiddleColumn: Series = [
+        {
+          card: createMockCard(),
+          data: createMockDatasetData({
+            cols: [
+              createMockColumn({ name: "ID", source: "native" }),
+              createMockColumn({ name: "NEW", source: "native" }),
+              createMockColumn({ name: "ID_2", source: "native" }),
+            ],
+          }),
+        },
+      ];
+
+      const newSettings = syncVizSettingsWithSeries(
+        oldSettings,
+        query,
+        seriesWithNewMiddleColumn,
+        oldSeries,
+      );
+      expect(newSettings).toEqual({
+        "table.columns": [
+          { name: "ID", enabled: true },
+          { name: "NEW", enabled: true },
+          { name: "ID_2", enabled: false },
         ],
       });
     });

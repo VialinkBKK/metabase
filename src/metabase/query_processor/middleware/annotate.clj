@@ -1,28 +1,26 @@
 (ns metabase.query-processor.middleware.annotate
   "Middleware for annotating (adding type information to) the results of a query, under the `:cols` column."
+  (:refer-clojure :exclude [every? mapv empty? get-in])
   (:require
    [metabase.analyze.core :as analyze]
    [metabase.driver.common :as driver.common]
+   ;; allowed because `:field_ref` is supposed to be a legacy field ref for backward compatibility purposes
+   ^{:clj-kondo/ignore [:discouraged-namespace]}
    [metabase.legacy-mbql.schema :as mbql.s]
    [metabase.lib.core :as lib]
    [metabase.lib.metadata.result-metadata :as lib.metadata.result-metadata]
    [metabase.lib.schema :as lib.schema]
-   [metabase.lib.schema.metadata :as lib.schema.metadata]
-   [metabase.lib.util :as lib.util]
    [metabase.query-processor.debug :as qp.debug]
-   [metabase.query-processor.middleware.annotate.legacy-helper-fns]
+   [metabase.query-processor.middleware.annotate.legacy-helper-fns :as annotate.legacy-helper-fns]
    [metabase.query-processor.reducible :as qp.reducible]
    [metabase.query-processor.schema :as qp.schema]
    [metabase.util.malli :as mu]
    [metabase.util.malli.registry :as mr]
+   [metabase.util.performance :refer [every? mapv empty? get-in]]
    [potemkin :as p]))
 
-(comment metabase.query-processor.middleware.annotate.legacy-helper-fns/keep-me)
-
 (mr/def ::col
-  [:map
-   [:source    {:optional true} ::lib.schema.metadata/column.legacy-source]
-   [:field_ref {:optional true} ::mbql.s/Reference]])
+  [:or ::mbql.s/legacy-column-metadata ::mbql.s/driver-column])
 
 (mr/def ::qp-results-cased-col
   "Map where all simple keywords are snake_case, but lib keywords can stay in kebab-case."
@@ -39,17 +37,16 @@
   [:maybe [:sequential ::col]])
 
 (mr/def ::metadata
-  [:map
-   [:cols {:optional true} ::cols]])
+  ::qp.schema/metadata)
 
 (mu/defn expected-cols :- [:sequential ::qp-results-cased-col]
-  "Return metadata for columns returned by a pMBQL `query`.
+  "Return metadata for columns returned by a MBQL 5 `query`.
 
   `initial-cols` are (optionally) the initial minimal metadata columns as returned by the driver (usually just column
   name and base type). If provided these are merged with the columns the query is expected to return.
 
   Note this `initial-cols` is more or less required for native queries unless they have metadata attached."
-  ([query]
+  ([query :- ::lib.schema/query]
    (expected-cols query []))
 
   ([query         :- ::lib.schema/query
@@ -73,12 +70,24 @@
   "Native queries don't have the type information from the original `Field` objects used in the query. If the driver
   returned a base type more specific than :type/*, use that; otherwise look at the sample of rows and infer the base
   type based on the classes of the values"
-  [{:keys [cols]} :- :map]
+  [{:keys [cols]} :- ::metadata]
   (apply analyze/col-wise
          (for [{driver-base-type :base_type} cols]
            (if (contains? #{nil :type/*} driver-base-type)
              (driver.common/values->base-type)
              (analyze/constant-fingerprinter driver-base-type)))))
+
+(defn- enrich-with-inferred-type
+  "Set :base_type and :effective_type to `base-type` in `col`.
+  Also set or update the :field_ref field to contain `base-type` in the field ref options."
+  [col base-type]
+  (cond-> (assoc col :base_type base-type, :effective_type base-type)
+    ;; if we have a field_ref for a named column, set the base_type options
+    (string? (get-in col [:field_ref 1]))
+    (update-in [:field_ref 2] assoc :base-type base-type)
+    ;; if there is no field_ref at all, add it
+    (nil? (:field_ref col))
+    (assoc :field_ref [:field (:name col) {:base-type base-type}])))
 
 (mu/defn- infer-base-type-xform :- ::qp.schema/rf
   "Add an xform to `rf` that will update the final results metadata with `base_type` and an updated `field_ref` based on
@@ -90,16 +99,17 @@
    rf
    [(base-type-inferer metadata)]
    (fn combine [result base-types]
-     (let [cols' (mapv (fn [col base-type]
-                         (assoc col
-                                :base_type      base-type
-                                :effective_type base-type
-                                :field_ref      [:field (:name col) {:base-type base-type}]))
-                       (:cols metadata)
-                       base-types)]
+     (let [result-data-cols (when (map? result)
+                              (-> result :data :cols))]
        (rf (cond-> result
-             (map? result)
-             (assoc-in [:data :cols] cols')))))))
+             (and (seq result-data-cols)
+                  ;; For pivot queries, when generating the row, column, or grand totals, the number of
+                  ;; result-data-cols can be greater than the number of base-types.  In these cases, the
+                  ;; result-data-cols already have the correct type, so no enrichment is necessary.
+                  ;; For native queries where this correction is needed, the number and position of the columns and
+                  ;; the base-types should match. (#64124)
+                  (= (count result-data-cols) (count base-types)))
+             (assoc-in [:data :cols] (mapv enrich-with-inferred-type result-data-cols base-types))))))))
 
 (mu/defn- add-column-info-with-type-inference :- ::qp.schema/rf
   [query            :- ::lib.schema/query
@@ -116,7 +126,7 @@
 (mu/defn- needs-type-inference?
   [query                                       :- ::lib.schema/query
    {initial-cols :cols, :as _initial-metadata} :- ::metadata]
-  (and (= (:lib/type (lib.util/query-stage query 0)) :mbql.stage/native)
+  (and (= (:lib/type (lib/query-stage query 0)) :mbql.stage/native)
        (or (empty? initial-cols)
            (every? (fn [col]
                      (let [base-type ((some-fn :base-type :base_type) col)]
@@ -140,8 +150,17 @@
 ;;;;
 
 ;;; These are only for convenience for drivers that used to use stuff in annotate directly -- we can remove it once we
-;;; convert drivers to MLv2
+;;; convert drivers to MBQL 5.
+#_{:clj-kondo/ignore [:deprecated-var]}
 (p/import-vars
- [metabase.query-processor.middleware.annotate.legacy-helper-fns
-  aggregation-name
-  merged-column-info])
+ [annotate.legacy-helper-fns
+  aggregation-name])
+
+(mu/defn merged-column-info :- ::cols
+  "Returns deduplicated and merged column metadata (`:cols`) for query results by combining (a) the initial results
+  metadata returned by the driver's impl of `execute-reducible-query` and (b) column metadata inferred by logic in
+  this namespace."
+  {:deprecated "0.64.0"}
+  [legacy-query                                        :- :metabase.lib.util/legacy-query
+   {initial-cols :cols, :as _initial-metadata} :- [:maybe ::metadata]]
+  (expected-cols (annotate.legacy-helper-fns/legacy-query->mbql5-query legacy-query) initial-cols))

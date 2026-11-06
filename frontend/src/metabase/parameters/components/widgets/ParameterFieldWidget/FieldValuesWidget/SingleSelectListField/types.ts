@@ -1,3 +1,5 @@
+import type { JSX } from "react";
+
 import type { FieldValue, RowValue } from "metabase-types/api";
 
 export type Option = FieldValue;
@@ -8,8 +10,6 @@ export interface SingleSelectListFieldProps {
   options: Option[];
   optionRenderer: (option: Option) => JSX.Element;
   onSearchChange?: (value: string) => void;
-  placeholder: string;
+  placeholder?: string;
   isDashboardFilter?: boolean;
-  isLoading?: boolean;
-  checkedColor?: string;
 }

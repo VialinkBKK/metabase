@@ -1,13 +1,12 @@
-import { useDebouncedCallback } from "@mantine/hooks";
-import { type Ref, forwardRef, useState } from "react";
+import { useDebouncedCallback, useDisclosure } from "@mantine/hooks";
+import { type Ref, forwardRef } from "react";
 
-import TippyPopoverWithTrigger from "metabase/common/components/PopoverWithTrigger/TippyPopoverWithTrigger";
-import { Group } from "metabase/ui";
+import { Group, Popover } from "metabase/ui";
 
 import { ColorPill } from "../ColorPill";
 
 import type { ColorPickerAttributes } from "./ColorPicker";
-import ColorPickerContent from "./ColorPickerContent";
+import { ColorPickerContent } from "./ColorPickerContent";
 import S from "./ColorPillPicker.module.css";
 
 export interface ColorPillPickerProps extends ColorPickerAttributes {
@@ -19,12 +18,13 @@ export interface ColorPillPickerProps extends ColorPickerAttributes {
    **/
   originalColor: string;
 
+  /** Undebounced preview value of the color. */
+  previewValue: string;
+
   /**
-   * The initial color to display in the color picker.
-   * Useful if the color has been set before e.g. in user settings.
-   * Defaults to the `originalColor`.
+   * Callback when preview value changes.
    */
-  initialColor?: string;
+  onPreviewChange: (color: string) => void;
 
   debounceMs?: number;
 }
@@ -36,38 +36,35 @@ export const ColorPillPicker = forwardRef(function ColorPillPicker(
     onChange,
     debounceMs = COLOR_PICKER_DEBOUNCE_MS,
     originalColor,
-    initialColor,
+    previewValue,
+    onPreviewChange,
     ...props
   }: ColorPillPickerProps,
   ref: Ref<HTMLDivElement>,
 ) {
-  const [previewValue, setPreviewValue] = useState<string>(
-    initialColor ?? originalColor,
-  );
-
   const debouncedUpdate = useDebouncedCallback(onChange, debounceMs);
+  const color = previewValue ?? originalColor;
+  const [isOpened, { open, close }] = useDisclosure(false);
 
   return (
-    <TippyPopoverWithTrigger
-      disableContentSandbox
-      renderTrigger={({ onClick }) => (
+    <Popover opened={isOpened} onDismiss={close} position="bottom-start">
+      <Popover.Target>
         <Group {...props} ref={ref} wrap="nowrap">
-          <ColorPill color={previewValue} onClick={onClick} />
+          <ColorPill color={color} onClick={open} />
         </Group>
-      )}
-      popoverContent={
+      </Popover.Target>
+      <Popover.Dropdown className={S.ColorPillPicker}>
         <ColorPickerContent
-          value={previewValue}
+          value={color}
           onChange={(nextColor) => {
             // Fallback to the original color if the value is cleared.
             const colorWithDefault = nextColor ?? originalColor;
 
-            setPreviewValue(colorWithDefault);
+            onPreviewChange(colorWithDefault);
             debouncedUpdate(colorWithDefault);
           }}
         />
-      }
-      className={S.ColorPillPicker}
-    />
+      </Popover.Dropdown>
+    </Popover>
   );
 });

@@ -1,12 +1,21 @@
 import type { SettingKey, TokenFeature } from "metabase-types/api";
 
-export const EMBEDDING_SDK_ROOT_ELEMENT_ID = "metabase-sdk-root";
 export const EMBEDDING_SDK_PORTAL_ROOT_ELEMENT_ID = "metabase-sdk-portal-root";
 
 type InternalSdkConfig = {
   isEmbeddingSdk: boolean;
-  metabaseClientRequestHeader: "embedding-sdk-react" | "embedding-simple";
-  enableEmbeddingSettingKey: "enable-embedding-sdk" | "enable-embedding-simple";
+  isMcpApp: boolean;
+  isDataApp: boolean;
+  isDataAppDev: boolean;
+  metabaseClientRequestHeader:
+    | "embedding-sdk-react"
+    | "embedding-simple"
+    | "mcp-apps"
+    | "data-app";
+  metabaseClientRequestIdentifier: string | undefined;
+  enableEmbeddingSettingKey:
+    | "enable-embedding-sdk"
+    | "enable-embedding-modular";
   tokenFeatureKey: "embedding_sdk" | "embedding_simple";
 };
 
@@ -18,9 +27,32 @@ export const EMBEDDING_SDK_CONFIG: InternalSdkConfig = {
   isEmbeddingSdk: false,
 
   /**
+   * Whether we are in the MCP Apps context.
+   **/
+  isMcpApp: false,
+
+  /**
+   * Whether we are in the Data App context.
+   **/
+  isDataApp: false,
+
+  /**
+   * Whether the data app runs in the local development flow. Reported to the
+   * backend via the X-Metabase-Embedded-Preview header, so its traffic is
+   * recorded as the "data-app-preview" embedding client.
+   **/
+  isDataAppDev: false,
+
+  /**
    * Which X-Metabase-Client header to use for requests to the Metabase instance?
    */
   metabaseClientRequestHeader: "embedding-sdk-react",
+
+  /**
+   * Which X-Metabase-Client-Identifier header to use for requests to the
+   * Metabase instance? Identifies the concrete client, e.g. a data app name.
+   */
+  metabaseClientRequestIdentifier: undefined,
 
   /**
    * Which setting indicates whether the embedding is enabled?
@@ -46,3 +78,24 @@ export const EMBEDDING_SDK_IFRAME_EMBEDDING_CONFIG = {
  * such as sdk-based iframe embedding.
  **/
 export const isEmbeddingSdk = () => EMBEDDING_SDK_CONFIG.isEmbeddingSdk;
+
+/**
+ * Whether we are in the MCP Apps context.
+ */
+export const isEmbeddingMcpApp = () => EMBEDDING_SDK_CONFIG.isMcpApp;
+
+/**
+ * Whether we are in the Embedded Analytics JS.
+ */
+export const isEmbeddingEajs = () =>
+  EMBEDDING_SDK_IFRAME_EMBEDDING_CONFIG.isSimpleEmbedding;
+
+/**
+ * Whether we are in the Data App context.
+ */
+export const isDataApp = () => EMBEDDING_SDK_CONFIG.isDataApp;
+
+/**
+ * Whether we are in the Data App context.
+ */
+export const isDataAppDev = () => EMBEDDING_SDK_CONFIG.isDataAppDev;

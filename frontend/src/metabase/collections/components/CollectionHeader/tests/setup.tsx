@@ -1,21 +1,24 @@
-import { Route } from "react-router";
-
-import { setupEnterprisePlugins } from "__support__/enterprise";
+import {
+  setupEnterpriseOnlyPlugin,
+  setupEnterprisePlugins,
+} from "__support__/enterprise";
 import {
   setupDashboardQuestionCandidatesEndpoint,
+  setupUpdateCollectionEndpoint,
   setupUserKeyValueEndpoints,
 } from "__support__/server-mocks";
 import { mockSettings } from "__support__/settings";
+import { createMockState } from "__support__/state";
 import { renderWithProviders } from "__support__/ui";
+import { Route } from "metabase/router";
 import type { Collection, TokenFeatures } from "metabase-types/api";
 import {
   createMockCollection,
   createMockTokenFeatures,
 } from "metabase-types/api/mocks";
-import { createMockState } from "metabase-types/store/mocks";
 
 import type { CollectionHeaderProps } from "../CollectionHeader";
-import CollectionHeader from "../CollectionHeader";
+import { CollectionHeader } from "../CollectionHeader";
 
 const getProps = (
   opts?: Partial<CollectionHeaderProps>,
@@ -25,21 +28,20 @@ const getProps = (
   isBookmarked: false,
   canUpload: false,
   uploadsEnabled: true,
-  onUpdateCollection: jest.fn(),
   onCreateBookmark: jest.fn(),
-  saveFile: jest.fn(),
+  onSaveFile: jest.fn(),
   onDeleteBookmark: jest.fn(),
   ...opts,
 });
 
 export const setup = ({
   collection,
-  hasEnterprisePlugins = false,
+  enterprisePlugins,
   tokenFeatures,
   ...otherProps
 }: {
   collection?: Partial<Collection>;
-  hasEnterprisePlugins?: boolean;
+  enterprisePlugins?: Parameters<typeof setupEnterpriseOnlyPlugin>[0][] | "*";
   tokenFeatures?: Partial<TokenFeatures>;
 } & Partial<Omit<CollectionHeaderProps, "collection">> = {}) => {
   setupDashboardQuestionCandidatesEndpoint([]);
@@ -64,17 +66,23 @@ export const setup = ({
     ...otherProps,
   });
 
+  setupUpdateCollectionEndpoint(props.collection);
+
   const settings = mockSettings({
     "token-features": createMockTokenFeatures(tokenFeatures),
   });
   const state = createMockState({ settings });
 
-  if (hasEnterprisePlugins) {
-    setupEnterprisePlugins();
+  if (enterprisePlugins) {
+    if (enterprisePlugins === "*") {
+      setupEnterprisePlugins();
+    } else {
+      enterprisePlugins.forEach(setupEnterpriseOnlyPlugin);
+    }
   }
 
   renderWithProviders(
-    <Route path="/" component={() => <CollectionHeader {...props} />} />,
+    <Route path="/" element={<CollectionHeader {...props} />} />,
     {
       storeInitialState: state,
       initialRoute: "/",

@@ -1,14 +1,8 @@
-import { RuleTester } from "eslint";
+import rule from "../eslint-plugin-metabase/rules/no-locale-with-intl-functions";
 
-import noLocaleWithIntlFunctions from "../eslint-rules/no-locale-with-intl-functions";
+import { createRuleTester } from "./rule-tester";
 
-const ruleTester = new RuleTester({
-  parserOptions: {
-    ecmaVersion: 2015,
-    sourceType: "module",
-    ecmaFeatures: { jsx: true },
-  },
-});
+const ruleTester = createRuleTester();
 
 const VALID_CASES = [
   {
@@ -77,7 +71,7 @@ const INVALID_CASES = [
   },
 ];
 
-ruleTester.run("no-locale-with-intl-functions", noLocaleWithIntlFunctions, {
+ruleTester.run("no-locale-with-intl-functions", rule, {
   valid: VALID_CASES,
   invalid: INVALID_CASES.map((invalidCase) => {
     return {

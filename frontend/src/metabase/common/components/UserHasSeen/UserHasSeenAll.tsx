@@ -1,4 +1,4 @@
-import { useContext } from "react";
+import { type JSX, useContext } from "react";
 
 import {
   UserHasSeenAllContext,
@@ -15,7 +15,7 @@ interface UserHasSeenAllProps {
   }) => JSX.Element;
 }
 
-const _UserHasSeenAll = ({ children }: UserHasSeenAllProps) => {
+const UserHasSeenAllInner = ({ children }: UserHasSeenAllProps) => {
   const ctx = useContext(UserHasSeenAllContext);
 
   if (!ctx) {
@@ -32,6 +32,6 @@ export const UserHasSeenAll = ({
   ...rest
 }: UserHasSeenAllProps & { id: string }) => (
   <UserHasSeenAllProvider id={id}>
-    <_UserHasSeenAll {...rest} />
+    <UserHasSeenAllInner {...rest} />
   </UserHasSeenAllProvider>
 );

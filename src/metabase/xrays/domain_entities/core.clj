@@ -1,18 +1,33 @@
 (ns metabase.xrays.domain-entities.core
   (:require
    [clojure.string :as str]
+   [malli.core :as mc]
    [medley.core :as m]
-   [metabase.legacy-mbql.util :as mbql.u]
-   [metabase.lib.util.match :as lib.util.match]
+   ;; legacy usage, do not use legacy MBQL stuff in new code.
+   ^{:clj-kondo/ignore [:deprecated-namespace :discouraged-namespace]} [metabase.legacy-mbql.util :as mbql.u]
+   [metabase.lib.schema.common :as lib.schema.common]
    [metabase.util :as u]
    [metabase.util.malli :as mu]
+   [metabase.util.malli.registry :as mr]
    [metabase.util.malli.schema :as ms]
-   [metabase.xrays.domain-entities.specs :refer [domain-entity-specs MBQL]]
+   [metabase.util.match :as match]
+   [metabase.warehouse-schema.schema]
+   [metabase.xrays.domain-entities.hierarchy :as domain-entities.hierarchy]
+   [metabase.xrays.domain-entities.specs :as domain-entities.specs :refer [*domain-entity-specs* MBQL]]
    [toucan2.core :as t2]))
 
-(def ^:private ^{:arglists '([field])} field-type
+(mr/def ::field-or-column
+  "A Field row, or the column metadata of a Card's `:result_metadata` or a query's expected columns."
+  [:multi {:dispatch t2/model}
+   [:model/Field :metabase.warehouse-schema.schema/field]
+   [::mc/default :metabase.lib.schema.metadata/lib-or-legacy-column]])
+
+(mu/defn field-type :- [:or
+                        ::lib.schema.common/base-type
+                        ::lib.schema.common/semantic-or-relation-type]
   "Return the most specific type of a given field."
-  (some-fn :semantic_type :base_type))
+  [field :- ::field-or-column]
+  ((some-fn :semantic_type :base_type) field))
 
 (def SourceName
   "A reference to a `SourceEntity`."
@@ -26,16 +41,25 @@
 
 (def SourceEntity
   "A source for a card. Can be either a table or another card."
-  [:or (ms/InstanceOf :model/Table) (ms/InstanceOf :model/Card)])
+  (ms/InstanceOf #{:model/Table :model/Card}))
 
 (def Bindings
   "Top-level lexical context mapping source names to their corresponding entity and constituent dimensions. See also
   `DimensionBindings`."
   [:map-of
    SourceName
-   [:map
+   [:map {:closed true}
     [:dimensions DimensionBindings]
     [:entity {:optional true} SourceEntity]]])
+
+(def ^:private MetricOrSegmentEntry
+  "The value half of a domain-entity spec's `:metrics`/`:segments` map entries."
+  [:map {:closed true}
+   [:name        :string]
+   [:aggregation {:optional true} MBQL]
+   [:breakout    {:optional true} [:sequential MBQL]]
+   [:filter      {:optional true} MBQL]
+   [:description {:optional true} :string]])
 
 (mu/defn- get-dimension-binding :- MBQL
   [bindings            :- Bindings
@@ -44,6 +68,8 @@
   (let [[table-or-dimension maybe-dimension] (str/split dimension-reference #"\.")]
     (if maybe-dimension
       (let [field-clause (get-in bindings [table-or-dimension :dimensions maybe-dimension])]
+        ;; legacy usage, do not use legacy MBQL stuff in new code.
+        #_{:clj-kondo/ignore [:deprecated-var]}
         (cond-> field-clause
           (not= source table-or-dimension) (mbql.u/assoc-field-options :join-alias table-or-dimension)))
       (get-in bindings [source :dimensions table-or-dimension]))))
@@ -52,21 +78,22 @@
   "Instantiate all dimension reference in given (nested) structure"
   [bindings :- Bindings
    source   :- SourceName
-   obj]
-  (lib.util.match/replace obj
+   obj      :- [:maybe [:or MBQL [:tuple :string MetricOrSegmentEntry]]]]
+  (match/replace obj
     [:dimension dimension] (->> dimension
                                 (get-dimension-binding bindings source)
                                 (resolve-dimension-clauses bindings source))))
 
 (mu/defn mbql-reference :- MBQL
   "Return MBQL clause for a given field-like object."
-  [{:keys [id name base_type]}]
+  [{:keys [id name base_type]} :- ::field-or-column]
   (if id
     [:field id nil]
     [:field name {:base-type base_type}]))
 
-(defn- has-attribute?
-  [entity {:keys [field _domain_entity _has_many]}]
+(mu/defn- has-attribute?
+  [entity          :- SourceEntity
+   {:keys [field]} :- ::domain-entities.specs/attribute]
   (cond
     field (some (fn [col]
                   (when (or (isa? (field-type col) field)
@@ -74,15 +101,16 @@
                     col))
                 ((some-fn :fields :result_metadata) entity))))
 
-(defn satisfies-requierments?
+(mu/defn satisfies-requirements?
   "Does source entity satisfies requirements of given spec?"
-  [entity {:keys [required_attributes]}]
+  [entity                         :- [:or SourceEntity]
+   {:keys [required_attributes]} :- domain-entities.specs/DomainEntitySpec]
   (every? (partial has-attribute? entity) required_attributes))
 
 (defn- best-match
   [candidates]
   (->> candidates
-       (sort-by (juxt (comp count ancestors :type) (comp count :required_attributes)))
+       (sort-by (juxt (comp count domain-entities.hierarchy/ancestors :type) (comp count :required_attributes)))
        last))
 
 (defn- instantiate-dimensions
@@ -90,11 +118,12 @@
   (into (empty entities) ; this way we don't care if we're dealing with a map or a vec
         (for [entity entities
               :when (every? (get-in bindings [source :dimensions])
-                            (lib.util.match/match entity [:dimension dimension] dimension))]
+                            (match/match-many entity [:dimension dimension] dimension))]
           (resolve-dimension-clauses bindings source entity))))
 
-(defn- instantiate-domain-entity
-  [table {:keys [name description metrics segments breakout_dimensions type]}]
+(mu/defn- instantiate-domain-entity :- ::domain-entities.specs/instantiated-domain-entity
+  [table                                                                :- (ms/InstanceOf :model/Table)
+   {:keys [name description metrics segments breakout_dimensions type]} :- domain-entities.specs/DomainEntitySpec]
   (let [dimensions (into {} (for [field (:fields table)]
                               [(-> field field-type clojure.core/name) field]))
         bindings   {name {:entity     table
@@ -108,13 +137,13 @@
      :source_table        (u/the-id table)
      :name                name}))
 
-(defn domain-entity-for-table
+(mu/defn domain-entity-for-table :- [:maybe ::domain-entities.specs/instantiated-domain-entity]
   "Find the best fitting domain entity for given table."
-  [table]
+  [table :- (ms/InstanceOf :model/Table)]
   (let [table (t2/hydrate table :fields)]
-    (some->> @domain-entity-specs
+    (some->> @*domain-entity-specs*
              vals
-             (filter (partial satisfies-requierments? table))
+             (filter (partial satisfies-requirements? table))
              best-match
              (instantiate-domain-entity table))))
 
@@ -122,4 +151,5 @@
   "Fake hydration function."
   [tables]
   (for [table tables]
+    ;; TODO (Cam 9/29/25) -- this key is only used in Clojure-land, there's no reason we should use snake-case for it
     (assoc table :domain_entity (domain-entity-for-table table))))

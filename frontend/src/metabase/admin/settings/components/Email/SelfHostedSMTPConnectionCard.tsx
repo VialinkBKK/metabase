@@ -1,9 +1,8 @@
 import { useDisclosure } from "@mantine/hooks";
 import { t } from "ttag";
 
-import { SettingsSection } from "metabase/admin/components/SettingsSection";
-import { useSetting } from "metabase/common/hooks";
-import { color } from "metabase/lib/colors";
+import { useSetting } from "metabase/settings";
+import { SettingsSection } from "metabase/settings-components";
 import { Button, Flex, Paper, Title } from "metabase/ui";
 
 import { SelfHostedSMTPConnectionForm } from "./SelfHostedSMTPConnectionForm";
@@ -23,10 +22,10 @@ export const SelfHostedSMTPConnectionCard = () => {
             {isEmailConfigured && (
               <Paper
                 fw="bold"
-                c={"brand"}
-                bg={color("brand-light")}
+                c={"core-brand"}
+                bg="background_surface-brand-subtle"
                 p={"0.25rem 0.375rem"}
-                radius="xs"
+                radius="xxs"
               >{t`Active`}</Paper>
             )}
           </Flex>

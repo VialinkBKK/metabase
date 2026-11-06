@@ -4,6 +4,8 @@ import { t } from "ttag";
 
 import { useGetCollectionQuery } from "metabase/api";
 import { LeaveConfirmModal } from "metabase/common/components/LeaveConfirmModal";
+import { isReturningToDataStudio } from "metabase/common/data-studio/utils/return-to";
+import { canManageSubscriptions as canManageSubscriptionsSelector } from "metabase/current-user";
 import {
   cancelEditingDashboard,
   fetchDashboard,
@@ -16,14 +18,15 @@ import {
   getIsEditing,
 } from "metabase/dashboard/selectors";
 import { isEmbeddingSdk } from "metabase/embedding-sdk/config";
-import { useDispatch, useSelector } from "metabase/lib/redux";
 import { fetchPulseFormInput } from "metabase/notifications/pulse/actions";
-import { getSetting } from "metabase/selectors/settings";
-import { Flex, Loader } from "metabase/ui";
+import { useDispatch, useSelector } from "metabase/redux";
+import { useMaybeLocation } from "metabase/router";
+import { getSetting } from "metabase/settings";
 import type { Dashboard } from "metabase-types/api";
 
 import { SIDEBAR_NAME } from "../../constants";
 
+import { DashboardHeaderSkeleton } from "./DashboardHeaderSkeleton";
 import { DashboardHeaderView } from "./DashboardHeaderView";
 import { CancelEditButton, SaveEditButton } from "./buttons";
 
@@ -35,9 +38,15 @@ export const DashboardHeaderInner = ({ dashboard }: DashboardHeaderProps) => {
   const [modalOpened, { open: openModal, close: closeModal }] = useDisclosure();
 
   const dispatch = useDispatch();
+  // The SDK renders the dashboard header outside the app router.
+  const location = useMaybeLocation() ?? undefined;
+  const { isGuestEmbed } = useDashboardContext();
+  const canManageSubscriptions = useSelector(canManageSubscriptionsSelector);
 
   useMount(() => {
-    dispatch(fetchPulseFormInput());
+    if (!isGuestEmbed && canManageSubscriptions) {
+      dispatch(fetchPulseFormInput());
+    }
   });
 
   const isEditing = useSelector(getIsEditing);
@@ -53,8 +62,12 @@ export const DashboardHeaderInner = ({ dashboard }: DashboardHeaderProps) => {
       getSetting(state, "custom-homepage-dashboard") === dashboard?.id,
   );
 
-  const { data: collection, isLoading: isLoadingCollection } =
-    useGetCollectionQuery({ id: dashboard.collection_id || "root" });
+  const { data: collection } = useGetCollectionQuery(
+    { id: dashboard.collection_id || "root" },
+    {
+      skip: isGuestEmbed,
+    },
+  );
 
   const onRequestCancel = () => {
     if (isDirty && isEditing) {
@@ -65,14 +78,16 @@ export const DashboardHeaderInner = ({ dashboard }: DashboardHeaderProps) => {
   };
 
   const onConfirmCancel = () => {
-    dispatch(
-      fetchDashboard({
-        dashId: dashboard.id,
-        queryParams: parameterQueryParams ?? {},
-        options: { preserveParameters: true },
-      }),
-    );
-    dispatch(cancelEditingDashboard());
+    if (!isReturningToDataStudio(location)) {
+      dispatch(
+        fetchDashboard({
+          dashId: dashboard.id,
+          queryParams: parameterQueryParams ?? {},
+          options: { preserveParameters: true },
+        }),
+      );
+    }
+    dispatch(cancelEditingDashboard(location));
     closeModal();
   };
 
@@ -102,14 +117,6 @@ export const DashboardHeaderInner = ({ dashboard }: DashboardHeaderProps) => {
       <SaveEditButton key="save-edit-button" />,
     ];
   };
-
-  if (isLoadingCollection || !collection) {
-    return (
-      <Flex justify="center" py="1.5rem">
-        <Loader size={29} />
-      </Flex>
-    );
-  }
 
   const hasLastEditInfo = dashboard["last-edit-info"] != null;
 
@@ -148,10 +155,12 @@ export const DashboardHeaderInner = ({ dashboard }: DashboardHeaderProps) => {
 };
 
 export const DashboardHeader = () => {
-  const { dashboard } = useDashboardContext();
+  const { dashboard, dashboardId, titled } = useDashboardContext();
 
   if (!dashboard) {
-    return null;
+    return (
+      <DashboardHeaderSkeleton dashboardId={dashboardId} titled={titled} />
+    );
   }
 
   return <DashboardHeaderInner dashboard={dashboard} />;

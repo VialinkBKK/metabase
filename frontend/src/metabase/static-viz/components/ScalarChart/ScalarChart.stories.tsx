@@ -1,12 +1,14 @@
 import type { StoryFn } from "@storybook/react";
 
-import { color } from "metabase/lib/colors";
 import {
   measureTextHeight,
   measureTextWidth,
 } from "metabase/static-viz/lib/text";
-import { DEFAULT_VISUALIZATION_THEME } from "metabase/visualizations/shared/utils/theme";
-import type { RenderingContext } from "metabase/visualizations/types";
+import { color } from "metabase/ui/colors";
+import {
+  DEFAULT_VISUALIZATION_THEME,
+  type RenderingContext,
+} from "metabase/viz-core";
 
 import {
   type StaticChartProps,
@@ -35,12 +37,14 @@ const renderingContext: RenderingContext = {
     measureTextWidth(text, Number(style.size), Number(style.weight)),
   measureTextHeight: (_, style) => measureTextHeight(Number(style.size)),
   fontFamily: "Lato",
+  isStatic: true,
   theme: DEFAULT_VISUALIZATION_THEME,
 };
 
 export const Default = {
   render: Template,
   args: {
+    // Unjustified type cast. FIXME
     rawSeries: data.twoScalars as any,
     renderingContext,
   },

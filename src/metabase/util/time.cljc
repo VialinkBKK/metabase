@@ -26,6 +26,7 @@
   zone-offset-part-regex]
  [internal
   valid?
+  same-time?
   same-day?
   same-month?
   same-year?
@@ -35,6 +36,7 @@
   add
   extract
   format-for-base-type
+  format-date-for-filter
   local-date
   local-date-time
   local-time])
@@ -85,12 +87,11 @@
   "Formats a temporal-value (iso date/time string, int for hour/minute) given the temporal-bucketing unit.
   If unit is nil, formats the full date/time.
 
-  If `locale` is provided, that locale will be used for localizing the formatter. In CLJ this should be a `Locale`. Not
-  supported in CLJS since we have to rely on the browser's locale."
-  ([temporal-value unit]
-   (internal/format-unit temporal-value unit))
-  ([temporal-value unit locale]
-   (internal/format-unit temporal-value unit locale)))
+  `time-config` must include `:start-of-week`. `format-options` may include `:locale` to localize the formatter."
+  ([time-config temporal-value unit]
+   (format-unit time-config temporal-value unit {}))
+  ([time-config temporal-value unit format-options]
+   (internal/format-unit (common/require-time-config time-config) temporal-value unit format-options)))
 
 (defn parse-unit
   "Parses a string given the unit of time to parse by."
@@ -107,16 +108,21 @@
 
 (defn format-relative-date-range
   "Given a `n` `unit` time interval and the current date, return a string representing the date-time range.
+   `time-config` must contain `:start-of-week` as a weekday keyword.
+   When `n` is zero, return the current unit whether or not `:include-current` is true.
    Provide an `offset-n` and `offset-unit` time interval to change the date used relative to the current date.
    `options` is a map and supports `:include-current` to include the current given unit of time in the range."
-  ([n unit]
-   (format-relative-date-range n unit nil nil nil))
-  ([n unit offset-n offset-unit]
-   (format-relative-date-range n unit offset-n offset-unit nil))
-  ([n unit offset-n offset-unit options]
-   (internal/format-relative-date-range n unit offset-n offset-unit options))
-  ([t n unit offset-n offset-unit options]
-   (internal/format-relative-date-range (coerce-to-timestamp t) n unit offset-n offset-unit options)))
+  ([time-config n unit]
+   (format-relative-date-range time-config n unit nil nil nil))
+  ([time-config n unit offset-n offset-unit]
+   (format-relative-date-range time-config n unit offset-n offset-unit nil))
+  ([time-config n unit offset-n offset-unit options]
+   (internal/format-relative-date-range (common/require-time-config time-config) n unit offset-n offset-unit options))
+  ([time-config t n unit offset-n offset-unit options]
+   (let [time-config (common/require-time-config time-config)]
+     (internal/format-relative-date-range time-config
+                                          (coerce-to-timestamp t)
+                                          n unit offset-n offset-unit options))))
 
 (defn yyyyMMddhhmmss->parts
   "Generate parts vector for `yyyy-MM-ddThh:mm:ss` format `date-str`. Trailing parts, if not present in the string,
@@ -126,3 +132,12 @@
                        :cljs js/parseInt)
                     (str/split date-str #"-|:|T"))]
     (into parts (repeat (- 6 (count parts)) 0))))
+
+#?(:cljs
+   (defn dayjs-utc->local-date
+     "Convert a dayjs UTC value to a JavaScript Date in local time, preserving the time values.
+      This is needed because coerce-to-timestamp returns dayjs objects in UTC mode, but the FE expects
+      Date objects in local time with the same year/month/day/hour/minute/second values.
+      dayjs.local(true) doesn't work like moment.local(true), so we format and reparse as local time."
+     [value]
+     (internal/dayjs-utc->local-date value)))

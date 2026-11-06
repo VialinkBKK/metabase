@@ -1,6 +1,6 @@
 import { t } from "ttag";
 
-import ExternalLink from "metabase/common/components/ExternalLink";
+import { ExternalLink } from "metabase/common/components/ExternalLink";
 import { Box, Button, Group, Text } from "metabase/ui";
 
 type SDKContentProps = {
@@ -12,18 +12,18 @@ export const SDKContent = ({
   sdkQuickstartUrl,
   sdkDocsUrl,
 }: SDKContentProps) => (
-  <Box>
+  <Box component="section" aria-labelledby="sdk-title">
     <Group gap="sm" align="center" mb="sm">
-      <Text fw="bold" size="lg" color="text-medium">
-        {t`Embedded analytics SDK`}
+      <Text fw="bold" size="lg" color="text-secondary" id="sdk-title">
+        {t`Embedded analytics SDK for React`}
       </Text>
     </Group>
-    <Text mb="md">
+    <Text mb="lg">
       {t`Embed individual components like charts, dashboards, the query builder, and more with React. Get advanced customization with CSS styling and manage granular access and interactivity per component.`}
     </Text>
-    <Group gap="md">
+    <Group gap="lg">
       <ExternalLink href={sdkQuickstartUrl}>
-        <Button variant="outline">{t`Check out the Quickstart`}</Button>
+        <Button>{t`Check out the Quickstart`}</Button>
       </ExternalLink>
       <ExternalLink href={sdkDocsUrl}>
         <Button variant="subtle">{t`Read the docs`}</Button>

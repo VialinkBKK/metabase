@@ -1,20 +1,29 @@
 (ns ^:mb/driver-tests metabase.query-processor.middleware.annotate-test
+  {:clj-kondo/config '{:linters {:deprecated-var {:exclude {metabase.test.data/mbql-query {:namespaces [metabase.query-processor.middleware.annotate-test]}
+                                                            metabase.test.data/run-mbql-query {:namespaces [metabase.query-processor.middleware.annotate-test]}}}}}}
   (:require
    [clojure.test :refer :all]
    [medley.core :as m]
+   [metabase.config.core :as config]
    [metabase.driver :as driver]
    [metabase.lib.core :as lib]
+   [metabase.lib.schema :as lib.schema]
    [metabase.lib.test-metadata :as meta]
    [metabase.lib.test-util :as lib.tu]
    [metabase.lib.test-util.macros :as lib.tu.macros]
    [metabase.query-processor.middleware.annotate :as annotate]
    [metabase.query-processor.preprocess :as qp.preprocess]
-   [metabase.query-processor.store :as qp.store]
+   ;; binds mock metadata providers via the ambient store, which the code under test reads
+   ^{:clj-kondo/ignore [:deprecated-namespace]} [metabase.query-processor.store :as qp.store]
    [metabase.test :as mt]
+   [metabase.test.fixtures :as fixtures]
    [metabase.util :as u]
-   [metabase.util.malli :as mu]))
+   [metabase.util.malli :as mu]
+   [metabase.util.malli.schema :as ms]))
 
 (set! *warn-on-reflection* true)
+
+(use-fixtures :once (fixtures/initialize :db))
 
 (deftest ^:parallel needs-type-inference?-test
   (is (#'annotate/needs-type-inference?
@@ -22,12 +31,13 @@
        {:cols [{:name "_id"} {:name "longitude"} {:name "category_id"} {:name "price"} {:name "name"} {:name "latitude"}]})))
 
 (mu/defn- add-column-info
-  ([query metadata]
+  ([query    :- ::lib.schema/query
+    metadata :- ::annotate/metadata]
    (add-column-info query metadata []))
 
-  ([query    :- :map
+  ([query    :- ::lib.schema/query
     metadata :- ::annotate/metadata
-    rows     :- [:maybe [:sequential [:sequential :any]]]]
+    rows     :- [:maybe [:sequential [:sequential ms/FieldValue]]]]
    (letfn [(rff [metadata]
              (fn rf
                ([]
@@ -46,14 +56,14 @@
   (testing "native column info"
     (testing "should still infer types even if the initial value(s) are `nil` (#4256, #6924)"
       (is (= [:type/Integer]
-             (transduce identity (#'annotate/base-type-inferer {:cols [{}]})
+             (transduce identity (#'annotate/base-type-inferer {:cols [{:name "a"}]})
                         (concat (repeat 1000 [nil]) [[1] [2]])))))))
 
 (deftest ^:parallel native-column-info-test-2
   (testing "native column info"
     (testing "should use default `base_type` of `type/*` if there are no non-nil values in the sample"
       (is (= [:type/*]
-             (transduce identity (#'annotate/base-type-inferer {:cols [{}]})
+             (transduce identity (#'annotate/base-type-inferer {:cols [{:name "a"}]})
                         [[nil]]))))))
 
 (deftest ^:parallel native-column-info-test-3
@@ -61,7 +71,7 @@
     (testing "should attempt to infer better base type if driver returns :type/* (#12150)"
       ;; `merged-column-info` handles merging info returned by driver & inferred by annotate
       (is (= [:type/Integer]
-             (transduce identity (#'annotate/base-type-inferer {:cols [{:base_type :type/*}]})
+             (transduce identity (#'annotate/base-type-inferer {:cols [{:name "a", :base_type :type/*}]})
                         [[1] [2] [nil] [3]]))))))
 
 (defn- column-info [query {:keys [rows], :as metadata}]
@@ -125,19 +135,19 @@
                   :source       :native
                   :field_ref    [:field "a_2" {:base-type :type/*}]}]
                 (column-info
-                 (lib/query meta/metadata-provider {:type :native})
+                 (lib/query meta/metadata-provider {:type :native, :native {:query "SELECT 1;"}})
                  {:cols [{:name "a"} {:name "a"}]
                   :rows rows})))))))
 
 (deftest ^:parallel mbql-cols-nested-queries-test
   (testing "Should be able to infer MBQL columns with nested queries"
     (qp.store/with-metadata-provider meta/metadata-provider
-      (let [base-query (qp.preprocess/preprocess
-                        (lib.tu.macros/mbql-query venues
-                          {:joins [{:fields       :all
-                                    :source-table $$categories
-                                    :condition    [:= $category-id &c.categories.id]
-                                    :alias        "c"}]}))]
+      (let [base-query (-> (lib.tu.macros/mbql-query venues
+                             {:joins [{:fields       :all
+                                       :source-table $$categories
+                                       :condition    [:= $category-id &c.categories.id]
+                                       :alias        "c"}]})
+                           qp.preprocess/preprocess)]
         (doseq [level [0 1 2 3]
                 :let [field (fn [field-key legacy-ref]
                               (let [metadata (meta/field-metadata :venues field-key)]
@@ -145,9 +155,7 @@
                                     (select-keys [:id :name])
                                     (assoc :field_ref legacy-ref))))]]
           (testing (format "%d level(s) of nesting" level)
-            (let [nested-query (lib/query
-                                (qp.store/metadata-provider)
-                                (mt/nest-query base-query level))]
+            (let [nested-query (nth (iterate lib/append-stage base-query) level)]
               (is (=? (lib.tu.macros/$ids venues
                         [(field :id          $id)
                          (field :name        $name)
@@ -178,9 +186,9 @@
                                             {:name "max"}]]
                                           :breakout     [$category]
                                           :order-by     [[:asc $category]]})])
-      (let [query (lib/query
-                   (qp.store/metadata-provider)
-                   (qp.preprocess/preprocess
+      (let [query (qp.preprocess/preprocess
+                   (lib/query
+                    (qp.store/metadata-provider)
                     (lib.tu.macros/mbql-query nil
                       {:source-table "card__1"
                        :aggregation  [[:aggregation-options
@@ -194,7 +202,7 @@
                                        {:name "count"}]]
                        :limit        1})))]
         (is (= ["Sum of Sum of Price" "Count"]
-               (->> (add-column-info query {:cols [{} {}]})
+               (->> (add-column-info query {:cols [{:name "sum"} {:name "count"}]})
                     :cols
                     (map :display_name))))))))
 
@@ -209,17 +217,17 @@
       (qp.store/with-metadata-provider meta/metadata-provider
         (testing "Make sure metadata is correct for the 'EAN' column with"
           (let [base-query (qp.preprocess/preprocess
-                            (lib.tu.macros/mbql-query orders
-                              {:joins [{:fields       :all
-                                        :source-table $$products
-                                        :condition    [:= $product-id &Products.products.id]
-                                        :alias        "Products"}]
-                               :limit 10}))]
+                            (lib/query
+                             meta/metadata-provider
+                             (lib.tu.macros/mbql-query orders
+                               {:joins [{:fields       :all
+                                         :source-table $$products
+                                         :condition    [:= $product-id &Products.products.id]
+                                         :alias        "Products"}]
+                                :limit 10})))]
             (doseq [level (range 4)]
               (testing (format "%d level(s) of nesting" level)
-                (let [nested-query (lib/query
-                                    meta/metadata-provider
-                                    (mt/nest-query base-query level))]
+                (let [nested-query (nth (iterate lib/append-stage base-query) level)]
                   (testing (format "\nQuery = %s" (u/pprint-to-str nested-query))
                     (is (= (lib.tu.macros/$ids products
                              {:name          "EAN"
@@ -235,33 +243,33 @@
                          {:joins [{:fields       :all
                                    :source-table $$products
                                    :condition    [:= $product-id &Products.products.id]
-                                   :alias        "Products"}]})]
-      (qp.store/with-metadata-provider (lib.tu/metadata-provider-with-cards-for-queries
-                                        meta/metadata-provider
-                                        [card-1-query
-                                         (lib.tu.macros/mbql-query people)])
-        (testing "when a nested query is from a saved question, there should be no `:join-alias` on the left side"
-          (lib.tu.macros/$ids nil
-            (let [base-query (lib/query
-                              (qp.store/metadata-provider)
-                              (qp.preprocess/preprocess
-                               (lib.tu.macros/mbql-query nil
-                                 {:source-table "card__1"
-                                  :joins        [{:fields       :all
-                                                  :source-table "card__2"
-                                                  :condition    [:= $orders.user-id &Products.products.id]
-                                                  :alias        "Q"}]
-                                  :limit        1})))
-                  fields     #{%orders.discount %products.title %people.source}]
-              (is (= [{:display_name "Discount"
-                       :field_ref    [:field %orders.discount nil]}
-                      {:display_name "Products → Title"
-                       :field_ref    [:field %products.title nil]}
-                      {:display_name "Q → Source"
-                       :field_ref    [:field %people.source {:join-alias "Q"}]}]
-                     (->> (:cols (add-column-info base-query {}))
-                          (filter #(fields (:id %)))
-                          (map #(select-keys % [:display_name :field_ref]))))))))))))
+                                   :alias        "Products"}]})
+          mp (lib.tu/metadata-provider-with-cards-for-queries
+              meta/metadata-provider
+              [card-1-query
+               (lib.tu.macros/mbql-query people)])]
+      (testing "when a nested query is from a saved question, there should be no `:join-alias` on the left side"
+        (lib.tu.macros/$ids nil
+          (let [base-query (qp.preprocess/preprocess
+                            (lib/query
+                             mp
+                             (lib.tu.macros/mbql-query nil
+                               {:source-table "card__1"
+                                :joins        [{:fields       :all
+                                                :source-table "card__2"
+                                                :condition    [:= $orders.user-id &Products.products.id]
+                                                :alias        "Q"}]
+                                :limit        1})))
+                fields     #{%orders.discount %products.title %people.source}]
+            (is (= [{:display_name "Discount"
+                     :field_ref    [:field %orders.discount nil]}
+                    {:display_name "Products → Title"
+                     :field_ref    [:field %products.title nil]}
+                    {:display_name "Q → Source"
+                     :field_ref    [:field %people.source {:join-alias "Q"}]}]
+                   (->> (:cols (add-column-info base-query {}))
+                        (filter #(fields (:id %)))
+                        (map #(select-keys % [:display_name :field_ref])))))))))))
 
 (deftest ^:parallel col-info-for-joined-fields-from-card-test
   (testing "Has the correct display names for joined fields from cards (#14787)"
@@ -347,3 +355,54 @@
                    {:cols [{:name "sleep", :base_type :type/*, :database_type "void"}]}
                    [[""]])
                   :cols))))))
+
+(deftest ^:synchronized expected-cols-no-infinite-loop-test
+  (testing "In case of a lib vs. driver column count mismatch, don't loop infinitely (#66955)"
+    (let [query       (lib/query meta/metadata-provider
+                                 (meta/table-metadata :orders))
+          all-cols    (mapv (fn [col] {:name (:name col), :base_type (:base-type col)}) (lib/returned-columns query))
+          missing-one (butlast all-cols)]
+      (is (= 9 (count (annotate/expected-cols query all-cols))))
+      (testing "in dev and test modes, we throw an error when the counts differ"
+        (is (thrown-with-msg? Exception #"column number mismatch"
+                              (annotate/expected-cols query missing-one))))
+      (testing "in prod, we log and append nils to make the counts line up - this looped forever before #66955!"
+        (with-redefs [config/is-prod? true]
+          (is (= 8 (count (annotate/expected-cols query missing-one)))))))))
+
+(deftest ^:parallel nested-field-display-name-test
+  (testing "expected-cols should produce correct nested display_names for fields with parent_id"
+    (let [grandparent-id (+ (meta/id :venues :id) 50)
+          parent-id      (+ (meta/id :venues :id) 60)
+          child-id       (+ (meta/id :venues :id) 70)
+          mp             (lib.tu/mock-metadata-provider
+                          {:database meta/database
+                           :tables   [(meta/table-metadata :venues)]
+                           :fields   (mapv (fn [field-metadata]
+                                             (merge {:visibility-type :normal
+                                                     :table-id        (meta/id :venues)}
+                                                    field-metadata))
+                                           [{:lib/type     :metadata/column
+                                             :name         "grandparent"
+                                             :display-name "Grandparent"
+                                             :id           grandparent-id
+                                             :base-type    :type/Text}
+                                            {:lib/type     :metadata/column
+                                             :name         "parent"
+                                             :display-name "Parent"
+                                             :parent-id    grandparent-id
+                                             :id           parent-id
+                                             :base-type    :type/Text}
+                                            {:lib/type     :metadata/column
+                                             :name         "child"
+                                             :display-name "Child"
+                                             :parent-id    parent-id
+                                             :id           child-id
+                                             :base-type    :type/Text}])})
+          query          (lib/query mp (meta/table-metadata :venues))]
+      (qp.store/with-metadata-provider mp
+        (let [cols (annotate/expected-cols query)]
+          (is (= ["Grandparent: Parent: Child"
+                  "Grandparent"
+                  "Grandparent: Parent"]
+                 (mapv :display_name cols))))))))

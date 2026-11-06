@@ -1,7 +1,8 @@
 import { useFormikContext } from "formik";
+import type { JSX } from "react";
 import { jt, t } from "ttag";
 
-import ExternalLink from "metabase/common/components/ExternalLink";
+import { ExternalLink } from "metabase/common/components/ExternalLink";
 import type { DatabaseData } from "metabase-types/api";
 
 const AUTH_CODE_URLS: Record<string, string> = {

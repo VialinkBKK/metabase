@@ -1,12 +1,12 @@
-import dayjs from "dayjs";
 import { useState } from "react";
 import { match } from "ts-pattern";
 import { t } from "ttag";
 
+import { dayjs } from "metabase/dayjs";
 import {
   DateRangePicker,
   type DateRangePickerValue,
-} from "metabase/querying/filters/components/DatePicker/SpecificDatePicker/DateRangePicker";
+} from "metabase/querying/common/components/DatePicker/SpecificDatePicker/DateRangePicker";
 import {
   deserializeDateParameterValue,
   serializeDateParameterValue,

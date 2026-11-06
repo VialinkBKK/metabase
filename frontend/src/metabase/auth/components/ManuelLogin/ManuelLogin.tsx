@@ -1,23 +1,16 @@
-import type { Location } from "history";
 import Cookies from "js-cookie";
-import { useEffect } from "react";
+import { type JSX, useEffect } from "react";
 
-import { METABASE_SESSION_COOKIE } from "metabase/lib/cookies";
+import { useSearchParams } from "metabase/router";
 import { Box, Loader } from "metabase/ui";
 
 import { AuthLayout } from "../AuthLayout";
 
-interface ManuelLoginQueryString {
-  session?: string;
-  redirect?: string;
-}
+const METABASE_SESSION_COOKIE = "metabase.SESSION";
 
-interface ManuelLoginProps {
-  location?: Location<ManuelLoginQueryString>;
-}
-
-export const ManuelLogin = ({ location }: ManuelLoginProps): JSX.Element => {
-  const sessionUid = location?.query?.session;
+export const ManuelLogin = (): JSX.Element => {
+  const [searchParams] = useSearchParams();
+  const sessionUid = searchParams.get("session");
 
   useEffect(() => {
     if (sessionUid) {

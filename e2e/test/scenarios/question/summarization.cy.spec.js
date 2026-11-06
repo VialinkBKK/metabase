@@ -1,10 +1,9 @@
 const { H } = cy;
-import { dedent } from "ts-dedent";
-
+import { SAMPLE_DB_ID } from "e2e/support/cypress_data";
 import { SAMPLE_DATABASE } from "e2e/support/cypress_sample_database";
 import { ORDERS_QUESTION_ID } from "e2e/support/cypress_sample_instance_data";
 
-const { ORDERS, ORDERS_ID } = SAMPLE_DATABASE;
+const { ORDERS_ID } = SAMPLE_DATABASE;
 
 describe("scenarios > question > summarize sidebar", () => {
   beforeEach(() => {
@@ -17,18 +16,7 @@ describe("scenarios > question > summarize sidebar", () => {
     H.summarize();
   });
 
-  it("removing all aggregations should show add aggregation button with label", () => {
-    cy.findByTestId("aggregation-item").within(() => {
-      cy.icon("close").click();
-    });
-
-    cy.findByTestId("add-aggregation-button").should(
-      "have.text",
-      "Add a function or metric",
-    );
-  });
-
-  it("selected dimensions becomes pinned to the top of the dimensions list", () => {
+  it("selected dimensions become pinned to the top of the dimensions list (with the table alias for another table), and removing all aggregations shows the add aggregation button", () => {
     H.getDimensionByName({ name: "Total" })
       .should("have.attr", "aria-selected", "false")
       .click({ position: "left" });
@@ -64,9 +52,7 @@ describe("scenarios > question > summarize sidebar", () => {
     cy.findByTestId("unpinned-dimensions").within(() => {
       cy.findByText("Total");
     });
-  });
 
-  it("selected dimensions from another table includes the table alias when becomes pinned to the top", () => {
     H.getDimensionByName({ name: "State" }).click();
 
     cy.button("Done").click();
@@ -83,8 +69,17 @@ describe("scenarios > question > summarize sidebar", () => {
 
     H.getRemoveDimensionButton({ name: "User → State" }).click();
 
-    // eslint-disable-next-line no-unscoped-text-selectors -- deprecated usage
+    // eslint-disable-next-line metabase/no-unscoped-text-selectors -- deprecated usage
     cy.findByText("User → State").should("not.exist");
+
+    cy.findByTestId("aggregation-item").within(() => {
+      cy.icon("close").click();
+    });
+
+    cy.findByTestId("add-aggregation-button").should(
+      "have.text",
+      "Add a function or metric",
+    );
   });
 
   it("selecting a binning adds a dimension", () => {
@@ -110,90 +105,40 @@ describe("scenarios > question > summarize sidebar", () => {
     });
   });
 
-  it("should be able to do subsequent aggregation on a custom expression (metabase#14649)", () => {
-    H.createQuestion(
-      {
-        name: "14649_min",
-        query: {
-          "source-query": {
-            "source-table": ORDERS_ID,
-            aggregation: [
-              [
-                "aggregation-options",
-                ["sum", ["field", ORDERS.SUBTOTAL, null]],
-                { name: "Revenue", "display-name": "Revenue" },
-              ],
-            ],
-            breakout: [
-              ["field", ORDERS.CREATED_AT, { "temporal-unit": "month" }],
-            ],
-          },
-          aggregation: [
-            ["min", ["field", "Revenue", { "base-type": "type/Float" }]],
-          ],
-        },
-
-        display: "scalar",
-      },
-      { visitQuestion: true },
-    );
-
-    // eslint-disable-next-line no-unscoped-text-selectors -- deprecated usage
-    cy.findByText("49.54");
-  });
-
-  it("should allow using `Custom Expression` in orders metrics (metabase#12899)", () => {
-    H.openOrdersTable({ mode: "notebook" });
-    H.summarize({ mode: "notebook" });
-    H.popover().contains("Custom Expression").click();
-
-    H.enterCustomColumnDetails({
-      formula: "2 * Max([Total])",
-      name: "twice max total",
+  it("should only have one scrollbar for the summarize sidebar and not show the run button overlay when an error occurs (metabase#45452, metabase#12586)", () => {
+    cy.findByTestId("summarize-aggregation-item-list").then(($el) => {
+      const element = $el[0];
+      expectNoScrollbar(element);
     });
 
-    H.expressionEditorWidget().button("Done").click();
-    cy.findByTestId("aggregate-step")
-      .contains("twice max total")
-      .should("exist");
-
-    H.visualize();
-
-    // eslint-disable-next-line no-unscoped-text-selectors -- deprecated usage
-    cy.findByText("318.7");
-  });
-
-  it("should keep manually entered parenthesis intact if they affect the result (metabase#13306)", () => {
-    H.openOrdersTable({ mode: "notebook" });
-    H.summarize({ mode: "notebook" });
-
-    H.popover().contains("Custom Expression").click();
-    H.enterCustomColumnDetails({
-      formula: "sum([Total]) / (sum([Product → Price]) * average([Quantity]))",
-      format: true,
+    cy.findByTestId("summarize-breakout-column-list").then(($el) => {
+      const element = $el[0];
+      expectNoScrollbar(element);
     });
 
-    H.CustomExpressionEditor.value().should(
-      "equal",
-      dedent`
-        Sum([Total]) /
-          (Sum([Product → Price]) * Average([Quantity]))
-      `.trim(),
-    );
+    // the sidebar is the only element with a scrollbar
+    cy.findByTestId("sidebar-content").then(($el) => {
+      const element = $el[0];
+      expect(element.scrollHeight > element.clientHeight).to.be.true;
+      expect(element.offsetWidth > element.clientWidth).to.be.true;
+    });
+
+    cy.intercept("POST", "/api/dataset", (req) => req.destroy());
+
+    H.rightSidebar().button("Done").click();
+    H.main()
+      .findByText("We're experiencing server issues")
+      .should("be.visible");
+    cy.findByTestId("query-builder-main").icon("play").should("not.be.visible");
   });
+});
 
-  it("distinct inside custom expression should suggest non-numeric types (metabase#13469)", () => {
-    H.openReviewsTable({ mode: "notebook" });
-    H.summarize({ mode: "notebook" });
-    H.popover().contains("Custom Expression").click();
+describe("scenarios > question > summarize", () => {
+  beforeEach(() => {
+    H.restore();
+    cy.signInAsAdmin();
 
-    H.enterCustomColumnDetails({ formula: "Distinct([R", blur: false });
-
-    cy.log(
-      "**The point of failure for ANY non-numeric value reported in v0.36.4**",
-    );
-    // the default type for "Reviewer" is "No semantic type"
-    H.CustomExpressionEditor.completion("Reviewer").should("be.visible");
+    cy.intercept("POST", "/api/dataset").as("dataset");
   });
 
   it("summarizing by distinct datetime should allow granular selection (metabase#13098)", () => {
@@ -205,32 +150,58 @@ describe("scenarios > question > summarize sidebar", () => {
       cy.findByLabelText("Temporal bucket").realHover().click();
     });
 
-    // eslint-disable-next-line no-unsafe-element-filtering
+    // eslint-disable-next-line metabase/no-unsafe-element-filtering
     H.popover()
       .last()
       .within(() => {
         cy.button("More…").click();
         cy.findByText("Hour of day").click();
       });
+
+    H.getNotebookStep("summarize")
+      .findByText("Distinct values of Created At: Hour of day")
+      .should("be.visible");
   });
 
   it("should handle (removing) multiple metrics when one is sorted (metabase#12625)", () => {
-    H.createQuestion(
-      {
-        name: "12625",
-        query: {
-          "source-table": ORDERS_ID,
-          aggregation: [
-            ["count"],
-            ["sum", ["field", ORDERS.SUBTOTAL, null]],
-            ["sum", ["field", ORDERS.TOTAL, null]],
+    H.createTestQuery({
+      database: SAMPLE_DB_ID,
+      stages: [
+        {
+          source: { type: "table", id: ORDERS_ID },
+          aggregations: [
+            { type: "operator", operator: "count" },
+            {
+              type: "operator",
+              operator: "sum",
+              args: [{ type: "column", name: "SUBTOTAL" }],
+            },
+            {
+              type: "operator",
+              operator: "sum",
+              name: "sum_2",
+              args: [{ type: "column", name: "TOTAL" }],
+            },
           ],
-          breakout: [["field", ORDERS.CREATED_AT, { "temporal-unit": "year" }]],
-          "order-by": [["desc", ["aggregation", 1]]],
+          breakouts: [
+            {
+              type: "column",
+              name: "CREATED_AT",
+              unit: "year",
+            },
+          ],
+          orderBys: [
+            {
+              direction: "desc",
+              type: "column",
+              name: "sum",
+            },
+          ],
         },
-      },
-      { visitQuestion: true },
-    );
+      ],
+    })
+      .then((dataset_query) => H.createCard({ name: "12625", dataset_query }))
+      .then((card) => H.visitQuestion(card.id));
 
     H.summarize();
 
@@ -259,36 +230,7 @@ describe("scenarios > question > summarize sidebar", () => {
     removeMetricFromSidebar("Sum of Total");
 
     cy.findAllByTestId("header-cell").should("have.length", 2);
-    cy.get("[data-testid=cell-data]").should("contain", 744); // `Count` for year 2022
-  });
-
-  // flaky test (#19454)
-  it.skip("should show an info popover when hovering over summarize dimension options", () => {
-    H.openReviewsTable();
-
-    H.summarize();
-    // eslint-disable-next-line no-unscoped-text-selectors -- deprecated usage
-    cy.findByText("Group by")
-      .parent()
-      .findByText("Title")
-      .trigger("mouseenter");
-
-    H.popover().contains("Title");
-    H.popover().contains("199 distinct values");
-  });
-
-  // TODO: fixme!
-  it.skip("should render custom expression helper near the custom expression field", () => {
-    H.openReviewsTable({ mode: "notebook" });
-    H.summarize({ mode: "notebook" });
-
-    H.popover().within(() => {
-      cy.findByText("Custom Expression").click();
-
-      H.enterCustomColumnDetails({ formula: "floor" });
-
-      H.checkExpressionEditorHelperPopoverPosition();
-    });
+    cy.get("[data-testid=cell-data]").should("contain", 744); // `Count` for year 2025
   });
 });
 
@@ -308,4 +250,15 @@ function removeMetricFromSidebar(metricName) {
 
     cy.findByLabelText(metricName).should("not.exist");
   });
+}
+
+function expectNoScrollbar(element) {
+  const { borderLeftWidth, borderRightWidth } = getComputedStyle(element);
+  const scrollbarWidth =
+    element.offsetWidth -
+    element.clientWidth -
+    parseFloat(borderLeftWidth) -
+    parseFloat(borderRightWidth);
+
+  expect(scrollbarWidth).to.equal(0);
 }

@@ -1,6 +1,6 @@
 import userEvent from "@testing-library/user-event";
 
-import { render, screen, within } from "__support__/ui";
+import { renderWithProviders, screen, within } from "__support__/ui";
 
 import { DateAllOptionsWidget } from "./DateAllOptionsWidget";
 
@@ -10,7 +10,9 @@ type SetupOpts = {
 
 function setup({ value }: SetupOpts = {}) {
   const onChange = jest.fn();
-  render(<DateAllOptionsWidget value={value} onChange={onChange} />);
+  renderWithProviders(
+    <DateAllOptionsWidget value={value} onChange={onChange} />,
+  );
   return { onChange };
 }
 
@@ -46,13 +48,10 @@ describe("DateAllOptionsWidget", () => {
   it('should accept a previously selected "relative" filter', async () => {
     setup({ value: "thisweek" });
     const panel = screen.getByRole("tabpanel", { name: "Current" });
-    expect(within(panel).getByRole("button", { name: "Week" })).toHaveAttribute(
-      "aria-selected",
-      "true",
-    );
+    expect(within(panel).getByRole("radio", { name: "Week" })).toBeChecked();
     expect(
-      within(panel).getByRole("button", { name: "Year" }),
-    ).not.toHaveAttribute("aria-selected", "true");
+      within(panel).getByRole("radio", { name: "Year" }),
+    ).not.toBeChecked();
   });
 
   it('should allow to select an "exclude" filter', async () => {

@@ -2,7 +2,7 @@
   (:require
    [clojure.java.io :as io]
    [clojure.test :refer :all]
-   [metabase-enterprise.serialization.names :as names]
+   [metabase-enterprise.serialization.v2.ingest :as serdes.ingest]
    [metabase.app-db.connection :as mdb.connection]
    [metabase.app-db.core :as mdb]
    [metabase.app-db.schema-migrations-test.impl :as schema-migrations-test.impl]
@@ -11,6 +11,7 @@
    [metabase.models.visualization-settings :as mb.viz]
    [metabase.test :as mt]
    [metabase.test.data :as data]
+   [metabase.test.data.impl :as data.impl]
    [metabase.util :as u]
    [metabase.util.files :as u.files]
    [next.jdbc]
@@ -50,7 +51,6 @@
   "Wraps with-temp*, but binding `*allow-deleting-personal-collections*` to true so that temporary personal collections
   can still be deleted."
   [model-bindings & body]
-  #_{:clj-kondo/ignore [:discouraged-var]}
   `(binding [collection/*allow-deleting-personal-collections* true]
      (mt/with-temp ~model-bindings ~@body)))
 
@@ -60,7 +60,10 @@
 (defn -data-source-url [^metabase.app_db.data_source.DataSource data-source]
   (.url data-source))
 
-(defmacro with-db [data-source & body]
+;; TODO (Cam 2026-03-30) -- give this a clearer name, like `with-current-h2-app-db`
+(defmacro with-db
+  "Execute `body` with the current app DB bound to an H2 `data-source`."
+  [data-source & body]
   `(binding [mdb.connection/*application-db* (mdb.connection/application-db :h2 ~data-source)]
      (with-open [conn# (.getConnection mdb.connection/*application-db*)]
        (binding [t2.conn/*current-connectable* conn#]
@@ -72,12 +75,15 @@
 (defn- do-with-in-memory-h2-db [f]
   (schema-migrations-test.impl/do-with-temp-empty-app-db*
    :h2
-   (fn [data-source]
+   (fn [^javax.sql.DataSource data-source]
      ;; DB should stay open as long as `conn` is held open.
      (with-open [_conn (.getConnection data-source)]
-       (next.jdbc/execute! data-source ["RUNSCRIPT FROM ?" (str @data/h2-app-db-script)])
+       (next.jdbc/execute! data-source ["RUNSCRIPT FROM ?" (str @data/h2-app-db-script-empty)])
        (with-db data-source (mdb/finish-db-setup!))
-       (f data-source)))))
+       ;; These app DBs should contain only data loaded by the test. Prevent `with-temp` from prewarming the
+       ;; test-data Database, which would add an unexpected Database to serialization extracts.
+       (binding [data.impl/*skip-dataset-prewarm?* true]
+         (f data-source))))))
 
 (defn do-with-dbs
   "Given a function with the given arity, create an in-memory db for each argument and then call the fn with these dbs"
@@ -92,10 +98,10 @@
 
 (defmacro with-dbs
   "Create and set up in-memory H2 application databases for each symbol in the bindings vector, each of which is then
-   bound to the corresponding data-source when executing the body. You can then use [[with-db]] to make any of these
-   data-sources the current application database.
+  bound to the corresponding data-source when executing the body. You can then use [[with-db]] to make any of these
+  data-sources the current application database.
 
-   This is particularly useful for load/dump/serialization tests, where you need both a source and application db."
+  This is particularly useful for load/dump/serialization tests, where you need both a source and application db."
   {:style/indent [:defn]}
   [bindings & body]
   (let [arity (count bindings)
@@ -197,7 +203,7 @@
                                                                                 :aggregation [:sum [:field numeric-field-id nil]]
                                                                                 :breakout [[:field category-field-id nil]]}}}
                   :model/Card       {card-id-root :id} {:table_id table-id
-                                                 ;; https://en.wikipedia.org/wiki/Filename#Reserved_characters_and_words
+                                                        ;; https://en.wikipedia.org/wiki/Filename#Reserved_characters_and_words
                                                         :name root-card-name
                                                         :dataset_query {:type :query
                                                                         :database db-id
@@ -246,7 +252,7 @@
                                                                 :card_id card-id}
                   :model/DashboardCard       {dashcard-top-level-click-id :id} {:dashboard_id dashboard-id
                                                                                 :card_id card-id-nested
-                                                                         ;; this is how click actions on a non-table card work (ex: a chart)
+                                                                                ;; this is how click actions on a non-table card work (ex: a chart)
                                                                                 :visualization_settings {:click_behavior {:targetId card-id-nested-query
                                                                                                                           :linkType :question
                                                                                                                           :type     :link}}}
@@ -526,13 +532,26 @@
                    venues-pk-field-id]}]
       ~@body)))
 
-;; Don't memoize as IDs change in each `with-world` context
-(alter-var-root #'names/path->context (fn [_] #'names/path->context*))
+(defn extract-one
+  "Extract the first serialized `model-name` entity matching `where`: its primary key, its entity id, a Honey SQL
+  clause, or nil for the first entity of the model. `extract-all` filters by primary key, so a clause is resolved to
+  primary keys here first."
+  [model-name where]
+  (let [model (keyword "model" model-name)
+        pk    (first (t2/primary-keys model))
+        ids   (cond
+                (nil? where)    nil
+                (number? where) [where]
+                (string? where) (t2/select-fn-vec pk [model pk] :entity_id where)
+                :else           (t2/select-fn-vec pk [model pk] {:where where}))]
+    (u/rfirst (serdes/extract-all model-name (cond-> {}
+                                               ids (assoc :filter-column pk :filter-ids ids))))))
 
-(defn extract-one [model-name where]
-  (let [where (cond
-                (nil? where)    true
-                (number? where) [:= :id where]
-                (string? where) [:= :entity_id where]
-                :else           where)]
-    (u/rfirst (serdes/extract-all model-name {:where where}))))
+(defn ingestion-in-memory
+  "An Ingestable serving the extracted `entities`, in order, under their label-free paths as the YAML ingestion does."
+  [entities]
+  (let [by-path (u/index-by (comp serdes.ingest/strip-labels serdes/path) entities)]
+    (reify serdes.ingest/Ingestable
+      (ingest-list [_] (map (comp serdes.ingest/strip-labels serdes/path) entities))
+      (ingest-one [_ path] (by-path (serdes.ingest/strip-labels path)))
+      (ingest-errors [_] []))))

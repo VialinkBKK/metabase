@@ -1,9 +1,12 @@
 import { useState } from "react";
 import { c, t } from "ttag";
 
-import FormTextArea from "metabase/common/components/FormTextArea";
-import { Form, FormProvider, FormSubmitButton } from "metabase/forms";
-import { color } from "metabase/lib/colors";
+import {
+  Form,
+  FormProvider,
+  FormSubmitButton,
+  FormTextarea,
+} from "metabase/forms";
 import {
   Box,
   Button,
@@ -62,33 +65,34 @@ export const BugReportModal = ({
       >
         {(formik) => (
           <Form>
-            <Text py="md">{t`Could you provide us with a little context?`}</Text>
-            <FormTextArea
+            <Text py="lg">{t`Could you provide us with a little context?`}</Text>
+            <FormTextarea
               name="description"
-              autoFocus
+              data-autofocus
               placeholder={t`What were you trying to do, and what steps did you take? What was the expected result, and what happened instead?`}
+              minRows={5}
+              mb="lg"
             />
             <Box
-              bg={color("accent-gray-light")}
-              p="lg"
-              my="md"
+              bg={"accent-gray-light"}
+              p="xl"
+              my="lg"
               style={{ borderRadius: "0.5rem" }}
             >
-              <Flex align="flex-start" gap="md">
-                <Stack gap="xs">
+              <Flex align="flex-start" gap="lg">
+                <Stack gap="xxs">
                   <Text size="lg" fw="bold">
                     {t`Include diagnostic information`}
                   </Text>
-                  <Text color="text-medium" w="80%">
-                    {/* eslint-disable-next-line no-literal-metabase-strings -- this is a translation context string, not shown to users */}
+                  <Text color="text-secondary" w="80%">
+                    {/* eslint-disable-next-line metabase/no-literal-metabase-strings -- this is a translation context string, not shown to users */}
                     {c("{0} is the name of the application, usually 'Metabase'")
                       .t`This information helps ${applicationName} figure out what exactly caused the issue.`}
                   </Text>
                 </Stack>
                 <Button
-                  variant="subtle"
-                  p="0"
-                  fz="lg"
+                  variant="transparent"
+                  size="compact-md"
                   miw="fit-content"
                   onClick={() => setIsDetailsVisible(!isDetailsVisible)}
                 >
@@ -111,19 +115,15 @@ export const BugReportModal = ({
             >
               {isSlackSending ? t`Sending...` : t`Submit report`}
             </Button>
-            <Divider my="md" />
-            <Flex align="flex-start" justify="space-between" gap="md">
+            <Divider my="lg" />
+            <Flex align="flex-start" justify="space-between" gap="lg">
               <Box>
                 <Text size="lg" fw="bold">{t`Download report`}</Text>
                 <Text>{t`Diagnostic info may contain sensitive data.`}</Text>
               </Box>
               <FormSubmitButton
-                variant="outline"
                 label={c("This is a verb, not a noun").t`Download`}
-                color="text-dark"
                 my="sm"
-                px="lg"
-                radius="md"
               />
             </Flex>
           </Form>

@@ -55,7 +55,7 @@ The functions `trs` and `tru` create instances of two records, `SiteLocalizedStr
 
 ### The maps from source to translated string
 
-One step in our build process creates an edn file of source to translated string for each locale we support. These are located in `resources/i18n`. If you do not have these files, you can run `bin/build-translation-resources` to generate them.
+One step in our build process creates an edn file of source to translated string for each locale we support. These are located in `resources/i18n`. If you do not have these files, you can run `bin/i18n/build-translation-resources` to generate them.
 
 We have lots of contributors who help us keep a corpus of translated strings into many different languages. We use [Crowdin](https://crowdin.com/project/metabase-i18n) to keep an authoritative list. We export `.po` files from this, which is essentially a dictionary from source to translated string. As part of our build process we format these files as edn files, maps from the source to translated string, for each locale.
 
@@ -75,6 +75,6 @@ eg,
 
 Every string language needs an escape character. Since `{0}` is an argument to be spliced in, how would you put a literal "{0}" in the string. The apostrophe serves this role and is described in the MessageFormat [javadocs](https://docs.oracle.com/javase/7/docs/api/java/text/MessageFormat.html).
 
-These is an unfortunate side effect of this though. Since the apostrophe is such a commeon part of speech (especially in french), we often can end up with escape characters used as a regular part of a string rather than the escape character. Format strings need to use double apostrophes like `(deferred-tru "SAML attribute for the user''s email address")` to escape the apostrophe.
+This is an unfortunate side effect of this though. Since the apostrophe is such a common part of speech (especially in french), we often can end up with escape characters used as a regular part of a string rather than the escape character. Format strings need to use double apostrophes like `(deferred-tru "SAML attribute for the user''s email address")` to escape the apostrophe.
 
-There are lots of translated strings in French that use a single apostrophe incorrectly. (eg "l'URL" instead of "l''URL"). We have a manual fix to this in `bin/i18n/src/i18n/create_artifacts/backend.clj` where we try to identify these apostrophes which are not escape characters and replace them with a double quote.
+There are lots of translated strings in French that use a single apostrophe incorrectly. (eg "l'URL" instead of "l''URL"). We have a manual fix to this in `bin/i18n/src/i18n/create_artifacts/backend.clj` where we try to identify these apostrophes which are not escape characters and replace them with a double apostrophe.

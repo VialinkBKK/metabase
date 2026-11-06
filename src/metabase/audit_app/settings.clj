@@ -1,7 +1,6 @@
 (ns metabase.audit-app.settings
   (:require
    [metabase.settings.core :as setting :refer [defsetting]]
-   [metabase.util.i18n :refer [deferred-tru]]
    [metabase.util.log :as log]))
 
 (defsetting last-analytics-checksum
@@ -22,7 +21,7 @@
   720)
 
 (defn log-minimum-value-warning
-  "Logs a warning that the value for `audit-max-retention-days` is below the allowed minimum and will be overriden."
+  "Logs a warning that the value for `audit-max-retention-days` is below the allowed minimum and will be overridden."
   [env-var-value]
   (log/warnf "MB_AUDIT_MAX_RETENTION_DAYS is set to %d; using the minimum value of %d instead."
              env-var-value
@@ -47,7 +46,8 @@
       env-var-value)))
 
 (defsetting audit-max-retention-days
-  (deferred-tru "Number of days to retain data in audit-related tables. Minimum value is 30; set to 0 to retain data indefinitely.")
+  "Number of days to retain data in audit-related tables. Minimum value is 30; set to 0 to retain data indefinitely."
+  :encryption :no
   :visibility :internal
   :setter     :none
   :audit      :never
@@ -62,10 +62,20 @@ Twice a day, Metabase will delete rows older than this threshold. The minimum va
 If set to 0, Metabase will keep all rows.")
 
 (defsetting audit-table-truncation-batch-size
-  (deferred-tru "Batch size to use for deletion of old rows for audit-related tables (like query_execution). Can be only set as an environment variable.")
+  "Batch size to use for deletion of old rows for audit-related tables (like query_execution). Can be only set as an environment variable."
   :visibility :internal
   :setter     :none
   :type       :integer
   :default    50000
   :audit      :never
   :export?    false)
+
+(defsetting analytics-dev-mode
+  (str "Setting this environment variable to true will  make the Usage analytics collection editable for"
+       "local development.")
+  :type       :boolean
+  :default    false
+  :visibility :internal
+  :audit      :never
+  :export?    false
+  :doc        false)

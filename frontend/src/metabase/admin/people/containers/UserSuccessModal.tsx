@@ -1,29 +1,35 @@
 import cx from "classnames";
 import { useEffect } from "react";
-import { push } from "react-router-redux";
 import { jt, t } from "ttag";
 
 import { useGetUserQuery } from "metabase/api";
 import { ConfirmModal } from "metabase/common/components/ConfirmModal";
-import Link from "metabase/common/components/Link";
+import { Link } from "metabase/common/components/Link";
 import { LoadingAndErrorWrapper } from "metabase/common/components/LoadingAndErrorWrapper";
-import PasswordReveal from "metabase/common/components/PasswordReveal";
+import { PasswordReveal } from "metabase/common/components/PasswordReveal";
+import { getTenantsBasePath } from "metabase/common/tenants";
 import CS from "metabase/css/core/index.css";
-import { useDispatch, useSelector } from "metabase/lib/redux";
-import { getSetting, isSsoEnabled } from "metabase/selectors/settings";
+import { PLUGIN_TENANTS } from "metabase/plugins";
+import { useDispatch, useSelector } from "metabase/redux";
+import { useNavigate } from "metabase/router";
+import { isSsoEnabled } from "metabase/selectors/settings";
+import { getSetting } from "metabase/settings";
 import { Box } from "metabase/ui";
+import * as Urls from "metabase/urls";
 import type { User } from "metabase-types/api";
 
 import { clearTemporaryPassword } from "../people";
 import { getUserTemporaryPassword } from "../selectors";
 
 interface UserSuccessModalProps {
-  params: { userId: string };
+  params: { userId?: string };
 }
 
 export function UserSuccessModal({ params }: UserSuccessModalProps) {
-  const userId = parseInt(params.userId);
+  const userId = parseInt(params.userId ?? "");
   const { data: user, isLoading, error } = useGetUserQuery(userId);
+
+  const isExternalUser = PLUGIN_TENANTS.isExternalUser(user);
 
   const temporaryPassword = useSelector((state) =>
     getUserTemporaryPassword(state, { userId }),
@@ -33,9 +39,12 @@ export function UserSuccessModal({ params }: UserSuccessModalProps) {
     getSetting(state, "enable-password-login"),
   );
   const dispatch = useDispatch();
+  const navigate = useNavigate();
 
   const handleClose = () => {
-    dispatch(push("/admin/people"));
+    navigate(
+      isExternalUser ? `${getTenantsBasePath()}/people` : "/admin/people",
+    );
   };
 
   useEffect(() => {
@@ -43,6 +52,12 @@ export function UserSuccessModal({ params }: UserSuccessModalProps) {
       dispatch(clearTemporaryPassword(userId));
     };
   }, [userId, dispatch]);
+
+  useEffect(() => {
+    if (isExternalUser && !temporaryPassword) {
+      navigate(`${getTenantsBasePath()}/people`, { replace: true });
+    }
+  }, [isExternalUser, temporaryPassword, navigate]);
 
   if (!user || isLoading || error != null) {
     return <LoadingAndErrorWrapper loading={isLoading} error={error} />;
@@ -52,7 +67,6 @@ export function UserSuccessModal({ params }: UserSuccessModalProps) {
     <ConfirmModal
       opened
       title={t`${user.common_name} has been added`}
-      padding="xl"
       onClose={handleClose}
       onConfirm={handleClose}
       closeButtonText={null}
@@ -86,7 +100,7 @@ const EmailSuccess = ({
       )} with instructions to log in. If this user is unable to authenticate then you can ${(
         <Link
           key="link"
-          to={`/admin/people/${user.id}/reset`}
+          to={Urls.resetPassword(user)}
           className={CS.link}
         >{t`reset their password.`}</Link>
       )}`}</div>

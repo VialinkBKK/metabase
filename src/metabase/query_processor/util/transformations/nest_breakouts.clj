@@ -1,22 +1,26 @@
 (ns metabase.query-processor.util.transformations.nest-breakouts
+  "TODO (Cam 8/7/25) -- this is a pure-MBQL-5 high-level query transformation, and almost certainly belongs in Lib
+  rather than in QP -- we should move it there. (This also applies to [[metabase.query-processor.util.nest-query]])."
+  (:refer-clojure :exclude [get-in mapv select-keys some not-empty])
   (:require
    [flatland.ordered.set :as ordered-set]
    [medley.core :as m]
-   [metabase.driver :as driver]
    [metabase.lib.core :as lib]
    [metabase.lib.equality :as lib.equality]
    [metabase.lib.options :as lib.options]
    [metabase.lib.schema :as lib.schema]
+   [metabase.lib.schema.expression :as lib.schema.expression]
    [metabase.lib.schema.metadata :as lib.schema.metadata]
    [metabase.lib.schema.util :as lib.schema.util]
-   [metabase.lib.util :as lib.util]
-   [metabase.lib.util.match :as lib.util.match]
    [metabase.lib.walk :as lib.walk]
-   [metabase.util.malli :as mu]))
+   [metabase.query-processor.middleware.add-remaps :as-alias add-remaps]
+   [metabase.util.malli :as mu]
+   [metabase.util.match :as match]
+   [metabase.util.performance :refer [get-in mapv select-keys some not-empty]]))
 
 (defn- stage-has-window-aggregation? [stage]
-  (lib.util.match/match (:aggregation stage)
-    #{:cum-sum :cum-count :offset}))
+  (match/match-one (:aggregation stage)
+    [#{:cum-sum :cum-count :offset} & _] true))
 
 (defn- stage-has-breakout? [stage]
   (seq (:breakout stage)))
@@ -31,70 +35,62 @@
                          [tag
                           (select-keys opts [:join-alias :temporal-unit :bucketing])
                           id-or-name]))
-        (lib.util.match/match (concat (:breakout stage) (:aggregation stage) (:expressions stage))
-          #{:field :expression})))
+        (match/match-many (concat (:breakout stage) (:aggregation stage) (:expressions stage))
+          [#{:field :expression} & _] &match)))
 
 (mu/defn- new-first-stage :- ::lib.schema/stage
-  "Remove breakouts, aggregations, order bys, and limit. Add `:fields` to return the things needed by the second stage."
+  "Remove breakouts, aggregations, order bys, limit, and pivot. Add `:fields` to return the things needed by the
+  second stage."
   [stage :- ::lib.schema/stage]
   (-> stage
-      (dissoc :breakout :aggregation :order-by :limit :lib/stage-metadata)
+      (dissoc :breakout :aggregation :order-by :limit :lib/stage-metadata :pivot)
       (assoc :fields (mapv
-                      lib.util/fresh-uuids
+                      lib/fresh-uuids
                       (fields-used-in-breakouts-aggregations-or-expressions stage)))))
 
-;;; TODO (Cam 7/7/25) -- update this to use [[metabase.lib.field.util/update-keys-for-col-from-previous-stage]] instead
-;;; of its own weird bespoke version of the same thing.
-(mu/defn- update-metadata-from-previous-stage-to-produce-correct-ref-in-current-stage :- ::lib.schema.metadata/column
-  "Force a `[:field {} <name>]` ref. Must manually escape field refs here, since `escape-join-aliases` mw is already run."
-  [col :- ::lib.schema.metadata/column]
-  (-> col
-      (update :lib/desired-column-alias #(driver/escape-alias driver/*driver* %))
-      (assoc :lib/source              :source/previous-stage
-             :lib/source-column-alias (driver/escape-alias driver/*driver* (:lib/desired-column-alias col)))
-      (lib/with-temporal-bucket (if (isa? ((some-fn :effective-type :base-type) col) :type/Temporal)
-                                  ;; for temporal columns: set temporal type to `:default` to
-                                  ;; prevent [[metabase.query-processor.middleware.auto-bucket-datetimes]] from
-                                  ;; trying to mess with it.
+(defn- update-temporal-bucket
+  "For temporal columns: set temporal type to `:default` to
+  prevent [[metabase.query-processor.middleware.auto-bucket-datetimes]] from trying to mess with it.
+
+  For other columns: remove temporal type, it should be nil anyway but remove it to be safe."
+  [col]
+  (lib/with-temporal-bucket col (if (isa? ((some-fn :effective-type :base-type) col) :type/Temporal)
                                   :default
-                                  ;; for other columns: remove temporal type, it should be nil anyway but remove it to
-                                  ;; be safe.
-                                  nil))
-      (lib/with-binning nil)
-      (dissoc :lib/expression-name)))
+                                  nil)))
 
 (mu/defn- update-second-stage-refs :- ::lib.schema/stage
   [stage            :- ::lib.schema/stage
    first-stage-cols :- [:sequential ::lib.schema.metadata/column]]
-  (lib.util.match/replace stage
-    #{:field :expression}
+  (match/replace stage
+    [#{:field :expression} & _]
     (if-let [col (when-not (some #{:expressions} &parents)
                    (lib.equality/find-matching-column &match first-stage-cols))]
       (-> col
-          update-metadata-from-previous-stage-to-produce-correct-ref-in-current-stage
+          lib/update-keys-for-col-from-previous-stage
+          update-temporal-bucket
           lib/ref
-          (cond-> (:lib/external-remap col) (lib.options/update-options assoc ::externally-remapped-field true)))
-      (lib.util/fresh-uuids &match))))
+          (cond-> (:lib/external-remap col) (lib/update-options assoc ::externally-remapped-field true)))
+      (lib/fresh-uuids &match))))
 
 (def ^:private granularity
   {:time-unbucketed 0
-   :minute 1
-   :minute-of-hour 2
-   :hour 3
-   :hour-of-day 4
-   :day 5
+   :minute          1
+   :minute-of-hour  2
+   :hour            3
+   :hour-of-day     4
+   :day             5
    :date-unbucketed 5
-   :day-of-week 6
-   :day-of-month 7
-   :day-of-year 8
-   :week 9
-   :week-of-year 10
-   :month 11
-   :month-of-year 12
-   :quarter 13
+   :day-of-week     6
+   :day-of-month    7
+   :day-of-year     8
+   :week            9
+   :week-of-year    10
+   :month           11
+   :month-of-year   12
+   :quarter         13
    :quarter-of-year 14
-   :year 15
-   :year-of-era 16})
+   :year            15
+   :year-of-era     16})
 
 (defn- original-temporal-unit
   [temporal-attributes]
@@ -102,7 +98,7 @@
     (if (and (some? temporal-unit) (not= temporal-unit :default))
       temporal-unit
       (or (:original-temporal-unit temporal-attributes)
-          (:metabase.lib.field/original-temporal-unit temporal-attributes)
+          (:inherited-temporal-unit temporal-attributes)
           temporal-unit))))
 
 (defn- column-granularity
@@ -119,9 +115,16 @@
             temporal-unit)
           granularity))))
 
-(defn finest-temporal-breakout-index
-  "Returns the index of leftmost breakout among the breakouts with the finest temporal granularity."
-  [breakouts option-index]
+(mu/defn finest-temporal-breakout-index
+  "Returns the index of leftmost breakout among the breakouts with the finest temporal granularity.
+
+  `option-index` = index within an MBQL clause to look for an options map. Use `2` for Legacy MBQL (MBQL 4) and `1`
+  for MBQL 5.
+
+  TODO (Cam 2026-07-24) remove `option-index` as an argument, I believe it was only here for compatibility with either
+  MBQL 4 or 5, not that we're using MBQL 5 everywhere we can drop compatibility for 4."
+  [breakouts    :- [:maybe [:sequential ::lib.schema.expression/expression]]
+   option-index :- pos-int?]
   (loop [bs (seq breakouts)
          i 0
          min-granularity (inc (apply max (vals granularity)))
@@ -134,7 +137,7 @@
           (recur (next bs) (inc i) granularity     i)
           (recur (next bs) (inc i) min-granularity finest-index))))))
 
-(defn- add-implicit-breakouts
+(defn- add-implicit-breakout-order-bys
   [stage]
   (if-let [breakouts (not-empty (:breakout stage))]
     (let [finest-temp-breakout (finest-temporal-breakout-index breakouts 1)
@@ -149,7 +152,7 @@
                           (comp (map lib.schema.util/remove-lib-uuids)
                                 (remove explicit-order-by-exprs)
                                 (map (fn [expr]
-                                       (lib.options/ensure-uuid [:asc (lib.options/ensure-uuid expr)]))))
+                                       (lib/ensure-uuid [:asc (lib/ensure-uuid expr)]))))
                           breakout-exprs)]
       (assoc stage :order-by order-bys))
     stage))
@@ -167,7 +170,7 @@
         (dissoc :joins :source-table :source-card :lib/stage-metadata :filters)
         (update-second-stage-refs first-stage-cols)
         (dissoc :expressions)
-        add-implicit-breakouts)))
+        add-implicit-breakout-order-bys)))
 
 (mu/defn- nest-breakouts-in-stage :- [:maybe [:sequential {:min 2, :max 2} ::lib.schema/stage]]
   [query :- ::lib.schema/query
@@ -193,3 +196,50 @@
      (when (and (stage-has-window-aggregation? stage)
                 (stage-has-breakout? stage))
        (nest-breakouts-in-stage query path stage)))))
+
+(def ^:private remap-keep-opts
+  "Add-remap option keys that must be preserved on breakout refs so the pivot compiler can still detect
+  remap pairs after nesting rewrites the refs."
+  [::add-remaps/original-field-dimension-id
+   ::add-remaps/new-field-dimension-id])
+
+(defn- reattach-remap-keys
+  "Positionally copy `remap-keep-opts` from `old-breakouts` onto `new-breakouts` so a nested pivot stage's
+  rewritten breakout refs still expose the `::add-remaps/*` dimension IDs the pivot compiler pairs on."
+  [new-breakouts old-breakouts]
+  (mapv (fn [new-b old-b]
+          (let [carried (select-keys (lib.options/options old-b) remap-keep-opts)]
+            (cond-> new-b
+              (seq carried) (lib.options/update-options merge carried))))
+        new-breakouts
+        old-breakouts))
+
+(mu/defn nest-pivot-joins :- ::lib.schema/query
+  "Split `query`'s last stage into two via [[nest-breakouts-in-stage]] when it carries `:pivot`, joins, and
+  breakouts; the first stage takes the source/joins/filters and projects the fields the second needs, and
+  the second keeps `:pivot`/`:breakout`/`:aggregation` with refs rewritten. Positionally rewrites the
+  `:pivot` clause's row/column UUIDs to match the second stage's regenerated breakout UUIDs, and copies
+  add-remap dimension-id options ([[remap-keep-opts]]) forward so the pivot compiler still pairs remapped
+  columns correctly. Returns `query` unchanged when the last stage has no `:pivot`, no joins, or no
+  breakouts."
+  {:added "0.64.0"}
+  [query :- ::lib.schema/query]
+  (let [path       [:stages (dec (count (:stages query)))]
+        last-stage (get-in query path)]
+    (if (and (some? (:pivot last-stage))
+             (seq (:joins last-stage))
+             (stage-has-breakout? last-stage))
+      (let [[first-stage second-stage] (nest-breakouts-in-stage query path last-stage)
+            second-breakouts (reattach-remap-keys (:breakout second-stage) (:breakout last-stage))
+            uuid-map         (zipmap (mapv lib.options/uuid (:breakout last-stage))
+                                     (mapv lib.options/uuid second-breakouts))
+            rekey            (fn [uuids] (mapv #(get uuid-map % %) uuids))
+            second-stage'    (-> second-stage
+                                 (assoc :breakout second-breakouts)
+                                 (update-in [:pivot :rows]    rekey)
+                                 (update-in [:pivot :columns] rekey))]
+        (update query :stages
+                (fn [stages]
+                  (-> (subvec stages 0 (dec (count stages)))
+                      (conj first-stage second-stage')))))
+      query)))

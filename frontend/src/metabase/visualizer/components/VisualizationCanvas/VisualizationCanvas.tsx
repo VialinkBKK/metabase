@@ -1,10 +1,9 @@
-import produce from "immer";
+import { produce } from "immer";
 import { useState } from "react";
 import { t } from "ttag";
 
 import metabot from "assets/img/metabot-96x96.svg";
-import { trackSimpleEvent } from "metabase/lib/analytics";
-import { useSelector } from "metabase/lib/redux";
+import { useSelector } from "metabase/redux";
 import {
   ActionIcon,
   Box,
@@ -18,17 +17,18 @@ import {
   Title,
   Tooltip,
 } from "metabase/ui";
-import { isCartesianChart } from "metabase/visualizations";
 import Visualization from "metabase/visualizations/components/Visualization";
 import {
   getIsLoading,
   getVisualizationType,
   getVisualizerRawSeries,
 } from "metabase/visualizer/selectors";
+import { isCartesianChart } from "metabase/viz-core";
 import type { RawSeries } from "metabase-types/api";
 
 import { TabularPreviewModal } from "../TabularPreviewModal";
 import { useVisualizerUi } from "../VisualizerUiContext";
+import { trackVisualizerViewAsTableClicked } from "../analytics";
 
 import S from "./VisualizationCanvas.module.css";
 import { HorizontalWell } from "./wells/HorizontalWell";
@@ -70,10 +70,13 @@ export function VisualizationCanvas({ className }: VisualizationCanvasProps) {
       <Center h="100%" w="100%" mx="auto" className={className}>
         <Flex direction="column" align="center" gap={12}>
           <Image src={metabot} mb={10} h={96} w={96} />
-          <Title size="h3" c="text">{t`Start by selecting a dataset`}</Title>
+          <Title
+            size="h3"
+            c="text-primary"
+          >{t`Start by selecting a dataset`}</Title>
           <Title
             size="h5"
-            c="text-light"
+            c="text-secondary"
           >{t`Find something to visualize in the column on the left.`}</Title>
         </Flex>
       </Center>
@@ -107,6 +110,7 @@ export function VisualizationCanvas({ className }: VisualizationCanvasProps) {
             rawSeries={rawSeries}
             // TableInteractive crashes when trying to use metabase-lib
             isDashboard
+            isVisualizer
           />
         </Box>
 
@@ -118,12 +122,10 @@ export function VisualizationCanvas({ className }: VisualizationCanvasProps) {
         >
           <Tooltip withinPortal={false} label={t`View as table`}>
             <ActionIcon
+              variant="subtle"
               data-testid="visualizer-view-as-table-button"
               onClick={() => {
-                trackSimpleEvent({
-                  event: "visualizer_view_as_table_clicked",
-                  triggered_from: "visualizer-modal",
-                });
+                trackVisualizerViewAsTableClicked();
 
                 setTabularPreviewOpen(true);
               }}
@@ -145,9 +147,9 @@ export function VisualizationCanvas({ className }: VisualizationCanvasProps) {
           className={`${S.SwapAffordance} ${isSwapAffordanceVisible ? S.visible : ""}`}
         >
           <Center className={S.SwapAffordanceIcon}>
-            <Stack align="center" gap="xs" p="xs">
+            <Stack align="center" gap="xxs" p="xxs">
               <Icon name="sync" />
-              <Text c="white" size="sm">
+              <Text c="core-white" size="sm">
                 {t`Replace`}
               </Text>
             </Stack>

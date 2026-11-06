@@ -1,7 +1,6 @@
 import { t } from "ttag";
 
-import { Ellipsified } from "metabase/common/components/Ellipsified";
-import { Box, Button, Icon, Tooltip } from "metabase/ui";
+import { Box, Button, Ellipsified, Icon, Tooltip } from "metabase/ui";
 import type {
   Field,
   VisualizationDisplay,
@@ -29,24 +28,30 @@ export const DatasetsListItem = (props: DatasetsListItemProps) => {
 
   return (
     <Button
-      fullWidth
+      justify="start"
+      flex="0 0 auto"
+      pl={0}
+      variant={selected ? "filled" : "subtle"}
+      color={selected ? "brand" : "neutral"}
       data-testid="swap-dataset-button"
-      variant="visualizer"
       aria-pressed={selected}
-      size="xs"
       onClick={() => {
-        selected ? onRemove?.(item) : onToggle?.(item);
+        if (selected) {
+          onRemove?.(item);
+        } else {
+          onToggle?.(item);
+        }
       }}
       leftSection={
         <Box>
-          <Icon color="inherit" className={S.TableIcon} name="table2" mr="xs" />
+          <Icon c="inherit" name="table2" mr="xxs" />
           {item.notRecommended && (
             <Tooltip
               label={t`This dataset might not be fully compatible with your current selection.`}
             >
               <Icon
                 className={S.WarningIcon}
-                color="var(--mb-color-danger)"
+                c="feedback-negative"
                 name="warning_round_filled"
                 size={10}
               />
@@ -54,9 +59,8 @@ export const DatasetsListItem = (props: DatasetsListItemProps) => {
           )}
         </Box>
       }
-      style={{ flex: 0, minHeight: 30, paddingLeft: 8, paddingRight: 8 }}
     >
-      <Ellipsified style={{ height: 17 }}>{item.name}</Ellipsified>
+      <Ellipsified>{item.name}</Ellipsified>
     </Button>
   );
 };

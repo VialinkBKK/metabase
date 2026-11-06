@@ -2,10 +2,9 @@ import type { ChangeEvent, FocusEvent } from "react";
 import { useState } from "react";
 import { t } from "ttag";
 
-import CS from "metabase/css/core/index.css";
-import LimitInput from "metabase/query_builder/components/LimitInput";
 import * as Lib from "metabase-lib";
 
+import { LimitInput } from "../../../components/LimitInput";
 import type { NotebookStepProps } from "../../types";
 import { NotebookCell } from "../NotebookCell";
 
@@ -16,6 +15,7 @@ export function LimitStep({
   step,
   color,
   updateQuery,
+  readOnly,
 }: NotebookStepProps) {
   const { stageIndex } = step;
 
@@ -44,7 +44,6 @@ export function LimitStep({
   return (
     <NotebookCell color={color}>
       <LimitInput
-        className={CS.mb1}
         type="number"
         min={1}
         value={value}
@@ -52,6 +51,7 @@ export function LimitStep({
         small
         onBlur={handleBlur}
         onChange={handleChange}
+        readOnly={readOnly}
       />
     </NotebookCell>
   );

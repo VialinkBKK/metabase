@@ -1,29 +1,26 @@
 (ns metabase.cmd.core-test
   (:require
+   [clojure.string :as str]
    [clojure.test :refer [are deftest is testing]]
-   [metabase.cmd.core :as cmd]))
+   [metabase.cmd.core :as cmd]
+   [metabase.test.util.dynamic-redefs :as dynamic-redefs]))
 
 (defn- do-with-captured-call-enterprise-calls! [thunk]
-  (with-redefs [cmd/call-enterprise list]
+  (dynamic-redefs/with-dynamic-fn-redefs [cmd/call-enterprise list]
     (thunk)))
 
 (deftest ^:parallel error-message-test
-  (is (=? ["Unrecognized command: 'a-command-that-does-not-exist'"
-           #"\QValid commands: version, help, drop-entity-ids, import, dump,\E.*"]
-          (#'cmd/validate "a-command-that-does-not-exist" [])))
+  ;; the command list comes from `ns-interns`, so its order is the map's, not the source's — assert that
+  ;; commands are listed, not where they happen to fall
+  (let [[message commands] (#'cmd/validate "a-command-that-does-not-exist" [])]
+    (is (= "Unrecognized command: 'a-command-that-does-not-exist'" message))
+    (is (re-find #"^Valid commands: " commands))
+    (doseq [command ["version" "help" "import" "mcp-tools-documentation"]]
+      (is (re-find (re-pattern (str "\\b" command "\\b")) commands)
+          (str "no " command " in the command list"))))
   (is (= ["The 'rotate-encryption-key' command requires the following arguments: [new-key], but received: []."]
          (#'cmd/validate "rotate-encryption-key" [])))
   (is (nil? (#'cmd/validate "rotate-encryption-key" [:some-arg]))))
-
-(deftest load-command-test
-  (do-with-captured-call-enterprise-calls!
-   (fn []
-     (testing "with no options"
-       (is (= '(metabase-enterprise.serialization.cmd/v1-load! "/path/" {:mode :skip, :on-error :continue})
-              (cmd/load "/path/"))))
-     (testing "with options"
-       (is (= '(metabase-enterprise.serialization.cmd/v1-load! "/path/" {:mode :skip, :on-error :abort})
-              (cmd/load "/path/" "--on-error" "abort")))))))
 
 (deftest import-command-test
   (do-with-captured-call-enterprise-calls!
@@ -37,16 +34,6 @@
      (testing "with options"
        (is (= '(metabase-enterprise.serialization.cmd/v2-load! "/path/" {:full-stacktrace true})
               (cmd/import "/path/" "--full-stacktrace")))))))
-
-(deftest dump-command-test
-  (do-with-captured-call-enterprise-calls!
-   (fn []
-     (testing "with no options"
-       (is (= '(metabase-enterprise.serialization.cmd/v1-dump! "/path/" {:state :all})
-              (cmd/dump "/path/"))))
-     (testing "with options"
-       (is (= '(metabase-enterprise.serialization.cmd/v1-dump! "/path/" {:state :active})
-              (cmd/dump "/path/" "--state" "active")))))))
 
 (deftest export-command-arg-parsing-test
   (do-with-captured-call-enterprise-calls!
@@ -85,3 +72,13 @@
 
        ["--full-stacktrace"]
        {:full-stacktrace true}))))
+
+(deftest ^:parallel all-documentation-test
+  (testing "`all-documentation` runs every `*-documentation` command"
+    (let [generators (set @#'cmd/doc-generators)]
+      (is (empty? (for [[symb varr] (ns-interns 'metabase.cmd.core)
+                        :when (and (:command (meta varr))
+                                   (str/ends-with? (name symb) "-documentation")
+                                   (not= symb 'all-documentation)
+                                   (not (generators varr)))]
+                    symb))))))

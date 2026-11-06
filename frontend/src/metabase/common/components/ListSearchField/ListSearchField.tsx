@@ -2,8 +2,7 @@ import { useEffect, useRef } from "react";
 
 import { ActionIcon, Icon, TextInput, type TextInputProps } from "metabase/ui";
 
-// eslint-disable-next-line import/no-default-export -- deprecated usage
-export default function ListSearchField({
+export function ListSearchField({
   autoFocus,
   onResetClick,
   ...props
@@ -30,7 +29,7 @@ export default function ListSearchField({
       leftSection={<Icon name="search" />}
       rightSection={
         onResetClick && props.value ? (
-          <ActionIcon onClick={onResetClick}>
+          <ActionIcon variant="subtle" onClick={onResetClick}>
             <Icon name="close" />
           </ActionIcon>
         ) : null

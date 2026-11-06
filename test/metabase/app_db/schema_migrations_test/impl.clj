@@ -1,4 +1,4 @@
-(ns metabase.app-db.schema-migrations-test.impl
+(ns ^:mb/app-db-migrations-test metabase.app-db.schema-migrations-test.impl
   "Tests for the schema migrations defined in the Liquibase YAML files. The basic idea is:
 
   1. Create a temporary H2/Postgres/MySQL/MariaDB database
@@ -10,28 +10,30 @@
   Actual tests using this code live in [[metabase.app-db.schema-migrations-test]]."
   (:require
    [clojure.java.jdbc :as jdbc]
+   [clojure.set :as set]
    [clojure.test :refer :all]
-   [java-time.api :as t]
    [metabase.app-db.connection :as mdb.connection]
    [metabase.app-db.core :as mdb]
+   [metabase.app-db.custom-migrations :as custom-migrations]
    [metabase.app-db.custom-migrations.util :as custom-migrations.util]
    [metabase.app-db.data-source :as mdb.data-source]
    [metabase.app-db.liquibase :as liquibase]
+   [metabase.app-db.liquibase.versions :as versions]
+   [metabase.app-db.snapshot-test-util :as snapshot]
    [metabase.app-db.test-util :as mdb.test-util]
    [metabase.driver :as driver]
    [metabase.driver.sql-jdbc.connection :as sql-jdbc.conn]
    [metabase.test.data.datasets :as datasets]
+   [metabase.test.data.impl :as data.impl]
    [metabase.test.data.interface :as tx]
    [metabase.test.initialize :as initialize]
    [metabase.util :as u]
-   [metabase.util.date-2 :as u.date]
    [metabase.util.log :as log]
    [toucan2.core :as t2])
   (:import
-   (java.time OffsetDateTime)
    (liquibase LabelExpression)
-   (liquibase.changelog  ChangeLogHistoryServiceFactory)
-   (liquibase.changelog.filter ChangeSetFilter ChangeSetFilterResult)))
+   (liquibase.changelog ChangeSet)
+   (liquibase.changelog.filter ChangeSetFilter ChangeSetFilterResult ShouldRunChangeSetFilter)))
 
 (set! *warn-on-reflection* true)
 
@@ -75,11 +77,14 @@
   (do-with-temp-empty-app-db*
    driver
    (fn [^javax.sql.DataSource data-source]
-      ;; it should be ok to open multiple connections to this `data-source`; it should stay open as long as `conn` is
-      ;; open
+     ;; it should be ok to open multiple connections to this `data-source`; it should stay open as long as `conn` is
+     ;; open
      (with-open [conn (.getConnection data-source)]
        (binding [mdb.connection/*application-db* (mdb.connection/application-db driver data-source)
-                 custom-migrations.util/*allow-temp-scheduling* false]
+                 custom-migrations.util/*allow-temp-scheduling* false
+                 ;; This app DB must remain empty, or contain only what the test loads. Prevent `with-temp` from
+                 ;; prewarming the test-data Database within it.
+                 data.impl/*skip-dataset-prewarm?* true]
          (f conn))))))
 
 (defmacro with-temp-empty-app-db
@@ -91,93 +96,8 @@
   [[conn-binding db-type] & body]
   `(do-with-temp-empty-app-db ~db-type (fn [~(vary-meta conn-binding assoc :tag 'java.sql.Connection)] ~@body)))
 
-(def ^:private timestamp-migration-id-re
-  #"^v(\d{2,})\.(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})$")
-
-(defn- migration->number [id]
-  (if (integer? id)
-    id
-    (or (when-let [[_ major-version minor-version migration-num] (re-matches #"^v(\d+)\.(\d+)-(\d+)$" id)]
-          (+ (* (Integer/parseUnsignedInt major-version) 100)
-             (Integer/parseUnsignedInt minor-version)
-             (/ (Integer/parseUnsignedInt migration-num)
-                1000.0)))
-        (when (re-matches #"^\d+$" id)
-          (Integer/parseUnsignedInt id))
-        (when-let [[_ major-version timestamp] (re-matches timestamp-migration-id-re id)]
-          (let [unix-timestamp (-> (u.date/parse timestamp)
-                                   ^OffsetDateTime (u.date/with-time-zone-same-instant (t/zone-id "UTC"))
-                                   .toInstant .getEpochSecond)]
-            (parse-double (format "%d.%d" (* (parse-long major-version) 100) unix-timestamp))))
-        (throw (ex-info (format "Invalid migration ID: %s" id) {:id id})))))
-
-(deftest migration->number-test
-  (is (= 356
-         (migration->number 356)
-         (migration->number "356")))
-  (is (= 4301.009
-         (migration->number "v43.01-009")))
-  (is (= 4301.01
-         (migration->number "v43.01-010")))
-  (is (= 4900.16725312
-         (migration->number "v49.2023-01-01T00:00:00"))))
-
-(defn- migration-id-in-range?
-  "Whether `id` should be considered to be between `start-id` and `end-id`, inclusive. Handles both legacy plain-integer
-  and new-style `vMM.mm-NNN` style IDs."
-  [start-id id end-id & [{:keys [inclusive-start? inclusive-end?]
-                          :or   {inclusive-start? true
-                                 inclusive-end? true}}]]
-
-  (let [start (migration->number start-id)
-        id    (migration->number id)
-        ;; end-id can be nil (meaning, unbounded)
-        end   (if end-id
-                (migration->number end-id)
-                Integer/MAX_VALUE)]
-    (and
-     (if inclusive-start?
-       (<= start id)
-       (< start id))
-     (if inclusive-end?
-       (<= id end)
-       (< id end)))))
-
-(deftest migration-id-in-range?-test
-  (testing "legacy IDs"
-    (is (migration-id-in-range? 1 2 3))
-    (is (migration-id-in-range? 1 2 3 {:inclusive-end? false}))
-    (is (migration-id-in-range? 1 1 3))
-    (is (migration-id-in-range? 1 3 3))
-    (is (migration-id-in-range? 100 100 nil))
-    (is (not (migration-id-in-range? 1 3 3 {:inclusive-end? false})))
-    (is (not (migration-id-in-range? 2 1 3)))
-    (is (not (migration-id-in-range? 2 4 3)))
-    (testing "strings"
-      (is (migration-id-in-range? 1 "1" 3))
-      (is (not (migration-id-in-range? 1 "13" 3)))))
-  (testing "new-style IDs"
-    (is (migration-id-in-range? "v42.00-001" "v42.00-002" "v42.00-003"))
-    (is (migration-id-in-range? "v42.00-001" "v42.00-002" "v42.00-002"))
-    (is (not (migration-id-in-range? "v42.00-001" "v42.00-002" "v42.00-002" {:inclusive-end? false})))
-    (is (not (migration-id-in-range? "v42.00-001" "v42.00-004" "v42.00-003")))
-    (is (not (migration-id-in-range? "v42.00-002" "v42.00-001" "v42.00-003")))
-    ;; this case is invoked when the test-migrations macro is only given one item in the range list
-    (is (migration-id-in-range? "v42.00-064" "v42.00-064" nil)))
-  (testing "mixed"
-    (is (migration-id-in-range? 1 3 "v42.00-001"))
-    (is (migration-id-in-range? 1 "v42.00-001" "v42.00-002"))
-    (is (not (migration-id-in-range? "v42.00-002" 1000 "v42.00-003")))
-    (is (not (migration-id-in-range? "v42.00-002" 1000 "v42.00-003" {:inclusive-end? false})))
-    (is (not (migration-id-in-range? 1 "v42.00-001" 1000)))
-    (is (not (migration-id-in-range? 1 "v42.00-001" 1000)))
-    (is (migration-id-in-range? 1 "v42.00-000" "v43.00-000"))
-    (is (migration-id-in-range? 1 "v42.00-001" "v43.00-000"))
-    (is (migration-id-in-range? 1 "v42.00-000" "v43.00-014"))
-    (is (migration-id-in-range? 1 "v42.00-015" "v43.00-014"))
-    (is (not (migration-id-in-range? 1 "v43.00-014" "v42.00-015")))))
-
-(defn- range-description [start-id end-id {:keys [inclusive-start? inclusive-end?]}]
+(defn- range-description [start-id end-id {:keys [inclusive-start? inclusive-end?]
+                                           :or   {inclusive-start? true inclusive-end? true}}]
   (let [inclusive-exclusive #(if % "inclusive" "exclusive")]
     (if end-id
       (format "between %s (%s) and %s (%s)"
@@ -187,53 +107,104 @@
 
 (defn run-migrations-in-range!
   "Run Liquibase migrations from our migrations YAML file in the range of `start-id` -> `end-id` (inclusive) against a
-  DB with `jdbc-spec`."
+  DB with `jdbc-spec`.
+
+  Range comparison uses the actual changelog order (index-based), so all ID formats — including hex-style IDs like
+  `v60.f8c3be` — are handled correctly without numeric conversion.
+
+  After the update, the legacy `vNN.` changesets are split by Metabase major into one synthetic deployment each, with
+  a `databasechangelog_version` row apiece (see [[mdb.test-util/split-legacy-majors-into-deployments!]]): a single
+  update run covers many majors but records only one deployment, and the deployment-based rollback needs a boundary
+  at every major for `migrate! :down N` to find.
+
+  Options, besides the two range bounds:
+
+  - `:skip-ran?` (default false) also leaves out changesets DATABASECHANGELOG already records, the way a plain
+    Liquibase update does.
+    Without it every changeset in the range runs, so set it for a DB that already holds some of the range, such as one
+    a snapshot was loaded into.
+  - `:track-versions?` (default true) set to false skips the version bookkeeping on both sides of the update.
+    That leaves the DB looking like an install from before `databasechangelog_version` existed."
   {:added "0.41.0", :arglists '([conn [start-id end-id]]
-                                [conn [start-id end-id] {:keys [inclusive-start? inclusive-end?]
-                                                         :or {inclusive-start? true
-                                                              inclusive-end? true}}])}
+                                [conn [start-id end-id] {:keys [inclusive-start? inclusive-end?
+                                                                skip-ran? track-versions?]
+                                                         :or   {inclusive-start? true
+                                                                inclusive-end?   true
+                                                                skip-ran?        false
+                                                                track-versions?  true}}])}
   [^java.sql.Connection conn [start-id end-id] & [range-options]]
   (log/debugf "Finding and running migrations %s" (range-description start-id end-id range-options))
 
   (liquibase/with-liquibase [liquibase conn]
-    (let [database (.getDatabase liquibase)
+    (let [database         (.getDatabase liquibase)
+          changelog-table  (.getDatabaseChangeLogTableName database)
+          changesets       (vec (.getChangeSets (.getDatabaseChangeLog liquibase)))
+          id->index        (into {} (map-indexed (fn [i ^ChangeSet cs] [(.getId cs) i]) changesets))
+          resolve-id       (fn [id]
+                             (or (id->index id)
+                                 (throw (ex-info (format "Migration ID not found in changelog: %s" id) {:id id}))))
+          {:keys [inclusive-start? inclusive-end? skip-ran? track-versions?]
+           :or   {inclusive-start? true inclusive-end? true skip-ran? false track-versions? true}} range-options
+          start-idx        (resolve-id start-id)
+          end-idx          (when end-id (resolve-id end-id))
+          in-range?        (fn [idx]
+                             (and (some? idx)
+                                  (if inclusive-start? (<= start-idx idx) (< start-idx idx))
+                                  (if end-idx (if inclusive-end? (<= idx end-idx) (< idx end-idx)) true)))
           change-set-filters [(reify ChangeSetFilter
                                 (accepts [this change-set]
-                                  (let [id      (.getId change-set)
-                                        accept? (boolean (migration-id-in-range? start-id id end-id range-options))]
+                                  (let [id      (.getId ^ChangeSet change-set)
+                                        accept? (boolean (in-range? (id->index id)))]
                                     (log/tracef "Migration %s in range [%s ↔ %s] %s ? => %s"
                                                 id start-id end-id
-                                                (if (:inclusive-end? range-options) "(inclusive)" "(exclusive)")
+                                                (if inclusive-end? "(inclusive)" "(exclusive)")
                                                 accept?)
-                                    (ChangeSetFilterResult. accept? "decision according to range" (class this)))))]
-          change-log-service (.getChangeLogService (ChangeLogHistoryServiceFactory/getInstance) database)]
+                                    (ChangeSetFilterResult. accept? "decision according to range" (class this)))))]]
+      (when track-versions?
+        (versions/ensure-version-tracking! conn database))
       (liquibase/with-scope-locked liquibase
-       ;; Calling .listUnrunChangeSets has the side effect of creating the Liquibase tables
-       ;; and initializing checksums so that they match the ones generated in production.
+        ;; Calling .listUnrunChangeSets has the side effect of creating the Liquibase tables
+        ;; and initializing checksums so that they match the ones generated in production.
         (.listUnrunChangeSets liquibase nil (LabelExpression.))
-        (.generateDeploymentId change-log-service)
-        (liquibase/update-with-change-log liquibase {:change-set-filters change-set-filters})))))
+        (liquibase/update-with-change-log
+         liquibase
+         ;; read once the changelog tables exist: the filter takes its list of ran changesets when it is built
+         {:change-set-filters (cond-> change-set-filters
+                                skip-ran? (conj (ShouldRunChangeSetFilter. database)))}))
+      (when track-versions?
+        (mdb.test-util/split-legacy-majors-into-deployments! conn changelog-table)))))
+
+(defn- migrate-to-start!
+  "Bring an empty app DB up to, but not including, `start-id`, without sample content.
+  It loads the checked-in snapshot first when `start-id` falls after the snapshot's boundary changeset."
+  [^java.sql.Connection conn driver start-id]
+  ;; Either way the whole range before `start-id` then runs with `:skip-ran?`, so a changeset that sits before the
+  ;; boundary but is missing from the snapshot, such as a backport merged after the snapshot was cut, still runs after
+  ;; the snapshot's own. That is the order an install upgrading to a patch release runs a backport in. Sample content
+  ;; is off on both paths because the snapshot is dumped without it, so whether a test gets it cannot depend on where
+  ;; its start falls.
+  (binding [custom-migrations/*create-sample-content* false]
+    (when (snapshot/usable-for-start? conn driver start-id)
+      (log/debugf "Loading app db snapshot %s before running migrations up to %s..." snapshot/snapshot-version start-id)
+      (snapshot/load-snapshot! conn driver))
+    (log/debugf "Finding and running migrations before %s..." start-id)
+    (run-migrations-in-range! conn ["v00.00-000" start-id] {:inclusive-end? false, :skip-ran? true})))
 
 (defn test-migrations-for-driver! [driver [start-id end-id] f]
   (log/debug (u/format-color 'yellow "Testing migrations for driver %s..." driver))
   (with-temp-empty-app-db [conn driver]
     ;; sanity check: make sure the DB is actually empty
-    (let [metadata  (.getMetaData conn)
-          schema    (when (= :h2 driver) "PUBLIC")]
-      (with-open [rs (.getTables metadata nil schema "%" (into-array String ["TABLE"]))]
-        (let [tables (jdbc/result-set-seq rs)]
-          (assert (zero? (count tables))
-                  (str "'Empty' application DB is not actually empty. Found tables:\n"
-                       (u/pprint-to-str tables))))))
-    (log/debugf "Finding and running migrations before %s..." start-id)
-    (run-migrations-in-range! conn ["v00.00-000" start-id] {:inclusive-end? false})
+    (let [tables (snapshot/user-tables conn driver)]
+      (assert (empty? tables)
+              (str "'Empty' application DB is not actually empty. Found tables:\n"
+                   (u/pprint-to-str tables))))
+    (migrate-to-start! conn driver start-id)
     (let [restart-id (atom nil)]
       (letfn [(migrate
                 ([]
                  (migrate :up nil))
                 ([direction]
                  (migrate direction nil))
-
                 ([direction version]
                  (case direction
                    :up
@@ -245,10 +216,16 @@
                    :down
                    (do
                      (assert (int? version), "Downgrade requires a version")
-                     (mdb/migrate! (mdb/data-source) :down version)
+                     ;; force: these legacy tests roll back to arbitrary majors, often further back than the default
+                     ;; rollback window (current major + previous-major boundary). force widens that window to the full
+                     ;; recorded history; each major is recorded by run-migrations-in-range! above, so every such target
+                     ;; is a valid recorded version. The default-window rule itself is covered in metabase.app-db.liquibase-test.
+                     (mdb/migrate! (mdb/data-source) :down-force version)
                      ;; We may have rolled back migrations prior to start-id, so its no longer safe to start from there.
+                     ;; The rollback ends with a version-tracking marker row, which is not a changeset to restart from.
                      (reset! restart-id (t2/select-one-pk (liquibase/changelog-table-name conn)
-                                                          {:order-by [[:orderexecuted :desc]]}))))))]
+                                                          {:where    [:not= :filename "legacy-version-tracking"]
+                                                           :order-by [[:orderexecuted :desc]]}))))))]
         (f migrate))))
   (log/debug (u/format-color 'green "Done testing migrations for driver %s." driver)))
 
@@ -264,7 +241,6 @@
       (datasets/test-drivers #{:h2 :mysql :postgres}
         (test-migrations-for-driver! driver/*driver* [start-id end-id] f)))))
 
-#_{:clj-kondo/ignore [:metabase/test-helpers-use-non-thread-safe-functions]}
 (defmacro test-migrations
   "Util macro for running tests for a set of Liquibase schema migration(s).
 
@@ -282,11 +258,11 @@
   e.g.
 
     ;; example test for migrations 100-105
-    (test-migrations [100 105] [migrate!]
-      ;; (Migrations 1-99 are ran automatically before body is invoked)
+    (test-migrations [\"v45.00-001\" \"v45.00-005\"] [migrate!]
+      ;; (Migrations before v45.00-001 are ran automatically before body is invoked)
       ;; 1. Load data
       (create-some-users!)
-      ;; 2. Run migrations 100-105
+      ;; 2. Run migrations v45.00-001 through v45.00-005
       (migrate!)
       ;; 3. Do some test assertions
       (is (= ...)))
@@ -303,3 +279,55 @@
     ~migration-range
     (fn [~migrate!-binding]
       ~@body)))
+
+;;; ------------------------------------------------ Range filter tests ------------------------------------------------
+
+(defn- migrations-run
+  "Return the set of migration IDs that have been executed against `conn`."
+  [^java.sql.Connection conn]
+  (let [table-name (liquibase/changelog-table-name conn)]
+    (into #{} (map :id) (jdbc/query {:connection conn} [(format "SELECT id FROM %s" table-name)]))))
+
+(deftest run-migrations-in-range!-boundary-test
+  (testing "inclusive start + inclusive end (defaults)"
+    (with-temp-empty-app-db [conn :h2]
+      (run-migrations-in-range! conn ["v00.00-000" "v45.00-002"])
+      (let [ran (migrations-run conn)]
+        (is (contains? ran "v00.00-000") "start should be included (inclusive)")
+        (is (contains? ran "v45.00-002") "end should be included (inclusive)"))))
+  (testing "single-item range (start == end)"
+    (with-temp-empty-app-db [conn :h2]
+      (run-migrations-in-range! conn ["v45.00-001" "v45.00-001"])
+      (let [ran (migrations-run conn)]
+        (is (contains? ran "v45.00-001") "the single migration should be included")
+        (is (not (contains? ran "v45.00-002")) "the next migration should NOT be included"))))
+  (testing "exclusive end excludes the endpoint"
+    (with-temp-empty-app-db [conn :h2]
+      ;; Run v00.00-000 through v45.00-002 with exclusive end — v45.00-002 should NOT be run
+      (run-migrations-in-range! conn ["v00.00-000" "v45.00-002"] {:inclusive-end? false})
+      (let [ran (migrations-run conn)]
+        (is (contains? ran "v00.00-000") "start should be included (inclusive by default)")
+        (is (not (contains? ran "v45.00-002")) "end should be excluded (exclusive)")
+        (is (contains? ran "v45.00-001") "migration before end should be included"))))
+  (testing "exclusive start excludes the start point"
+    (with-temp-empty-app-db [conn :h2]
+      ;; First run all migrations up through v45.00-001 so the DB has the required schema
+      (run-migrations-in-range! conn ["v00.00-000" "v45.00-001"])
+      (let [ran-before (migrations-run conn)]
+        ;; Now run from v45.00-001 exclusive to v45.00-011 inclusive
+        (run-migrations-in-range! conn ["v45.00-001" "v45.00-011"] {:inclusive-start? false})
+        (let [ran-after  (migrations-run conn)
+              newly-ran  (set/difference ran-after ran-before)]
+          (is (not (contains? newly-ran "v45.00-001")) "v45.00-001 should NOT be re-run (exclusive start)")
+          (is (contains? newly-ran "v45.00-002") "v45.00-002 should be included (between exclusive start and end)")
+          (is (contains? newly-ran "v45.00-011") "end should be included (inclusive by default)")))))
+  (testing "unknown start-id throws"
+    (with-temp-empty-app-db [conn :h2]
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                            #"Migration ID not found in changelog"
+                            (run-migrations-in-range! conn ["v99.bogus-999" "v45.00-002"])))))
+  (testing "unknown end-id throws"
+    (with-temp-empty-app-db [conn :h2]
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                            #"Migration ID not found in changelog"
+                            (run-migrations-in-range! conn ["v00.00-000" "v99.bogus-999"]))))))

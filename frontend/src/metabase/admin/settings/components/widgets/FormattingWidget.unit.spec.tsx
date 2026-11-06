@@ -2,10 +2,10 @@ import userEvent from "@testing-library/user-event";
 
 import {
   findRequests,
-  setupPropertiesEndpoints,
   setupSettingsEndpoints,
-  setupUpdateSettingEndpoint,
+  setupStatefulSettingsEndpoints,
 } from "__support__/server-mocks";
+import { createMockSettingsState } from "__support__/state";
 import { renderWithProviders, screen, waitFor, within } from "__support__/ui";
 import { UndoListing } from "metabase/common/components/UndoListing";
 import type { SettingKey } from "metabase-types/api";
@@ -13,16 +13,21 @@ import {
   createMockSettingDefinition,
   createMockSettings,
 } from "metabase-types/api/mocks";
-import { createMockSettingsState } from "metabase-types/store/mocks";
 
 import { FormattingWidget } from "./FormattingWidget";
 
 const setup = async () => {
   const settings = createMockSettings();
-  setupPropertiesEndpoints(settings);
-  setupUpdateSettingEndpoint();
+
+  // Stateful mock: the widget saves one key then reads the refreshed settings
+  // (session-properties is refetched on every save via tag invalidation), so
+  // the properties endpoint must reflect prior PUTs — a static response would
+  // hand back the pre-save snapshot and drop accumulated changes.
+  setupStatefulSettingsEndpoints(settings);
+
   setupSettingsEndpoints(
     Object.entries(settings).map(([key, value]) =>
+      // Unjustified type cast. FIXME
       createMockSettingDefinition({ key: key as SettingKey, value }),
     ),
   );
@@ -81,9 +86,9 @@ describe("FormattingWidget", () => {
     const dateAbbreviateToggle = await screen.findByRole("switch");
     expect(dateAbbreviateToggle).not.toBeChecked();
 
-    const symbolRadio = within(currencyStyleWidget).getByLabelText(/symbol/i);
-    const codeRadio = within(currencyStyleWidget).getByLabelText(/code/i);
-    const nameRadio = within(currencyStyleWidget).getByLabelText(/name/i);
+    const symbolRadio = within(currencyStyleWidget).getByLabelText(/Symbol/);
+    const codeRadio = within(currencyStyleWidget).getByLabelText(/Code/);
+    const nameRadio = within(currencyStyleWidget).getByLabelText(/Name/);
 
     // eslint-disable-next-line jest-dom/prefer-to-have-value
     expect(symbolRadio).toHaveAttribute("value", "symbol");
@@ -96,6 +101,10 @@ describe("FormattingWidget", () => {
     // eslint-disable-next-line jest-dom/prefer-to-have-value
     expect(nameRadio).toHaveAttribute("value", "name");
     expect(nameRadio).not.toBeChecked();
+
+    expect(
+      within(currencyStyleWidget).queryByLabelText(/Local symbol/),
+    ).not.toBeInTheDocument();
   });
 
   it("should update multiple settings", async () => {
@@ -163,5 +172,22 @@ describe("FormattingWidget", () => {
       const toasts = screen.getAllByLabelText("check_filled icon");
       expect(toasts).toHaveLength(6);
     });
+  });
+
+  it("should provide expected number separators (#61854)", async () => {
+    await setup();
+
+    const seperatorStyleInput = await screen.findByLabelText("Separator style");
+    await userEvent.click(seperatorStyleInput);
+
+    const [dropdown] = screen.getAllByRole("listbox");
+    const children = within(dropdown).getAllByRole("option");
+    expect(children.length).toBe(5);
+
+    expect(within(dropdown).getByText("100,000.00")).toBeInTheDocument();
+    expect(within(dropdown).getByText("100 000,00")).toBeInTheDocument();
+    expect(within(dropdown).getByText("100.000,00")).toBeInTheDocument();
+    expect(within(dropdown).getByText("100000.00")).toBeInTheDocument();
+    expect(within(dropdown).getByText("100’000.00")).toBeInTheDocument();
   });
 });

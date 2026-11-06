@@ -1,43 +1,21 @@
 (ns metabase.activity-feed.api
   (:require
-   [clojure.string :as str]
    [medley.core :as m]
+   [metabase.activity-feed.db :as activity-feed.db]
    [metabase.activity-feed.models.recent-views :as recent-views]
    [metabase.api.common :as api :refer [*current-user-id*]]
    [metabase.api.macros :as api.macros]
-   [metabase.app-db.core :as app-db]
    [metabase.models.interface :as mi]
-   [metabase.util.honey-sql-2 :as h2x]
    [metabase.util.malli :as mu]
    [metabase.util.malli.schema :as ms]
    [toucan2.core :as t2]))
 
 (defn- models-query
   [model ids]
-  (t2/select
-   (case model
-     "card"      [:model/Card
-                  :id :name :collection_id :description :display
-                  :dataset_query :type :archived :card_schema
-                  :collection.authority_level [:collection.name :collection_name]
-                  [:dashboard.name :dashboard_name] :dashboard_id]
-     "dashboard" [:model/Dashboard
-                  :id :name :collection_id :description
-                  :archived
-                  :collection.authority_level [:collection.name :collection_name]]
-     "table"     [:model/Table
-                  :id :name :db_id :active
-                  :display_name [:metabase_database.initial_sync_status :initial-sync-status]
-                  [:visibility_type :visibility_type]
-                  [:metabase_database.name :database-name]])
-   (let [model-symb (symbol (str/capitalize model))
-         self-qualify #(app-db/qualify model-symb %)]
-     {:where [:in (self-qualify :id) ids]
-      :left-join (case model
-                   "table" [:metabase_database [:= :metabase_database.id (self-qualify :db_id)]]
-                   "card" [:collection [:= :collection.id (self-qualify :collection_id)]
-                           [:report_dashboard :dashboard] [:= :dashboard.id (self-qualify :dashboard_id)]]
-                   "dashboard" [:collection [:= :collection.id (self-qualify :collection_id)]])})))
+  (case model
+    "card"      (activity-feed.db/recent-cards ids)
+    "dashboard" (activity-feed.db/recent-dashboards ids)
+    "table"     (activity-feed.db/recent-tables ids)))
 
 (defn- models-for-views
   "Returns a map of {model {id instance}} for activity views suitable for looking up by model and id to get a model."
@@ -69,38 +47,8 @@
   from the query_execution table. The query context is always a `:question`. The results are normalized and concatenated to the
   query results for dashboard and table views."
   [views-limit card-runs-limit]
-  (let [dashboard-and-table-views (t2/select [:model/RecentViews
-                                              [[:min :recent_views.user_id] :user_id]
-                                              :model
-                                              :model_id
-                                              [[:max [:coalesce :d.view_count :t.view_count]] :cnt]
-                                              [:%max.timestamp :max_ts]]
-                                             {:group-by  [:model :model_id]
-                                              :where     [:and
-                                                          [:= :context "view"]
-                                                          [:in :model #{"dashboard" "table"}]
-                                                          [:or [:= :active true] [:= :active nil]]
-                                                          [:or [:= :archived false] [:= :archived nil]]]
-                                              :order-by  [[:max_ts :desc] [:model :desc]]
-                                              :limit     views-limit
-                                              :left-join [[:report_dashboard :d]
-                                                          [:and
-                                                           [:= :model "dashboard"]
-                                                           [:= :d.id :model_id]]
-                                                          [:metabase_table :t]
-                                                          [:and
-                                                           [:= :model "table"]
-                                                           [:= :t.id :model_id]]]})
-        card-runs                 (->> (t2/select [:model/QueryExecution
-                                                   [:%min.executor_id :user_id]
-                                                   [(app-db/qualify :model/QueryExecution :card_id) :model_id]
-                                                   [:%count.* :cnt]
-                                                   [:%max.started_at :max_ts]]
-                                                  {:group-by [(app-db/qualify :model/QueryExecution :card_id) :context]
-                                                   :where    [:and
-                                                              [:= :context (h2x/literal :question)]]
-                                                   :order-by [[:max_ts :desc]]
-                                                   :limit    card-runs-limit})
+  (let [dashboard-and-table-views (activity-feed.db/recent-dashboard-and-table-views views-limit)
+        card-runs                 (->> (activity-feed.db/recent-card-runs card-runs-limit)
                                        (mapv #(-> %
                                                   (dissoc :row_count)
                                                   (assoc :model "card"))))]
@@ -110,6 +58,13 @@
 (def ^:private views-limit 8)
 (def ^:private card-runs-limit 8)
 
+;; TODO (Cam 10/28/25) -- fix this endpoint route to use kebab-case for consistency with the rest of our REST API
+;;
+;; TODO (Cam 2025-11-25) please add a response schema to this API endpoint, it makes it easier for our customers to
+;; use our API + we will need it when we make auto-TypeScript-signature generation happen
+;;
+#_{:clj-kondo/ignore [:metabase/validate-defendpoint-route-uses-kebab-case
+                      :metabase/validate-defendpoint-has-response-schema]}
 (api.macros/defendpoint :get "/recent_views"
   "Get a list of 100 models (cards, models, tables, dashboards, and collections) that the current user has been viewing most
   recently. Return a maximum of 20 model of each, if they've looked at at least 20."
@@ -117,37 +72,68 @@
   []
   {:recent_views (:recents (recent-views/get-recents *current-user-id* [:views]))})
 
+;; TODO (Cam 10/28/25) -- fix this endpoint so it uses kebab-case for query parameters for consistency with the rest
+;; of the REST API
+;;
+;; TODO (Cam 2025-11-25) please add a response schema to this API endpoint, it makes it easier for our customers to
+;; use our API + we will need it when we make auto-TypeScript-signature generation happen
+;;
+#_{:clj-kondo/ignore [:metabase/validate-defendpoint-query-params-use-kebab-case
+                      :metabase/validate-defendpoint-has-response-schema]}
 (api.macros/defendpoint :get "/recents"
   "Get a list of recent items the current user has been viewing most recently under the `:recents` key.
   Allows for filtering by context: views or selections"
   [_route-params
-   {:keys [context include_metadata]} :- [:map
+   {:keys [context include_metadata]} :- [:map {:closed true}
                                           [:context (ms/QueryVectorOf [:enum :selections :views])]
                                           [:include_metadata {:default false} [:maybe :boolean]]]]
   (when-not (seq context) (throw (ex-info "context is required." {})))
   (recent-views/get-recents *current-user-id* context {:include-metadata? include_metadata}))
 
+;; TODO (Cam 2025-11-25) please add a response schema to this API endpoint, it makes it easier for our customers to
+;; use our API + we will need it when we make auto-TypeScript-signature generation happen
+;;
+#_{:clj-kondo/ignore [:metabase/validate-defendpoint-has-response-schema]}
 (api.macros/defendpoint :post "/recents"
   "Adds a model to the list of recently selected items."
   [_route-params
    _query-params
-   {:keys [model model_id context]} :- [:map
+   {:keys [model model_id context]} :- [:map {:closed true}
                                         [:model    (into [:enum] recent-views/rv-models)]
                                         [:model_id ms/PositiveInt]
                                         [:context  [:enum :selection]]]]
-  (let [model-id model_id
-        model-type (recent-views/rv-model->model model)]
-    (when-not (t2/exists? model-type :id model-id)
+  (let [model-id     model_id
+        model-type   (recent-views/rv-model->model model)
+        exists?      (case model-type
+                       :model/Card       (activity-feed.db/card-exists? model-id)
+                       :model/Dashboard  (activity-feed.db/dashboard-exists? model-id)
+                       :model/Table      (activity-feed.db/table-exists? model-id)
+                       :model/Collection (activity-feed.db/collection-exists? model-id)
+                       :model/Document   (activity-feed.db/document-exists? model-id))
+        entity       (fn [] (case model-type
+                              :model/Card       (activity-feed.db/card model-id)
+                              :model/Dashboard  (activity-feed.db/dashboard model-id)
+                              :model/Table      (activity-feed.db/table model-id)
+                              :model/Collection (activity-feed.db/collection model-id)
+                              :model/Document   (activity-feed.db/document model-id)))]
+    (when-not exists?
       (throw (ex-info "Model not found" {:model model :model_id model-id})))
-    (api/read-check (t2/select-one model-type :id model-id))
+    (api/read-check (entity))
     (recent-views/update-users-recent-views! *current-user-id* model-type model-id context)))
 
+;; TODO (Cam 10/28/25) -- fix this endpoint route to use kebab-case for consistency with the rest of our REST API
+;;
+;; TODO (Cam 2025-11-25) please add a response schema to this API endpoint, it makes it easier for our customers to
+;; use our API + we will need it when we make auto-TypeScript-signature generation happen
+;;
+#_{:clj-kondo/ignore [:metabase/validate-defendpoint-route-uses-kebab-case
+                      :metabase/validate-defendpoint-has-response-schema]}
 (api.macros/defendpoint :get "/most_recently_viewed_dashboard"
   "Get the most recently viewed dashboard for the current user. Returns a 204 if the user has not viewed any dashboards
    in the last 24 hours."
   []
-  (if-let [dashboard-id (recent-views/most-recently-viewed-dashboard-id api/*current-user-id*)]
-    (let [dashboard (-> (t2/select-one :model/Dashboard :id dashboard-id)
+  (if-let [dashboard-id (recent-views/most-recently-viewed-dashboard-id *current-user-id*)]
+    (let [dashboard (-> (activity-feed.db/dashboard dashboard-id)
                         api/check-404
                         (t2/hydrate [:collection :is_personal]))]
       (if (mi/can-read? dashboard)
@@ -191,7 +177,7 @@
 
                                ;; NOTE: the query implementation `views-and-runs` has an order-by clause using most recent timestamp
                                ;; this has an effect on the outcomes. Consider an item with a massively high viewcount but a last view by the user
-                               ;; a long time ago. This may not even make it into the firs 10 items from the query, even though it might be worth showing
+                               ;; a long time ago. This may not even make it into the first 10 items from the query, even though it might be worth showing
                                (when-not (zero? max-count)
                                  (* (/ cnt max-count) views-wt))])]
            (assoc item :score (double (reduce + scores))))) items))))
@@ -238,6 +224,13 @@
                    (assoc :timestamp (:max_ts % ""))
                    recent-views/fill-recent-view-info)))))
 
+;; TODO (Cam 10/28/25) -- fix this endpoint route to use kebab-case for consistency with the rest of our REST API
+;;
+;; TODO (Cam 2025-11-25) please add a response schema to this API endpoint, it makes it easier for our customers to
+;; use our API + we will need it when we make auto-TypeScript-signature generation happen
+;;
+#_{:clj-kondo/ignore [:metabase/validate-defendpoint-route-uses-kebab-case
+                      :metabase/validate-defendpoint-has-response-schema]}
 (api.macros/defendpoint :get "/popular_items"
   "Get the list of 5 popular things on the instance. Query takes 8 and limits to 5 so that if it finds anything
   archived, deleted, etc it can usually still get 5. "

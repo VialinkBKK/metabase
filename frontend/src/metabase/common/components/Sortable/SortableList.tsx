@@ -6,13 +6,13 @@ import type {
 } from "@dnd-kit/core";
 import { DndContext, DragOverlay } from "@dnd-kit/core";
 import { SortableContext, arrayMove } from "@dnd-kit/sortable";
-import React, { useLayoutEffect, useMemo, useState } from "react";
+import React, { type JSX, useLayoutEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import _ from "underscore";
 
+import { getPortalRootElement } from "metabase/common/utils/portal";
 import GrabberS from "metabase/css/components/grabber.module.css";
-import { getPortalRootElement } from "metabase/css/core/overlays/utils";
-import { isNotNull } from "metabase/lib/types";
+import { isNotNull } from "metabase/utils/types";
 
 export type SortableDivider = {
   afterIndex: number;

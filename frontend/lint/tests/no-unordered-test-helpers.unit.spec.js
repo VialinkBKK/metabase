@@ -1,8 +1,8 @@
-import { RuleTester } from "eslint";
+import rule from "../eslint-plugin-metabase/rules/no-unordered-test-helpers";
 
-import rule from "../eslint-rules/no-unordered-test-helpers";
+import { createRuleTester } from "./rule-tester";
 
-const ruleTester = new RuleTester({ parserOptions: { ecmaVersion: 2015 } });
+const ruleTester = createRuleTester();
 
 const orderError = {
   message: "H.restore() must come before H.resetTestTable()",

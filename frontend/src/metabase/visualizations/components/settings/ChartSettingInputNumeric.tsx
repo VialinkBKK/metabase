@@ -1,11 +1,18 @@
 import debounce from "lodash.debounce";
-import { type ChangeEvent, useEffect, useMemo, useState } from "react";
+import {
+  type ChangeEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useLatest } from "react-use";
 
 import { TextInput } from "metabase/ui";
+import type { ChartSettingWidgetProps } from "metabase/viz-core";
 
-import type { ChartSettingWidgetProps } from "./types";
-
+export const DEBOUNCE_MS = 200;
 const ALLOWED_CHARS = new Set([
   "0",
   "1",
@@ -24,16 +31,18 @@ const ALLOWED_CHARS = new Set([
 
 // Note: there are more props than these that are provided by the viz settings
 // code, we just don't have types for them here.
-interface ChartSettingInputProps
-  extends Omit<ChartSettingWidgetProps<number>, "onChangeSettings"> {
+interface ChartSettingInputProps extends Omit<
+  ChartSettingWidgetProps<number>,
+  "onChangeSettings"
+> {
   options?: {
     isInteger?: boolean;
     isNonNegative?: boolean;
   };
   id?: string;
   placeholder?: string;
-  getDefault?: () => string;
   className?: string;
+  disabled?: boolean;
 }
 
 export const ChartSettingInputNumeric = ({
@@ -42,14 +51,15 @@ export const ChartSettingInputNumeric = ({
   placeholder,
   options,
   id,
-  getDefault,
   className,
+  disabled,
 }: ChartSettingInputProps) => {
   const [inputValue, setInputValue] = useState<string>(value?.toString() ?? "");
-  const defaultValueProps = getDefault ? { defaultValue: getDefault() } : {};
+  const isFocusedRef = useRef(false);
 
-  const handleChangeRef = useLatest((e: ChangeEvent<HTMLInputElement>) => {
-    let num = e.target.value !== "" ? Number(e.target.value) : Number.NaN;
+  const processValueRef = useLatest((rawValue: string) => {
+    const rawNum = rawValue !== "" ? Number(rawValue) : Number.NaN;
+    let num = rawNum;
     if (options?.isInteger) {
       num = Math.round(num);
     }
@@ -61,33 +71,59 @@ export const ChartSettingInputNumeric = ({
       onChange(undefined);
     } else {
       onChange(num);
-      setInputValue(String(num));
+      // When the user is mid-edit with a decimal value (e.g. "0.", "0.00",
+      // ".5"), String(num) would collapse their input. Only skip the display
+      // update for these cosmetic differences — still normalize when options
+      // corrected the value or for scientific notation expansion.
+      const isMidEditDecimal =
+        isFocusedRef.current &&
+        num === rawNum &&
+        String(num) !== rawValue &&
+        !rawValue.includes("e");
+      if (!isMidEditDecimal) {
+        setInputValue(String(num));
+      }
     }
   });
-  const handleChangeDebounced = useMemo(() => {
-    return debounce((e: ChangeEvent<HTMLInputElement>) => {
-      handleChangeRef.current(e);
-    }, 400);
-  }, [handleChangeRef]);
+  const processValueDebounced = useMemo(() => {
+    return debounce((rawValue: string) => {
+      processValueRef.current(rawValue);
+    }, DEBOUNCE_MS);
+  }, [processValueRef]);
+
+  const handleFocus = useCallback(() => {
+    isFocusedRef.current = true;
+  }, []);
+
+  const handleBlur = useCallback(() => {
+    isFocusedRef.current = false;
+    processValueDebounced.cancel();
+    processValueRef.current(inputValue);
+  }, [processValueDebounced, processValueRef, inputValue]);
 
   useEffect(() => {
-    setInputValue(value?.toString() ?? "");
+    if (!isFocusedRef.current) {
+      setInputValue(value?.toString() ?? "");
+    }
   }, [value]);
 
   return (
     <TextInput
       id={id}
-      {...defaultValueProps}
       placeholder={placeholder}
       type="text"
+      disabled={disabled}
       error={inputValue && isNaN(Number(inputValue))}
       value={inputValue}
       onChange={(e: ChangeEvent<HTMLInputElement>) => {
-        if (e.target.value.split("").every((ch) => ALLOWED_CHARS.has(ch))) {
-          setInputValue(e.target.value);
-          handleChangeDebounced(e);
+        const value = e.target.value.replaceAll(",", ".");
+        if (value.split("").every((ch) => ALLOWED_CHARS.has(ch))) {
+          setInputValue(value);
+          processValueDebounced(value);
         }
       }}
+      onFocus={handleFocus}
+      onBlur={handleBlur}
       className={className}
     />
   );

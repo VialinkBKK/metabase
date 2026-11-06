@@ -18,7 +18,7 @@ Metabase is an open-source business intelligence platform. You can use Metabase 
 
 ### Metabase Cloud
 
-The easiest way to get started with Metabase is to sign up for a free trial of [Metabase Cloud](https://store.metabase.com/checkout). You get support, backups, upgrades, an SMTP server, SSL certificate, SoC2 Type 2 security auditing, and more (plus your money goes toward improving Metabase). Check out our quick overview of [cloud vs self-hosting](./cloud/cloud-vs-self-hosting.md). If you need to, you can always switch to [self-hosting](./installation-and-operation/installing-metabase.md) Metabase at any time (or vice versa).
+The easiest way to get started with Metabase is to sign up for a free trial of [Metabase Cloud](https://store.metabase.com/checkout). You get support, backups, upgrades, an SMTP server, SSL certificate, SoC2 Type 2 security auditing, and more (plus your money goes toward improving Metabase). Check out our quick overview of [cloud vs self-hosting](https://www.metabase.com/docs/latest/cloud/cloud-vs-self-hosting). If you need to, you can always switch to [self-hosting](./installation-and-operation/installing-metabase.md) Metabase at any time (or vice versa).
 
 ### [Installing Metabase](./installation-and-operation/installing-metabase.md)
 
@@ -28,13 +28,13 @@ Run as a JAR, using Docker, or on [Metabase Cloud](https://store.metabase.com/ch
 
 Once installed, set up your Metabase and connect to your data.
 
-### [Getting started](https://www.metabase.com/learn/metabase-basics/getting-started/index)
+### [Getting started](https://www.metabase.com/learn/metabase-basics/getting-started)
 
 With your data connected, get started asking questions, creating dashboards, and sharing your work.
 
 ### [A tour of Metabase](https://www.metabase.com/learn/metabase-basics/overview/tour-of-metabase)
 
-Metabase is a deep product with a lot of tools to simplify business intelligence, from embeddable charts and interactive dashboards, to GUI and SQL editors, to auditing and data sandboxing, and more.
+Metabase is a deep product with a lot of tools to simplify business intelligence, from embeddable charts and interactive dashboards, to GUI and SQL editors, to auditing and row and column security, and more.
 
 ## Documentation topics
 
@@ -48,10 +48,11 @@ Metabase's reference documentation.
 - [Configuring the Metabase application database](./installation-and-operation/configuring-application-database.md)
 - [Backing up Metabase](./installation-and-operation/backing-up-metabase-application-data.md)
 - [Migrating to a production application database](./installation-and-operation/migrating-from-h2.md)
-- [Monitoring your Metabase](./installation-and-operation/monitoring-metabase.md)
 - [Development instances](./installation-and-operation/development-instance.md)
 - [Serialization](./installation-and-operation/serialization.md)
-- [Commands](./installation-and-operation/commands.md)
+- [Remote sync](./data-modeling/semantic-layer/remote-sync.md)
+- [Metabase CLI](./installation-and-operation/metabase-cli.md)
+- [Metabase JAR commands](./installation-and-operation/commands.md)
 - [Supported browsers](./installation-and-operation/supported-browsers.md)
 - [Privacy](./installation-and-operation/privacy.md)
 - [About the anonymous usage data we collect](./installation-and-operation/information-collection.md)
@@ -86,6 +87,7 @@ Metabase's reference documentation.
 
 - [The SQL editor](./questions/native-editor/writing-sql.md)
 - [SQL parameters](./questions/native-editor/sql-parameters.md)
+- [Table variables](./questions/native-editor/table-variables.md)
 - [Referencing models and saved questions](./questions/native-editor/referencing-saved-questions-in-queries.md)
 - [Snippets](./questions/native-editor/snippets.md)
 - [Snippet folder permissions](./permissions/snippets.md)
@@ -93,7 +95,9 @@ Metabase's reference documentation.
 #### Visualizing data
 
 - [Visualizing data](./questions/visualizations/visualizing-results.md)
-- [Combo charts](./questions/visualizations/combo-chart.md)
+- [Box plots](./questions/visualizations/box-plot.md)
+- [Combo charts](./questions/visualizations/line-bar-and-area-charts.md#combo-charts)
+- [Custom visualizations](./questions/visualizations/custom.md)
 - [Detail](./questions/visualizations/detail.md)
 - [Funnel charts](./questions/visualizations/funnel.md)
 - [Gauge charts](./questions/visualizations/gauge.md)
@@ -120,24 +124,53 @@ Metabase's reference documentation.
 - [Dashboard subscriptions](./dashboards/subscriptions.md)
 - [Actions on dashboards](./dashboards/actions.md)
 
+### Data apps
+
+- [Data apps overview](./data-apps/start.md)
+- [Getting started with data apps](./data-apps/getting-started.md)
+- [Build a data app](./data-apps/build.md)
+- [Manage data apps](./data-apps/manage.md)
+
+### Documents
+
+- [Introduction to documents](./documents/introduction.md)
+
 ### Data modeling
 
 - [Data modeling overview](./data-modeling/start.md)
-- [Models](./data-modeling/models.md)
-- [Model persistence](./data-modeling/model-persistence.md)
-- [Metrics](./data-modeling/metrics.md)
-- [Table metadata admin settings](./data-modeling/metadata-editing.md)
-- [Field types](./data-modeling/semantic-types.md)
-- [Formatting defaults](./data-modeling/formatting.md)
-- [Working with JSON](./data-modeling/json-unfolding.md)
-- [Segments](./data-modeling/segments.md)
+- [Models](./data-modeling/models/models.md)
+- [Model persistence](./data-modeling/models/model-persistence.md)
+- [Metrics](./data-modeling/semantic-layer/metrics.md)
+- [Table metadata admin settings](./data-modeling/metadata/metadata-editing.md)
+- [Field types](./data-modeling/metadata/semantic-types.md)
+- [Formatting defaults](./data-modeling/metadata/formatting.md)
+- [Working with JSON](./data-modeling/metadata/json-unfolding.md)
+- [Segments](./data-modeling/semantic-layer/segments.md)
 
 ### Actions
 
-- [Actions overview](./actions/start.md)
-- [Introduction to actions](./actions/introduction.md)
-- [Basic actions](./actions/basic.md)
-- [Custom actions](./actions/custom.md)
+- [Data actions](./data-modeling/data-actions.md)
+- [Model actions](./data-modeling/models/actions/start.md)
+- [Introduction to model actions](./data-modeling/models/actions/introduction.md)
+- [Basic actions](./data-modeling/models/actions/basic.md)
+- [Custom actions](./data-modeling/models/actions/custom.md)
+
+### AI
+
+- [AI overview](./ai/start.md)
+- [Metabot](./ai/metabot.md)
+- [Research](./ai/research.md)
+- [AI settings](./ai/settings.md)
+- [Supported AI providers](./ai/providers.md)
+- [AI usage controls](./ai/usage-controls.md)
+- [AI usage auditing](./ai/usage-auditing.md)
+- [AI customization](./ai/customization.md)
+- [AI system prompts](./ai/system-prompts.md)
+- [Agent API](./ai/agent-api.md)
+- [MCP server](./ai/mcp.md)
+- [MCP server tools](./ai/mcp-tools.md)
+- [Metabot in Slack](./ai/metabot-slack.md)
+- [AI privacy](./ai/privacy.md)
 
 ### Exploration and organization
 
@@ -159,6 +192,7 @@ Metabase's reference documentation.
 - [Managing people and groups](./people-and-groups/managing.md)
 - [Password complexity](./people-and-groups/changing-password-complexity.md)
 - [Session expiration](./people-and-groups/changing-session-expiration.md)
+- [Two-factor authentication](./people-and-groups/two-factor-authentication.md)
 - [Google Sign-In](./people-and-groups/google-sign-in.md)
 - [LDAP](./people-and-groups/ldap.md)
 - [API keys](./people-and-groups/api-keys.md)
@@ -166,6 +200,8 @@ Metabase's reference documentation.
 #### Paid SSO options
 
 - [JWT-based authentication](./people-and-groups/authenticating-with-jwt.md)
+- [OIDC-based authentication](./people-and-groups/authenticating-with-oidc.md)
+  - [OIDC with Keycloak](./people-and-groups/oidc-keycloak.md)
 - [SAML-based authentication](./people-and-groups/authenticating-with-saml.md)
   - [SAML with Auth0](./people-and-groups/saml-auth0.md)
   - [SAML with Microsoft Entra ID](./people-and-groups/saml-azure.md)
@@ -181,8 +217,8 @@ Metabase's reference documentation.
 - [Data permissions](./permissions/data.md)
 - [Collection permissions](./permissions/collections.md)
 - [Application permissions](./permissions/application.md)
-- [Data sandboxes](./permissions/data-sandboxes.md)
-- [Data sandbox examples](./permissions/data-sandbox-examples.md)
+- [Row and column security](./permissions/row-and-column-security.md)
+- [Row and column security examples](./permissions/row-and-column-security-examples.md)
 - [Connection impersonation](./permissions/impersonation.md)
 - [Database routing](./permissions/database-routing.md)
 - [Snippets folder permissions](./permissions/snippets.md)
@@ -193,23 +229,26 @@ Metabase's reference documentation.
 
 - [Embedding overview](./embedding/start.md)
 - [Embedding introduction](./embedding/introduction.md)
-- [Interactive embedding](./embedding/interactive-embedding.md)
-- [Interactive embedding quick start](./embedding/interactive-embedding-quick-start-guide.md)
-- [Static embedding](./embedding/static-embedding.md)
-- [Parameters for static embeds](./embedding/static-embedding-parameters.md)
-- [Securing embedded Metabase](./embedding/securing-embeds.md)
+- Modular embedding
+  - [SSO](./embedding/modular-embedding.md)
+  - [Guest](./embedding/guest-embedding.md)
+  - [SDK](./embedding/sdk/introduction.md)
+  - [Custom visualizations](./embedding/custom-visualizations.md)
+- [Full app embedding](./embedding/full-app-embedding.md)
+- [Securing embeds](./embedding/securing-embeds.md)
+- [AI agent resources](./embedding/ai-agent-resources.md)
 
 ### Configuration
 
 - [Configuration overview](./configuring-metabase/start.md)
 - [Setting up Metabase](./configuring-metabase/setting-up-metabase.md)
 - [General settings](./configuring-metabase/settings.md)
+- [Allow iframes and images from other domains](./configuring-metabase/domains.md)
 - [Email](./configuring-metabase/email.md)
 - [Slack](./configuring-metabase/slack.md)
 - [Webhooks](./configuring-metabase/webhooks.md)
 - [Environment variables](./configuring-metabase/environment-variables.md)
 - [Configuration file](./configuring-metabase/config-file.md)
-- [Metabase log configuration](./configuring-metabase/log-configuration.md)
 - [Timezones](./configuring-metabase/timezones.md)
 - [Languages and localization](./configuring-metabase/localization.md)
 - [Appearance](./configuring-metabase/appearance.md)
@@ -217,15 +256,28 @@ Metabase's reference documentation.
 - [Custom maps](./configuring-metabase/custom-maps.md)
 - [Customizing the Metabase Jetty webserver](./configuring-metabase/customizing-jetty-webserver.md)
 
+### Monitor
+
+- [Monitor overview](./monitor/start.md)
+- [Dependency diagnostics](./monitor/dependency-diagnostics.md)
+- [Content diagnostics](./monitor/content-diagnostics.md)
+- [Erroring questions](./monitor/erroring-questions.md)
+- [Alerts management](./monitor/alerts-management.md)
+- [Background tasks](./monitor/background-tasks.md)
+- [Scheduled jobs](./monitor/scheduled-jobs.md)
+- [Application logs](./monitor/application-logs.md)
+- [Model persistence log](./monitor/model-persistence-log.md)
+- [CLI analytics](./monitor/cli-analytics.md)
+- [Data app analytics](./monitor/data-app-analytics.md)
+
 ### Tools
 
 - [Tools overview](./usage-and-performance-tools/start.md)
 - [Usage analytics](./usage-and-performance-tools/usage-analytics.md)
-- [Admin tools](./usage-and-performance-tools/tools.md)
 
 ### Metabase Cloud
 
-- [Documentation for Metabase Cloud and Store](./cloud/start.md)
+- [Documentation for Metabase Cloud and Store](https://www.metabase.com/docs/latest/cloud/start)
 
 ### Metabase API
 
@@ -246,7 +298,7 @@ Metabase's reference documentation.
 
 - [Troubleshooting guides](troubleshooting-guide/index.md)
 - [Metabase forum](https://discourse.metabase.com/)
-- [Configuring logging](./configuring-metabase/log-configuration.md)
+- [Application logs](./monitor/application-logs.md)
 
 ### Tutorials and guides
 
@@ -290,8 +342,8 @@ Contribute to the Metabase open source project!
 
 Data jargon explained.
 
-### [Metabase Experts](https://www.metabase.com/partners/)
+### [Metabase Experts](https://www.metabase.com/partners)
 
-If you’d like more technical resources to set up your data stack with Metabase, connect with a [Metabase Expert](https://www.metabase.com/partners/).
+If you’d like more technical resources to set up your data stack with Metabase, connect with a [Metabase Expert](https://www.metabase.com/partners).
 
 <!-- bump 2 -->

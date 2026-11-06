@@ -26,13 +26,12 @@ export function saveMetadataChanges() {
 export function openColumnOptions(column) {
   const columnNameRegex = new RegExp(`^${column}$`);
 
-  tableInteractive()
-    .findAllByTestId("header-cell")
-    .contains(columnNameRegex)
-    .scrollIntoView()
-    .should("be.visible");
-
   // Query element again to ensure it's not unmounted
+  tableInteractive().findAllByTestId("header-cell");
+  tableInteractive().contains(columnNameRegex);
+  tableInteractive().scrollIntoView();
+  tableInteractive().should("be.visible");
+
   tableInteractive()
     .findAllByTestId("header-cell")
     .contains(columnNameRegex)
@@ -49,8 +48,9 @@ export function renameColumn(oldName, newName) {
   tableInteractive()
     .findAllByTestId("header-cell")
     .contains(newName)
-    .scrollIntoView()
-    .should("be.visible");
+    .as("column")
+    .scrollIntoView();
+  cy.get("@column").should("be.visible");
 }
 
 export function setColumnType(oldType, newType) {

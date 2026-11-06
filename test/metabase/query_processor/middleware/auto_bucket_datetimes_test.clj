@@ -1,14 +1,17 @@
 (ns metabase.query-processor.middleware.auto-bucket-datetimes-test
   (:require
    [clojure.test :refer :all]
+   [metabase.legacy-mbql.schema :as mbql.s]
    [metabase.lib.convert :as lib.convert]
    [metabase.lib.core :as lib]
    [metabase.lib.normalize :as lib.normalize]
+   [metabase.lib.schema :as lib.schema]
    [metabase.lib.test-metadata :as meta]
    [metabase.lib.test-util :as lib.tu]
    [metabase.lib.test-util.macros :as lib.tu.macros]
    [metabase.query-processor.middleware.auto-bucket-datetimes :as qp.auto-bucket-datetimes]
-   [metabase.query-processor.store :as qp.store]
+   ;; binds mock metadata providers via the ambient store, which the code under test reads
+   ^{:clj-kondo/ignore [:deprecated-namespace]} [metabase.query-processor.store :as qp.store]
    [metabase.util.malli :as mu]))
 
 (deftest ^:parallel should-not-be-autobucketed?-test
@@ -19,7 +22,7 @@
             [:stages 0]
             (lib.normalize/normalize :mbql.clause/field [:field {:temporal-unit :month} (meta/id :checkins :date)]))))))
 
-(mu/defn- auto-bucket [query :- :map]
+(mu/defn- auto-bucket [query :- [:or ::lib.schema/query ::mbql.s/Query]]
   (if (= (:lib/type query) :mbql/query)
     (qp.auto-bucket-datetimes/auto-bucket-datetimes query)
     (let [metadata-provider (if (qp.store/initialized?)
@@ -216,11 +219,11 @@
 (deftest ^:parallel auto-bucket-by-effective-type-test
   (testing "UNIX timestamps should be considered to be :type/DateTime based on effective type"
     (qp.store/with-metadata-provider unix-timestamp-metadata-provider
-      (is (= {:source-table 1
-              :breakout     [[:field 1 {:temporal-unit :day}]]}
-             (auto-bucket-mbql
-              {:source-table 1
-               :breakout     [[:field 1 nil]]}))))))
+      (is (=? {:source-table 1
+               :breakout     [[:field 1 {:temporal-unit :day}]]}
+              (auto-bucket-mbql
+               {:source-table 1
+                :breakout     [[:field 1 nil]]}))))))
 
 (deftest ^:parallel ignore-native-queries-test
   (testing "do native queries pass thru unchanged?"

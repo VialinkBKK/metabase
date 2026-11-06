@@ -3,13 +3,15 @@ import {
   setupSettingEndpoint,
   setupSettingsEndpoints,
 } from "__support__/server-mocks";
+import { createMockSettingsState } from "__support__/state";
 import { renderWithProviders, screen, waitFor } from "__support__/ui";
+import { Route } from "metabase/router";
 import type { SettingKey } from "metabase-types/api";
 import {
   createMockSettingDefinition,
   createMockSettings,
+  createMockUser,
 } from "metabase-types/api/mocks";
-import { createMockSettingsState } from "metabase-types/store/mocks";
 
 import { UpdatesNavItem } from "./UpdatesNavItem";
 
@@ -29,7 +31,7 @@ const setup = async (props: { versionTag: string }) => {
     settingKey: "version-info",
     settingValue: {
       latest: {
-        version: "v1.53.9",
+        version: "v1.60.0",
         released: "2025-03-25",
         patch: true,
         highlights: [],
@@ -39,12 +41,15 @@ const setup = async (props: { versionTag: string }) => {
 
   setupSettingsEndpoints(
     Object.entries(settings).map(([key, value]) =>
+      // Unjustified type cast. FIXME
       createMockSettingDefinition({ key: key as SettingKey, value }),
     ),
   );
 
-  renderWithProviders(<UpdatesNavItem />, {
+  renderWithProviders(<Route path="*" element={<UpdatesNavItem />} />, {
+    withRouter: true,
     storeInitialState: {
+      currentUser: createMockUser({ is_superuser: true }),
       settings: createMockSettingsState(settings),
     },
   });
@@ -54,7 +59,7 @@ const setup = async (props: { versionTag: string }) => {
 
 describe("UpdatesNavItem", () => {
   it("should not show badge if there are no updates available", async () => {
-    await setup({ versionTag: "v1.53.8" });
+    await setup({ versionTag: "v1.60.0" });
 
     await waitFor(() => {
       const indicatorDot = document.querySelector(
@@ -65,7 +70,7 @@ describe("UpdatesNavItem", () => {
   });
 
   it("should show badge when updates are available", async () => {
-    await setup({ versionTag: "v1.53.8" });
+    await setup({ versionTag: "v1.40.8" });
     await waitFor(() => {
       const indicatorDot = document.querySelector(
         '[class*="Indicator-indicator"]',

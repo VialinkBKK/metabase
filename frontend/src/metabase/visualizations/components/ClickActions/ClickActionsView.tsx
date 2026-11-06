@@ -1,9 +1,10 @@
-import type { HTMLAttributes } from "react";
+import type { HTMLAttributes, JSX } from "react";
 
+import { Divider, Stack } from "metabase/ui";
+import { trackClickActionPerformed } from "metabase/visualizations/analytics";
 import type { RegularClickAction } from "metabase/visualizations/types";
 
 import { ClickActionControl } from "./ClickActionControl";
-import { Container, Divider } from "./ClickActionsPopover.styled";
 import { ClickActionsViewSection } from "./ClickActionsViewSection";
 import {
   getGroupedAndSortedActions,
@@ -28,7 +29,14 @@ export const ClickActionsView = ({
   const hasOnlyOneSection = sections.length === 1;
 
   return (
-    <Container data-testid="click-actions-view" {...divProps}>
+    <Stack
+      data-testid="click-actions-view"
+      gap="sm"
+      px="xl"
+      py="lg"
+      fw={700}
+      {...divProps}
+    >
       {sections.map(([sectionKey, actions]) => {
         const sectionTitle = getSectionTitle(sectionKey, actions);
         const contentDirection = getSectionContentDirection(
@@ -37,7 +45,6 @@ export const ClickActionsView = ({
         );
         const withBottomDivider =
           sectionKey === "records" && !hasOnlyOneSection;
-        const withTopDivider = sectionKey === "details" && !hasOnlyOneSection;
 
         return (
           <ClickActionsViewSection
@@ -46,19 +53,21 @@ export const ClickActionsView = ({
             title={sectionTitle}
             contentDirection={contentDirection}
           >
-            {withTopDivider && <Divider />}
             {actions.map((action) => (
               <ClickActionControl
                 key={action.name}
                 action={action}
                 close={close}
-                onClick={() => onClick(action)}
+                onClick={() => {
+                  trackClickActionPerformed(action);
+                  onClick(action);
+                }}
               />
             ))}
-            {withBottomDivider && <Divider />}
+            {withBottomDivider && <Divider mx="-xl" my="sm" />}
           </ClickActionsViewSection>
         );
       })}
-    </Container>
+    </Stack>
   );
 };

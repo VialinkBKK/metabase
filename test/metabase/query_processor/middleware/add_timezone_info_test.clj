@@ -2,8 +2,10 @@
   (:require
    [clojure.test :refer :all]
    [metabase.driver :as driver]
-   [metabase.query-processor.middleware.add-timezone-info
-    :as add-timezone-info]
+   [metabase.lib.test-metadata :as meta]
+   [metabase.query-processor.middleware.add-timezone-info :as add-timezone-info]
+   ;; binds mock metadata providers via the ambient store, which the code under test reads
+   ^{:clj-kondo/ignore [:deprecated-namespace]} [metabase.query-processor.store :as qp.store]
    [metabase.test :as mt]))
 
 (driver/register! ::timezone-driver, :abstract? true)
@@ -28,6 +30,25 @@
     (testing driver
       (mt/with-temporary-setting-values [report-timezone timezone]
         (driver/with-driver driver
-          (mt/with-database-timezone-id nil
-            (is (= expected
-                   (add-timezone-info {})))))))))
+          (qp.store/with-metadata-provider meta/metadata-provider
+            (mt/with-database-timezone-id nil
+              (is (= expected
+                     (add-timezone-info {}))))))))))
+
+(deftest equivalent-timezone-test
+  (testing "A requested timezone that is another name for the results timezone is reported under the requested name"
+    (driver/with-driver ::no-timezone-driver
+      (qp.store/with-metadata-provider meta/metadata-provider
+        (doseq [[report-timezone database-timezone expected-results-timezone]
+                [["US/Pacific" "America/Los_Angeles" "US/Pacific"]
+                 ["Etc/UTC"    "UTC"                 "Etc/UTC"]
+                 ["GMT"        "UTC"                 "GMT"]
+                 ;; same current offset, but different rules
+                 ["US/Pacific" "America/Vancouver"   "America/Vancouver"]
+                 ;; not a region ID, so keep the results timezone the frontend can use
+                 ["Z"          "UTC"                 "UTC"]]]
+          (mt/with-report-timezone-id! report-timezone
+            (mt/with-database-timezone-id database-timezone
+              (is (= {:results_timezone   expected-results-timezone
+                      :requested_timezone report-timezone}
+                     (add-timezone-info {}))))))))))

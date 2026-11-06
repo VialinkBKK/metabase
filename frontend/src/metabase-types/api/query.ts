@@ -1,12 +1,12 @@
-import type { UiParameter } from "metabase-lib/v1/parameters/types";
-import type {
-  CardId,
-  DatabaseId,
-  FieldId,
-  SegmentId,
-  TableId,
-  TemplateTags,
-} from "metabase-types/api";
+import type { CardId } from "./card";
+import type { DatabaseId } from "./database";
+import type { TemplateTag, TemplateTags, TemporalUnit } from "./dataset";
+import type { FieldId } from "./field";
+import type { MeasureId } from "./measure";
+import type { MetricId } from "./metric";
+import type { NormalizedQueryParameter } from "./parameters";
+import type { SegmentId } from "./segment";
+import type { TableId } from "./table";
 
 export interface NativeQuery {
   query: string;
@@ -20,7 +20,7 @@ export interface StructuredDatasetQuery {
 
   // Database is null when missing data permissions to the database
   database: DatabaseId | null;
-  parameters?: UiParameter[];
+  parameters?: NormalizedQueryParameter[];
 }
 
 export interface NativeDatasetQuery {
@@ -29,10 +29,29 @@ export interface NativeDatasetQuery {
 
   // Database is null when missing data permissions to the database
   database: DatabaseId | null;
-  parameters?: UiParameter[];
+  parameters?: NormalizedQueryParameter[];
 }
 
-export type DatasetQuery = StructuredDatasetQuery | NativeDatasetQuery;
+export type DatasetQuery = OpaqueDatasetQuery | LegacyDatasetQuery;
+
+export type LegacyDatasetQuery = StructuredDatasetQuery | NativeDatasetQuery;
+
+// Audit-only query shape accepted by /api/dataset.
+// `fn` names a backend function.
+export interface InternalDatasetQuery {
+  type: "internal";
+  fn: string;
+  args: string[];
+  limit?: number;
+  offset?: number;
+}
+
+declare const OpaqueDatasetQuerySymbol: unique symbol;
+export type OpaqueDatasetQuery = unknown & {
+  // TODO (AlexP 10/09/25) -- replace usages of this field with Lib.databaseID and drop it from here
+  database: DatabaseId | null;
+  _opaque: typeof OpaqueDatasetQuerySymbol;
+};
 
 interface PublicStructuredDatasetQuery {
   type: "query";
@@ -45,9 +64,11 @@ interface PublicNativeDatasetQuery {
   };
 }
 
-export type PublicDatasetQuery =
+export type LegacyPublicDatasetQuery =
   | PublicStructuredDatasetQuery
   | PublicNativeDatasetQuery;
+
+export type PublicDatasetQuery = OpaqueDatasetQuery | LegacyPublicDatasetQuery;
 
 export const dateTimeAbsoluteUnits = [
   "minute",
@@ -145,7 +166,8 @@ type NestedQueryTableId = string;
 type SourceTableId = TableId | NestedQueryTableId;
 
 export type StructuredQuery = {
-  "source-table"?: SourceTableId;
+  // `null` is the legacy MBQL marker for a not-yet-selected source table
+  "source-table"?: SourceTableId | null;
   "source-query"?: StructuredQuery;
   aggregation?: AggregationClause;
   breakout?: BreakoutClause;
@@ -187,6 +209,10 @@ type CommonAggregation =
 
 export type MetricAgg = ["metric", CardId];
 
+export type MeasureAgg =
+  | ["measure", { "display-name"?: string }, CardId]
+  | ["measure", CardId];
+
 type InlineExpressionAgg = [
   "aggregation-options",
   CommonAggregation,
@@ -196,7 +222,11 @@ type InlineExpressionAgg = [
 /**
  * An aggregation MBQL clause
  */
-export type Aggregation = CommonAggregation | MetricAgg | InlineExpressionAgg;
+export type Aggregation =
+  | CommonAggregation
+  | MetricAgg
+  | MeasureAgg
+  | InlineExpressionAgg;
 
 type BreakoutClause = Breakout[];
 export type Breakout = ConcreteFieldReference;
@@ -287,6 +317,8 @@ export type SegmentFilter = ["segment", SegmentId];
 
 type OrderByClause = Array<OrderBy>;
 export type OrderBy = ["asc" | "desc", FieldReference];
+
+export type JoinConditionOperator = "=" | "!=" | ">" | "<" | ">=" | "<=";
 
 export type JoinStrategy =
   | "left-join"
@@ -420,3 +452,180 @@ export type DimensionReferenceWithOptions =
 export type DimensionReference =
   | DimensionReferenceWithOptions
   | TemplateTagReference;
+
+export type TestTableSourceSpec = {
+  type: "table";
+  id: TableId;
+};
+
+export type TestCardSourceSpec = {
+  type: "card";
+  id: CardId;
+};
+
+export type TestSourceSpec = TestTableSourceSpec | TestCardSourceSpec;
+
+export type TestColumnSpec = {
+  type: "column";
+  name?: string;
+  fieldId?: FieldId;
+  joinAlias?: string;
+  sourceFieldId?: FieldId;
+  sourceFieldJoinAlias?: string;
+};
+
+export type TestExpressionSpec =
+  | TestLiteralSpec
+  | TestOperatorSpec
+  | TestColumnSpec;
+
+export type TestSegmentSpec = {
+  type: "segment";
+  id: SegmentId;
+};
+
+export type TestMeasureSpec = {
+  type: "measure";
+  id: MeasureId;
+};
+
+export type TestMetricSpec = {
+  type: "metric";
+  id: MetricId;
+};
+
+export type TestFilterSpec = TestExpressionSpec | TestSegmentSpec;
+
+export type TestOperatorArgSpec =
+  | TestExpressionSpec
+  | TestSegmentSpec
+  | TestMeasureSpec
+  | TestMetricSpec;
+
+export type TestNamedAggregationSpec = {
+  name: string;
+  value: TestExpressionSpec | TestMeasureSpec | TestMetricSpec;
+};
+
+export type TestAggregationSpec =
+  | TestExpressionSpec
+  | TestNamedAggregationSpec
+  | TestMeasureSpec
+  | TestMetricSpec;
+
+export type TestNamedExpressionSpec = {
+  name: string;
+  value: TestExpressionSpec;
+};
+
+export type TestLiteralSpec = {
+  type: "literal";
+  value: NumericLiteral | StringLiteral | BooleanLiteral | DatetimeLiteral;
+};
+
+export type TestOperatorSpec = {
+  type: "operator";
+  operator: string;
+  args?: readonly TestOperatorArgSpec[];
+
+  // For an aggregation: the name of its result column, which a later stage
+  // refers to.
+  name?: string;
+};
+
+export type TestTemporalBucketSpec = {
+  unit?: TemporalUnit;
+};
+
+export type TestDefaultBinningSpec = {
+  strategy: "default";
+};
+
+export type TestNumBinsBinningSpec = {
+  strategy: "num-bins";
+  numBins: number;
+};
+
+export type TestBinWidthBinningSpec = {
+  strategy: "bin-width";
+  binWidth: number;
+};
+
+export type TestBinningSpec =
+  | TestDefaultBinningSpec
+  | TestNumBinsBinningSpec
+  | TestBinWidthBinningSpec;
+
+type TestBucketSpec = TestTemporalBucketSpec & {
+  binning?: TestBinningSpec;
+};
+
+export type TestColumnWithBinningSpec = TestColumnSpec & TestBucketSpec;
+
+export type TestBreakoutWithNameSpec = {
+  type: "breakout";
+  name: string;
+  column: TestColumnWithBinningSpec;
+};
+
+export type TestBreakoutSpec =
+  | TestColumnWithBinningSpec
+  | TestBreakoutWithNameSpec;
+
+export type TestJoinSpec = {
+  source: TestSourceSpec;
+  strategy: JoinStrategy;
+  alias?: string;
+
+  // If not set we will use the suggested join conditions
+  conditions?: TestJoinConditionSpec[];
+};
+
+type TestJoinConditionSpec = {
+  operator: JoinConditionOperator;
+  left: TestColumnWithBinningSpec | TestExpressionSpec;
+  right: TestColumnWithBinningSpec | TestExpressionSpec;
+};
+
+export type TestOrderBySpec = TestColumnSpec & {
+  direction?: "asc" | "desc";
+} & TestBucketSpec;
+
+export type TestStageSpec = {
+  fields?: readonly TestColumnSpec[];
+  expressions?: readonly TestNamedExpressionSpec[];
+  joins?: readonly TestJoinSpec[];
+  filters?: readonly TestFilterSpec[];
+  aggregations?: readonly TestAggregationSpec[];
+  breakouts?: readonly TestBreakoutSpec[];
+  orderBys?: readonly TestOrderBySpec[];
+  limit?: number;
+};
+
+export type TestStageWithSourceSpec = TestStageSpec & {
+  source: TestSourceSpec;
+};
+
+export type TestQuerySpec = {
+  stages: [TestStageWithSourceSpec, ...TestStageSpec[]];
+};
+
+export type TestQuerySpecWithDatabase = TestQuerySpec & {
+  database: DatabaseId;
+};
+
+export type TestTemplateTag = Pick<TemplateTag, "type"> &
+  Partial<Omit<TemplateTag, "dimension" | "type">> & {
+    dimension?: TableId;
+  };
+
+export type TestTemplateTags = Record<string, TestTemplateTag>;
+
+export type TestNativeQuerySpec = {
+  query: string;
+  templateTags?: TestTemplateTags;
+};
+
+export type TestNativeQuerySpecWithDatabase = TestNativeQuerySpec & {
+  database: DatabaseId;
+};

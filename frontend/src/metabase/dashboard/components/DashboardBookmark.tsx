@@ -1,19 +1,26 @@
-import BookmarkToggle from "metabase/common/components/BookmarkToggle";
-import { useBookmarkListQuery } from "metabase/common/hooks";
+import type { JSX } from "react";
+
+import {
+  useCreateBookmarkMutation,
+  useDeleteBookmarkMutation,
+  useListBookmarksQuery,
+} from "metabase/api";
+import { BookmarkToggle } from "metabase/common/components/BookmarkToggle";
 import { useDashboardContext } from "metabase/dashboard/context/context";
-import Bookmark from "metabase/entities/bookmarks";
-import { useDispatch } from "metabase/lib/redux";
 import { useRegisterShortcut } from "metabase/palette/hooks/useRegisterShortcut";
 import type { DashboardId, Bookmark as IBookmark } from "metabase-types/api";
+
+import { trackDashboardBookmarked } from "../analytics";
 
 export interface DashboardBookmarkProps {
   isBookmarked: boolean;
 }
 
 export const DashboardBookmark = (): JSX.Element | null => {
-  const { data: bookmarks = [] } = useBookmarkListQuery();
+  const { data: bookmarks = [] } = useListBookmarksQuery();
   const { dashboard } = useDashboardContext();
-  const dispatch = useDispatch();
+  const [createBookmark] = useCreateBookmarkMutation();
+  const [deleteBookmark] = useDeleteBookmarkMutation();
 
   const isBookmarked = dashboard
     ? getIsBookmarked({
@@ -24,28 +31,24 @@ export const DashboardBookmark = (): JSX.Element | null => {
 
   const handleCreateBookmark = () => {
     if (dashboard) {
-      const id = dashboard.id;
-      dispatch(Bookmark.actions.create({ id, type: "dashboard" }));
+      createBookmark({ id: dashboard.id, type: "dashboard" });
+      trackDashboardBookmarked();
     }
   };
 
   const handleDeleteBookmark = () => {
     if (dashboard) {
-      const id = dashboard.id;
-      dispatch(Bookmark.actions.delete({ id, type: "dashboard" }));
+      deleteBookmark({ id: dashboard.id, type: "dashboard" });
     }
   };
 
-  useRegisterShortcut(
-    [
-      {
-        id: "dashboard-bookmark",
-        perform: () =>
-          isBookmarked ? handleDeleteBookmark() : handleCreateBookmark(),
-      },
-    ],
-    [isBookmarked],
-  );
+  useRegisterShortcut([
+    {
+      id: "dashboard-bookmark",
+      perform: () =>
+        isBookmarked ? handleDeleteBookmark() : handleCreateBookmark(),
+    },
+  ]);
 
   return (
     <BookmarkToggle

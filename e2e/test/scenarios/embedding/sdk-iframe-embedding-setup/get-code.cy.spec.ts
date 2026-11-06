@@ -5,154 +5,138 @@ import {
 import { enableJwtAuth } from "e2e/support/helpers/e2e-jwt-helpers";
 import { enableSamlAuth } from "e2e/support/helpers/embedding-sdk-testing";
 
-import { codeBlock, getEmbedSidebar, navigateToGetCodeStep } from "./helpers";
+import {
+  codeBlock,
+  getEmbedSidebar,
+  navigateToEmbedOptionsStep,
+  navigateToGetCodeStep,
+} from "./helpers";
 
 const { H } = cy;
 
 const DASHBOARD_NAME = "Orders in a dashboard";
 const QUESTION_NAME = "Orders, Count";
 
-const suiteTitle =
-  "scenarios > embedding > sdk iframe embed setup > get code step";
-
-H.describeWithSnowplow(suiteTitle, () => {
+describe("scenarios > embedding > sdk iframe embed setup > get code step", () => {
   beforeEach(() => {
     H.restore();
     H.resetSnowplow();
     cy.signInAsAdmin();
-    H.activateToken("bleeding-edge");
+    H.activateToken("pro-self-hosted");
     H.enableTracking();
-    H.updateSetting("enable-embedding-simple", true);
+    // Accept the embedding terms up front so the wizard never shows the
+    // Agree CTA — its flow is covered by embed-flow-enable-embed-js.cy.spec.ts.
+    H.updateSetting("enable-embedding-modular", true);
+    H.updateSetting("show-modular-embed-terms", false);
+    H.updateSetting("show-static-embed-terms", false);
 
     cy.intercept("GET", "/api/dashboard/**").as("dashboard");
-    cy.intercept("POST", "/api/card/*/query").as("cardQuery");
-    cy.intercept("GET", "/api/activity/recents?*").as("recentActivity");
+
+    H.mockEmbedJsToDevServer();
   });
 
   afterEach(() => {
     H.expectNoBadSnowplowEvents();
   });
 
-  it("should select user session auth method by default", () => {
-    navigateToGetCodeStep({
+  it("shows the dashboard code snippet and disables SSO when JWT and SAML are not configured, then enables SSO once SAML is configured", () => {
+    navigateToEmbedOptionsStep({
       experience: "dashboard",
       resourceName: DASHBOARD_NAME,
+      preselectSso: true,
     });
 
     getEmbedSidebar().within(() => {
-      cy.findByText("Authentication").should("be.visible");
-      cy.findByText("Choose the authentication method for embedding:").should(
+      cy.findByText("Parameters are not available for this dashboard.").should(
         "be.visible",
       );
 
-      cy.findByLabelText("Existing Metabase Session")
-        .should("be.visible")
-        .should("be.checked");
-
-      cy.findByLabelText("Single sign-on (SSO)")
-        .should("be.visible")
-        .should("not.be.checked");
-    });
-  });
-
-  it("should disable SSO radio button when JWT and SAML are not configured", () => {
-    navigateToGetCodeStep({
-      experience: "dashboard",
-      resourceName: DASHBOARD_NAME,
+      cy.findByText("Get code").click();
     });
 
     getEmbedSidebar().within(() => {
-      cy.findByLabelText("Single sign-on (SSO)").should("be.disabled");
-    });
-  });
+      cy.findByLabelText("Single sign-on").should("be.disabled");
+      cy.findByLabelText("Existing session (local testing only)").should(
+        "be.enabled",
+      );
+      cy.findByLabelText("Existing session (local testing only)").should(
+        "be.checked",
+      );
+      cy.findByText(/The code below will only work for local testing/).should(
+        "be.visible",
+      );
 
-  it("should enable SSO radio button when JWT is configured", () => {
-    enableJwtAuth();
-    navigateToGetCodeStep({
-      experience: "dashboard",
-      resourceName: DASHBOARD_NAME,
+      cy.findByText("Embed code").should("be.visible");
+      codeBlock().should("be.visible");
+      codeBlock().should("contain", "defineMetabaseConfig");
+      codeBlock().should("contain", "metabase-dashboard");
+      codeBlock().should("contain", `dashboard-id="${ORDERS_DASHBOARD_ID}"`);
     });
 
-    getEmbedSidebar().within(() => {
-      cy.findByLabelText("Single sign-on (SSO)").should("not.be.disabled");
-    });
-  });
-
-  it("should enable SSO radio button when SAML is configured", () => {
+    cy.log("SSO should be enabled once SAML is configured");
     enableSamlAuth();
     navigateToGetCodeStep({
       experience: "dashboard",
       resourceName: DASHBOARD_NAME,
+      preselectSso: true,
     });
 
     getEmbedSidebar().within(() => {
-      cy.findByLabelText("Single sign-on (SSO)").should("not.be.disabled");
+      cy.findByLabelText("Single sign-on").should("not.be.disabled");
     });
   });
 
-  it("should display code snippet with syntax highlighting", () => {
-    navigateToGetCodeStep({
-      experience: "dashboard",
-      resourceName: DASHBOARD_NAME,
-    });
-
-    getEmbedSidebar().within(() => {
-      cy.findByText("Embed Code").should("be.visible");
-      codeBlock().should("be.visible");
-      codeBlock().should("contain", "defineMetabaseConfig");
-      codeBlock().should("contain", "metabase-dashboard");
-    });
-  });
-
-  it("should include useExistingUserSession when user session is selected", () => {
-    navigateToGetCodeStep({
-      experience: "dashboard",
-      resourceName: DASHBOARD_NAME,
-    });
-
-    getEmbedSidebar().within(() => {
-      cy.findByLabelText("Existing Metabase Session").should("be.checked");
-      codeBlock().should("contain", '"useExistingUserSession": true');
-    });
-  });
-
-  it("should not include useExistingUserSession when SSO is selected", () => {
+  it("enables SSO when JWT is configured and adds useExistingUserSession without a warning when user session is selected", () => {
     enableJwtAuth();
     navigateToGetCodeStep({
       experience: "dashboard",
       resourceName: DASHBOARD_NAME,
+      preselectSso: true,
     });
 
     getEmbedSidebar().within(() => {
-      cy.findByLabelText("Single sign-on (SSO)").click();
+      cy.findByLabelText("Single sign-on").should("not.be.disabled");
+
+      codeBlock().should("not.contain", '"useExistingUserSession": true');
+      cy.findByLabelText("Existing session (local testing only)").click();
+      codeBlock().should("contain", '"useExistingUserSession": true');
+      cy.findByText(/The code below will only work for local testing/).should(
+        "not.exist",
+      );
+
+      cy.findByText(/Copy code/).click();
 
       H.expectUnstructuredSnowplowEvent({
-        event: "embed_wizard_auth_selected",
-        event_detail: "sso",
+        event: "embed_wizard_code_copied",
+        event_detail:
+          "experience=dashboard,snippetType=frontend,authSubType=user-session",
       });
-
-      codeBlock().should("not.contain", "useExistingUserSession");
     });
   });
 
-  it("should set dashboard-id for dashboard experience", () => {
-    navigateToGetCodeStep({
-      experience: "dashboard",
-      resourceName: DASHBOARD_NAME,
-    });
-
-    getEmbedSidebar().within(() => {
-      codeBlock().should("contain", `dashboard-id="${ORDERS_DASHBOARD_ID}"`);
-    });
-  });
-
-  it("should set question-id for chart experience", () => {
+  it("should track embed_wizard_options_completed with settings=default properly (metabase#68285)", () => {
     navigateToGetCodeStep({
       experience: "chart",
       resourceName: QUESTION_NAME,
     });
 
+    H.expectUnstructuredSnowplowEvent({
+      event: "embed_wizard_options_completed",
+      event_detail: "settings=default",
+    });
+  });
+
+  it("should set question-id for regular chart experience", () => {
+    enableJwtAuth();
+    navigateToGetCodeStep({
+      experience: "chart",
+      resourceName: QUESTION_NAME,
+      preselectSso: true,
+    });
+
     getEmbedSidebar().within(() => {
+      cy.findByLabelText("Existing session (local testing only)").click();
+
       codeBlock().should(
         "contain",
         `question-id="${ORDERS_COUNT_QUESTION_ID}"`,
@@ -160,11 +144,70 @@ H.describeWithSnowplow(suiteTitle, () => {
     });
   });
 
-  it("should use metabase-question for exploration experience", () => {
-    navigateToGetCodeStep({ experience: "exploration" });
+  it("shows no parameter settings and uses metabase-question without entity-types for exploration when model count is 1", () => {
+    cy.intercept(
+      {
+        method: "GET",
+        pathname: "/api/search",
+        query: { limit: "0", models: "dataset" },
+      },
+      {
+        data: [],
+        total: 1,
+      },
+    ).as("searchModels");
+
+    navigateToEmbedOptionsStep({ experience: "exploration" });
+
+    getEmbedSidebar().within(() => {
+      cy.findByText("Appearance").should("be.visible");
+      cy.findByText("Behavior").should("be.visible");
+      cy.findByText("Parameters").should("not.exist");
+
+      cy.findByText("Get code").click();
+    });
+
+    cy.wait("@searchModels");
 
     getEmbedSidebar().within(() => {
       codeBlock().should("contain", "metabase-question");
+      codeBlock().should("not.contain", "entity-types");
+    });
+
+    H.waitForSimpleEmbedIframesToLoad();
+
+    H.getSimpleEmbedIframeContent().within(() => {
+      cy.findByText("Orders", { timeout: 20_000 }).should("be.visible");
+      cy.findByText("Orders Model").should("be.visible");
+    });
+  });
+
+  it("should include entity-types when model count is 3", () => {
+    cy.intercept(
+      {
+        method: "GET",
+        pathname: "/api/search",
+        query: { limit: "0", models: "dataset" },
+      },
+      {
+        data: [],
+        total: 3,
+      },
+    ).as("searchModels");
+
+    navigateToGetCodeStep({ experience: "exploration" });
+
+    cy.wait("@searchModels");
+
+    getEmbedSidebar().within(() => {
+      codeBlock().should("contain", "entity-types='[\"model\"]'");
+    });
+
+    H.waitForSimpleEmbedIframesToLoad();
+
+    H.getSimpleEmbedIframeContent().within(() => {
+      cy.findByText("Orders Model", { timeout: 20_000 }).should("be.visible");
+      cy.findByText("Orders").should("not.exist");
     });
   });
 });

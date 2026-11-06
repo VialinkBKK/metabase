@@ -1,7 +1,6 @@
 import { useState } from "react";
 import { t } from "ttag";
 
-import Modal from "metabase/common/components/Modal";
 import { Box, Button, Flex, Radio, Stack, Tooltip } from "metabase/ui";
 import { getQueryType } from "metabase-lib/v1/parameters/utils/parameter-source";
 import type {
@@ -40,10 +39,11 @@ export function ValuesSourceSettings({
       <Radio.Group
         value={queryType}
         onChange={(newValue: string) =>
+          // Unjustified type cast. FIXME
           onChangeQueryType(newValue as ValuesQueryType)
         }
       >
-        <Stack gap="xs">
+        <Stack gap="xxs">
           <RadioContainer
             ownValue="list"
             selectedValue={queryType}
@@ -67,13 +67,11 @@ export function ValuesSourceSettings({
         </Stack>
       </Radio.Group>
       {isModalOpened && (
-        <Modal medium onClose={closeModal}>
-          <ValuesSourceModal
-            parameter={parameter}
-            onSubmit={onChangeSourceSettings}
-            onClose={closeModal}
-          />
-        </Modal>
+        <ValuesSourceModal
+          parameter={parameter}
+          onSubmit={onChangeSourceSettings}
+          onClose={closeModal}
+        />
       )}
     </>
   );
@@ -113,10 +111,8 @@ function RadioContainer({
             <Button
               onClick={onEditClick}
               disabled={disableEdit}
-              variant="subtle"
-              p={0}
+              variant="transparent"
               size="compact-md"
-              h="100%"
             >
               <Box
                 component="span"

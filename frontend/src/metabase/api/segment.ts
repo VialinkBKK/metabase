@@ -1,6 +1,5 @@
 import type {
   CreateSegmentRequest,
-  DeleteSegmentRequest,
   Segment,
   SegmentId,
   UpdateSegmentRequest,
@@ -54,19 +53,6 @@ export const segmentApi = Api.injectEndpoints({
           tag("table"),
         ]),
     }),
-    deleteSegment: builder.mutation<Segment, DeleteSegmentRequest>({
-      query: ({ id, ...body }) => ({
-        method: "DELETE",
-        url: `/api/segment/${id}`,
-        body,
-      }),
-      invalidatesTags: (_, error, { id }) =>
-        invalidateTags(error, [
-          listTag("segment"),
-          idTag("segment", id),
-          tag("table"),
-        ]),
-    }),
   }),
 });
 
@@ -75,5 +61,4 @@ export const {
   useGetSegmentQuery,
   useCreateSegmentMutation,
   useUpdateSegmentMutation,
-  useDeleteSegmentMutation,
 } = segmentApi;

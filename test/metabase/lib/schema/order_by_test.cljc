@@ -8,6 +8,8 @@
    [metabase.util :as u]
    [metabase.util.malli.registry :as mr]))
 
+#?(:cljs (comment metabase.test-runner.assert-exprs.approximately-equal/keep-me))
+
 (def ^:private valid-order-bys
   [[:asc
     {:lib/uuid "00000000-0000-0000-0000-000000000000"}
@@ -60,7 +62,6 @@
   (testing "invalid order-bys do not conform to schema"
     (binding [lib.schema.expression/*suppress-expression-type-check?* nil]
       (is (mr/explain ::lib.schema.order-by/order-bys invalid-order-bys))))
-
   (testing "non-distinct order-bys do not conform to schema"
     (is (mr/explain ::lib.schema.order-by/order-bys (conj valid-order-bys (first valid-order-bys))))))
 

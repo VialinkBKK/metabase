@@ -5,76 +5,45 @@
   Deprecated: will soon be migrated to notification APIs."
   (:require
    [clojure.set :refer [difference]]
-   [hiccup.core :refer [html]]
-   [hiccup.page :refer [html5]]
    [medley.core :as m]
    [metabase.api.common :as api]
    [metabase.api.macros :as api.macros]
-   [metabase.api.routes.common]
-   [metabase.channel.render.core :as channel.render]
    [metabase.channel.settings :as channel.settings]
    [metabase.channel.slack :as channel.slack]
-   [metabase.channel.urls :as urls]
-   [metabase.classloader.core :as classloader]
    [metabase.collections.models.collection :as collection]
-   [metabase.config.core :as config]
+   [metabase.embedding.util :as embed.util]
    [metabase.events.core :as events]
    [metabase.models.interface :as mi]
    [metabase.notification.core :as notification]
+   [metabase.parameters.schema :as parameters.schema]
    [metabase.permissions.core :as perms]
    [metabase.premium-features.core :as premium-features]
+   [metabase.pulse.db :as pulse.db]
    [metabase.pulse.models.pulse :as models.pulse]
    [metabase.pulse.models.pulse-channel :as pulse-channel]
+   [metabase.pulse.schema :as pulse.schema]
    [metabase.pulse.send :as pulse.send]
-   [metabase.query-processor :as qp]
-   [metabase.query-processor.middleware.permissions :as qp.perms]
    [metabase.util :as u]
    [metabase.util.i18n :refer [tru]]
+   [metabase.util.malli.registry :as mr]
    [metabase.util.malli.schema :as ms]
-   [toucan2.core :as t2])
-  (:import
-   (java.io ByteArrayInputStream)))
+   [toucan2.core :as t2]))
 
 (set! *warn-on-reflection* true)
-
-(when config/ee-available?
-  (classloader/require 'metabase-enterprise.sandbox.api.util
-                       'metabase-enterprise.advanced-permissions.common))
 
 (defn email-channel
   "Get email channel from an alert."
   [alert]
   (m/find-first #(= :email (keyword (:channel_type %))) (:channels alert)))
 
-(defn- maybe-filter-pulses-recipients
-  "If the current user is sandboxed, remove all Metabase users from the `pulses` recipient lists that are not the user
-  themselves. Recipients that are plain email addresses are preserved."
-  [pulses]
-  (if (perms/sandboxed-or-impersonated-user?)
-    (for [pulse pulses]
-      (assoc pulse :channels
-             (for [channel (:channels pulse)]
-               (assoc channel :recipients
-                      (filter (fn [recipient] (or (not (:id recipient))
-                                                  (= (:id recipient) api/*current-user-id*)))
-                              (:recipients channel))))))
-    pulses))
-
-(defn- maybe-filter-pulse-recipients
-  [pulse]
-  (first (maybe-filter-pulses-recipients [pulse])))
-
-(defn- maybe-strip-sensitive-metadata
-  "If the current user does not have collection read permissions for the pulse, but can still read the pulse due to
-  being the creator or a recipient, we return it with some metadata removed."
-  [pulse]
-  (if (mi/current-user-has-full-permissions? :read pulse)
-    pulse
-    (-> (dissoc pulse :cards)
-        (update :channels
-                (fn [channels]
-                  (map #(dissoc % :recipients) channels))))))
-
+;; TODO (Cam 10/28/25) -- fix this endpoint so it uses kebab-case for query parameters for consistency with the rest
+;; of the REST API
+;;
+;; TODO (Cam 2025-11-25) please add a response schema to this API endpoint, it makes it easier for our customers to
+;; use our API + we will need it when we make auto-TypeScript-signature generation happen
+;;
+#_{:clj-kondo/ignore [:metabase/validate-defendpoint-query-params-use-kebab-case
+                      :metabase/validate-defendpoint-has-response-schema]}
 (api.macros/defendpoint :get "/"
   "Fetch all dashboard subscriptions. By default, returns only subscriptions for which the current user has write
   permissions. For admins, this is all subscriptions; for non-admins, it is only subscriptions that they created.
@@ -90,7 +59,7 @@
    {:keys                [archived]
     dashboard-id         :dashboard_id
     creator-or-recipient :creator_or_recipient}
-   :- [:map
+   :- [:map {:closed true}
        [:archived             {:default false} [:maybe ms/BooleanValue]]
        [:dashboard_id         {:optional true} [:maybe ms/PositiveInt]]
        [:creator_or_recipient {:default false} [:maybe ms/BooleanValue]]]]
@@ -100,20 +69,102 @@
                                                                  :dashboard-id dashboard-id
                                                                  :user-id      (when creator-or-recipient api/*current-user-id*)})
                                   (filter (if creator-or-recipient mi/can-read? mi/can-write?))
-                                  maybe-filter-pulses-recipients)
+                                  models.pulse/maybe-filter-pulses-recipients)
         pulses               (if creator-or-recipient
-                               (map maybe-strip-sensitive-metadata pulses)
+                               (map models.pulse/maybe-strip-sensitive-metadata pulses)
                                pulses)]
-    (t2/hydrate pulses :can_write)))
+    (mapv
+     (fn [pulse]
+       (update pulse :cards
+               (fn [cards]
+                 (mapv (fn [card] (assoc card :download_perms (case (perms/download-perms-level
+                                                                     (or (:dataset_query card) (pulse.db/card-query (:id card)))
+                                                                     api/*current-user-id*)
+                                                                :no :none
+                                                                :ten-thousand-rows :limited
+                                                                :one-million-rows :full
+                                                                :full :full))) cards))))
+     (t2/hydrate pulses :can_write))))
 
-(defn check-card-read-permissions
-  "Users can only create a pulse for `cards` they have access to."
-  [cards]
-  (doseq [card cards
-          :let [card-id (u/the-id card)]]
-    (assert (integer? card-id))
-    (api/read-check :model/Card card-id)))
+(defn- without-collection-for-dashboard-subscription
+  "Set `:collection_id` and `:collection_position` in `pulse-data` to nil when it is a dashboard subscription.
 
+  `before-insert` takes `:collection_id` from the dashboard only when the request sends none. Without this step, the
+  permission check would demand write access to the request's collection. A user who has it would get the
+  subscription saved there, and `maybe-reconcile-collection-position!` would shift the pinned items in it."
+  [{:keys [dashboard_id] :as pulse-data}]
+  (cond-> pulse-data
+    dashboard_id (assoc :collection_id nil :collection_position nil)))
+
+(defn create-pulse-with-perm-checks!
+  "Create a new Pulse with permissions checks.
+
+  A dashboard subscription ignores `:collection_id` and `:collection_position` in `pulse-data`. It goes in the
+  collection of its dashboard, and it has no pin position. View access to the dashboard is enough to subscribe to it:
+  https://github.com/metabase/metabase/pull/17722"
+  [cards channels pulse-data]
+  (perms/check-has-application-permission :subscription false)
+  (let [pulse-data (without-collection-for-dashboard-subscription pulse-data)]
+    (api/create-check :model/Pulse (assoc pulse-data :cards cards))
+    (t2/with-transaction [_conn]
+      ;; Adding a new pulse at `collection_position` could cause other pulses in this collection to change position,
+      ;; check that and fix it if needed
+      (api/maybe-reconcile-collection-position! (select-keys pulse-data [:collection_id :collection_position]))
+      ;; ok, now create the Pulse
+      (let [pulse (api/check-500
+                   (models.pulse/create-pulse! (map models.pulse/card->ref cards) channels pulse-data))]
+        (events/publish-event! :event/pulse-create {:object pulse :user-id api/*current-user-id*})
+        pulse))))
+
+(def ^:private PulseChannelType
+  [:enum "email" "slack" "http"])
+
+(def ^:private PulseScheduleType
+  [:enum "hourly" "daily" "weekly" "monthly"])
+
+(def ^:private PulseScheduleDay
+  [:enum "sun" "mon" "tue" "wed" "thu" "fri" "sat"])
+
+(def ^:private PulseScheduleFrame
+  [:enum "first" "mid" "last"])
+
+(def ^:private PulseScheduleHour
+  [:int {:min 0 :max 23}])
+
+(def ^:private PulseChannelRecipient
+  [:map {:closed true}
+   [:id    {:optional true} [:maybe ms/PositiveInt]]
+   [:email {:optional true} [:maybe ms/Email]]])
+
+(def ^:private PulseChannelDetails
+  [:map {:closed true}
+   [:attachment_only {:optional true} [:maybe :boolean]]
+   [:include_pdf     {:optional true} [:maybe :boolean]]
+   [:subject         {:optional true} [:maybe ::pulse.schema/email-subject]]
+   [:channel         {:optional true} [:maybe :string]]
+   [:channels        {:optional true} [:maybe :string]]
+   [:channel_id      {:optional true} [:maybe :string]]
+   [:emails          {:optional true} [:maybe [:sequential ms/Email]]]])
+
+(def ^:private PulseChannel
+  "The fields [[metabase.pulse.models.pulse-channel/create-pulse-channel!]] reads off a channel."
+  [:map {:closed true}
+   [:id             {:optional true}   [:maybe ms/PositiveInt]]
+   [:channel_type                      PulseChannelType]
+   [:enabled        {:optional true}   [:maybe :boolean]]
+   [:pulse_id       {:optional true}   [:maybe ms/PositiveInt]]
+   [:channel_id     {:optional true}   [:maybe ms/PositiveInt]]
+   [:details        {:optional true}   [:maybe PulseChannelDetails]]
+   [:recipients     {:optional true}   [:sequential PulseChannelRecipient]]
+   [:schedule_type  {:optional true}   [:maybe PulseScheduleType]]
+   [:schedule_day   {:optional true}   [:maybe PulseScheduleDay]]
+   [:schedule_hour  {:optional true}   [:maybe PulseScheduleHour]]
+   [:schedule_frame {:optional true}   [:maybe PulseScheduleFrame]]])
+
+;; TODO (Cam 2025-11-25) please add a response schema to this API endpoint, it makes it easier for our customers to
+;; use our API + we will need it when we make auto-TypeScript-signature generation happen
+;;
+#_{:clj-kondo/ignore [:metabase/validate-defendpoint-has-response-schema]}
 (api.macros/defendpoint :post "/"
   "Create a new `Pulse`."
   [_route-params
@@ -123,133 +174,190 @@
     collection-id       :collection_id
     collection-position :collection_position
     dashboard-id        :dashboard_id}
-   :- [:map
+   :- [:map {:closed true}
        [:name                ms/NonBlankString]
        [:cards               [:+ models.pulse/CoercibleToCardRef]]
-       [:channels            [:+ :map]]
+       [:channels            [:+ PulseChannel]]
        [:skip_if_empty       {:default false} [:maybe :boolean]]
        [:collection_id       {:optional true} [:maybe ms/PositiveInt]]
        [:collection_position {:optional true} [:maybe ms/PositiveInt]]
        [:dashboard_id        {:optional true} [:maybe ms/PositiveInt]]
-       [:parameters          {:optional true} [:maybe [:sequential :map]]]]]
-  (perms/check-has-application-permission :subscription false)
-  ;; make sure we are allowed to *read* all the Cards we want to put in this Pulse
-  (check-card-read-permissions cards)
-  ;; if we're trying to create this Pulse inside a Collection, and it is not a dashboard subscription,
-  ;; make sure we have write permissions for that collection
-  (when-not dashboard-id
-    (collection/check-write-perms-for-collection collection-id))
-  ;; prohibit creating dashboard subs if the the user doesn't have at least read access for the dashboard
-  (when dashboard-id
-    (api/read-check :model/Dashboard dashboard-id))
-  (let [pulse-data {:name                name
-                    :creator_id          api/*current-user-id*
-                    :skip_if_empty       skip-if-empty
-                    :collection_id       collection-id
-                    :collection_position collection-position
-                    :dashboard_id        dashboard-id
-                    :parameters          parameters}]
-    (t2/with-transaction [_conn]
-      ;; Adding a new pulse at `collection_position` could cause other pulses in this collection to change position,
-      ;; check that and fix it if needed
-      (api/maybe-reconcile-collection-position! pulse-data)
-      ;; ok, now create the Pulse
-      (let [pulse (api/check-500
-                   (models.pulse/create-pulse! (map models.pulse/card->ref cards) channels pulse-data))]
-        (events/publish-event! :event/pulse-create {:object pulse :user-id api/*current-user-id*})
-        pulse))))
+       [:parameters          {:optional true} [:maybe [:sequential ::parameters.schema/parameter]]]]
+   request]
+  (create-pulse-with-perm-checks!
+   cards
+   channels
+   {:name                name
+    :creator_id          api/*current-user-id*
+    :skip_if_empty       skip-if-empty
+    :collection_id       collection-id
+    :collection_position collection-position
+    :dashboard_id        dashboard-id
+    :parameters          parameters
+    :disable_links       (embed.util/is-modular-embedding-or-modular-embedding-sdk-request? request)}))
 
+;; TODO (Cam 2025-11-25) please add a response schema to this API endpoint, it makes it easier for our customers to
+;; use our API + we will need it when we make auto-TypeScript-signature generation happen
+;;
+#_{:clj-kondo/ignore [:metabase/validate-defendpoint-has-response-schema]}
 (api.macros/defendpoint :get "/:id"
   "Fetch `Pulse` with ID. If the user is a recipient of the Pulse but does not have read permissions for its collection,
   we still return it but with some sensitive metadata removed."
-  [{:keys [id]} :- [:map
+  [{:keys [id]} :- [:map {:closed true}
                     [:id ms/PositiveInt]]]
   (api/let-404 [pulse (models.pulse/retrieve-pulse id)]
     (api/check-403 (mi/can-read? pulse))
     (-> pulse
-        maybe-filter-pulse-recipients
-        maybe-strip-sensitive-metadata
+        models.pulse/maybe-filter-pulse-recipients
+        models.pulse/maybe-strip-sensitive-metadata
         (t2/hydrate :can_write))))
 
 (defn- maybe-add-recipients
-  "Sandboxed users and users using connection impersonation can't read the full recipient list for a pulse, so we need
-  to merge in existing recipients before writing the pulse updates to avoid them being deleted unintentionally. We only
-  merge in recipients that are Metabase users, not raw email addresses, which these users can still view and modify."
+  "Merge back the recipients the current user was not allowed to see before writing `pulse-updates`.
+
+  The `:channels` submitted to an update are authoritative — [[metabase.pulse.models.pulse/update-notification-channels!]]
+  deletes any recipient not present — so every recipient hidden on the read path must be restored on
+  the write path, or a caller who reads a pulse and submits it back silently deletes recipients it
+  never saw. Two read filters hide recipients, and each is compensated here:
+
+  * sandboxed and connection-impersonated users see only themselves
+    (see [[metabase.pulse.models.pulse/maybe-filter-pulses-recipients]]);
+  * tenant-scoped users see only same-tenant users
+    (see [[metabase.pulse.models.pulse/hidden-cross-tenant-recipients]]).
+
+  Only Metabase-user recipients are merged back. Raw email addresses stay visible to these users
+  under both filters, so they remain the caller's to add or remove."
   [pulse-updates pulse-before-update]
-  (if (perms/sandboxed-or-impersonated-user?)
-    (let [recipients-to-add (filter
-                             (fn [{id :id}] (and id (not= id api/*current-user-id*)))
-                             (:recipients (email-channel pulse-before-update)))]
+  (let [existing-recipients (:recipients (email-channel pulse-before-update))
+        recipients-to-add   (concat
+                             (when (perms/sandboxed-or-impersonated-user?)
+                               (filter (fn [{id :id}] (and id (not= id api/*current-user-id*)))
+                                       existing-recipients))
+                             (models.pulse/hidden-cross-tenant-recipients existing-recipients))]
+    (if (and (seq recipients-to-add) (seq (:channels pulse-updates)))
       (assoc pulse-updates :channels
              (for [channel (:channels pulse-updates)]
-               (if (= "email" (:channel_type channel))
+               ;; normalize like [[email-channel]]: :channel_type is a string over REST but a
+               ;; keyword when this is called directly with a hydrated pulse
+               (if (= :email (keyword (:channel_type channel)))
                  (assoc channel :recipients
-                        (concat (:recipients channel) recipients-to-add))
-                 channel))))
-    pulse-updates))
+                        (m/distinct-by (some-fn :id :email)
+                                       (concat (:recipients channel) recipients-to-add)))
+                 channel)))
+      pulse-updates)))
 
-(api.macros/defendpoint :put "/:id"
-  "Update a Pulse with `id`."
-  [{:keys [id]} :- [:map
-                    [:id ms/PositiveInt]]
-   _query-params
-   {:keys [cards], :as pulse-updates} :- [:map
-                                          [:name          {:optional true} [:maybe ms/NonBlankString]]
-                                          [:cards         {:optional true} [:maybe [:+ models.pulse/CoercibleToCardRef]]]
-                                          [:channels      {:optional true} [:maybe [:+ :map]]]
-                                          [:skip_if_empty {:default false} [:maybe :boolean]]
-                                          [:collection_id {:optional true} [:maybe ms/PositiveInt]]
-                                          [:archived      {:default false} [:maybe :boolean]]
-                                          [:parameters    {:optional true} [:maybe [:sequential ms/Map]]]]]
-  ;; do various perms checks
+(defn check-card-read-permissions
+  "Users can only create a pulse for `cards` they have access to."
+  [cards]
+  (doseq [card cards
+          :let [card-id (u/the-id card)]]
+    (assert (integer? card-id))
+    (api/read-check :model/Card card-id)))
+
+(defn- drop-unchanged-collection-keys
+  "Remove `:collection_id` and `:collection_position` from `pulse-updates` of a dashboard subscription.
+
+  Throw a 400 when either key differs from its stored value in `pulse`."
+  [pulse pulse-updates]
+  (doseq [k [:collection_id :collection_position]
+          :when (and (contains? pulse-updates k)
+                     (not= (get pulse-updates k) (get pulse k)))]
+    (throw (ex-info (tru "A dashboard subscription cannot change its {0}." (name k))
+                    {:status-code 400})))
+  (dissoc pulse-updates :collection_id :collection_position))
+
+(defn update-pulse-with-perm-checks!
+  "Apply `pulse-updates` to the Pulse with `id`, running the same permission checks `PUT /api/pulse/:id`
+  runs: the subscription/monitoring application permission, a write check on the Pulse, read checks on
+  any `:cards`, the collection-change check, and the advanced-permissions gate on adding recipients.
+  Returns the updated Pulse.
+
+  A dashboard subscription stays in the collection of its dashboard, and it has no pin position. Throw a 400 when
+  `pulse-updates` has a different `:collection_id` or `:collection_position`. Values equal to the stored ones are
+  accepted and ignored. Create ignores both keys."
+  [id {:keys [cards] :as pulse-updates}]
+  ;; Validate `:cards` up front so a bad card ref is a clean 400, not a 500. This fn is called
+  ;; directly (e.g. from the agent API), not only through the PUT endpoint whose schema already
+  ;; coerces `:cards` — without this, `check-card-read-permissions`'s `(assert (integer? card-id))`
+  ;; throws a bare AssertionError (no :status-code) on a string id and surfaces as a 500.
+  (when (some? cards)
+    (when-not (mr/validate [:sequential models.pulse/CoercibleToCardRef] cards)
+      (throw (ex-info (tru "Invalid :cards: each entry must be a card reference.")
+                      {:status-code 400}))))
   (try
     (perms/check-has-application-permission :monitoring)
     (catch clojure.lang.ExceptionInfo _e
       (perms/check-has-application-permission :subscription false)))
-
-  (let [pulse-before-update (api/write-check (models.pulse/retrieve-pulse id))]
+  (let [pulse-before-update (api/write-check (models.pulse/retrieve-pulse id))
+        ;; Drop the unchanged keys before every check below: the collection check would demand write access to the old
+        ;; and the requested collection, and `before-update` throws on any change to `:collection_id`.
+        pulse-updates       (cond->> pulse-updates
+                              (:dashboard_id pulse-before-update) (drop-unchanged-collection-keys pulse-before-update))]
     (check-card-read-permissions cards)
     (collection/check-allowed-to-change-collection pulse-before-update pulse-updates)
-
     ;; if advanced-permissions is enabled, only superuser or non-admin with subscription permission can
     ;; update pulse's recipients
     (when (premium-features/enable-advanced-permissions?)
-      (let [to-add-recipients (difference (set (map :id (:recipients (email-channel pulse-updates))))
-                                          (set (map :id (:recipients (email-channel pulse-before-update)))))
-            current-user-has-application-permissions?
-            (and (premium-features/enable-advanced-permissions?)
-                 (resolve 'metabase-enterprise.advanced-permissions.common/current-user-has-application-permissions?))
-            has-subscription-perms?
-            (and current-user-has-application-permissions?
-                 (current-user-has-application-permissions? :subscription))]
+      ;; key recipients the same way pulse-channel does: user recipients by :id, external recipients by
+      ;; :email, so changes to external addresses are part of the diff too
+      (let [recipient-key     (some-fn :id :email)
+            to-add-recipients (difference (set (keep recipient-key (:recipients (email-channel pulse-updates))))
+                                          (set (keep recipient-key (:recipients (email-channel pulse-before-update)))))
+            has-subscription-perms? (perms/current-user-has-application-permissions? :subscription)]
         (api/check (or api/*is-superuser?*
                        has-subscription-perms?
                        (empty? to-add-recipients))
                    [403 (tru "Non-admin users without subscription permissions are not allowed to add recipients")])))
-
     (let [pulse-updates (maybe-add-recipients pulse-updates pulse-before-update)]
       (t2/with-transaction [_conn]
         ;; If the collection or position changed with this update, we might need to fixup the old and/or new collection,
         ;; depending on what changed.
-        (api/maybe-reconcile-collection-position! pulse-before-update pulse-updates)
+        (api/maybe-reconcile-collection-position! (select-keys pulse-before-update [:collection_id :collection_position]) (select-keys pulse-updates [:collection_id :collection_position]))
         ;; ok, now update the Pulse
         (models.pulse/update-pulse!
          (assoc (select-keys pulse-updates [:name :cards :channels :skip_if_empty :collection_id :collection_position
                                             :archived :parameters])
                 :id id)))))
-  ;; return updated Pulse
   (models.pulse/retrieve-pulse id))
 
+;; TODO (Cam 2025-11-25) please add a response schema to this API endpoint, it makes it easier for our customers to
+;; use our API + we will need it when we make auto-TypeScript-signature generation happen
+;;
+#_{:clj-kondo/ignore [:metabase/validate-defendpoint-has-response-schema]}
+(api.macros/defendpoint :put "/:id"
+  "Update a Pulse with `id`."
+  [{:keys [id]} :- [:map {:closed true}
+                    [:id ms/PositiveInt]]
+   _query-params
+   pulse-updates :- [:map {:closed true}
+                     [:name          {:optional true} [:maybe ms/NonBlankString]]
+                     [:cards         {:optional true} [:maybe [:+ models.pulse/CoercibleToCardRef]]]
+                     [:channels      {:optional true} [:maybe [:+ PulseChannel]]]
+                     [:skip_if_empty {:default false} [:maybe :boolean]]
+                     [:collection_id {:optional true} [:maybe ms/PositiveInt]]
+                     [:collection_position {:optional true} [:maybe ms/PositiveInt]]
+                     [:archived      {:default false} [:maybe :boolean]]
+                     [:parameters    {:optional true} [:maybe [:sequential ::parameters.schema/parameter]]]]]
+  (update-pulse-with-perm-checks! id pulse-updates))
+
+;; TODO (Cam 10/28/25) -- fix this endpoint route to use kebab-case for consistency with the rest of our REST API
+;;
+;; TODO (Cam 2025-11-25) please add a response schema to this API endpoint, it makes it easier for our customers to
+;; use our API + we will need it when we make auto-TypeScript-signature generation happen
+;;
+#_{:clj-kondo/ignore [:metabase/validate-defendpoint-route-uses-kebab-case
+                      :metabase/validate-defendpoint-has-response-schema]}
 (api.macros/defendpoint :get "/form_input"
   "Provides relevant configuration information and user choices for creating/updating Pulses."
   []
   (perms/check-has-application-permission :subscription false)
   (let [chan-types (-> pulse-channel/channel-types
-                       (assoc-in [:slack :configured] (channel.slack/slack-configured?))
+                       (assoc-in [:slack :configured] (channel.settings/slack-configured?))
                        (assoc-in [:email :configured] (channel.settings/email-configured?))
-                       (assoc-in [:http :configured] (t2/exists? :model/Channel :type :channel/http :active true)))]
+                       (assoc-in [:http :configured] (pulse.db/active-http-channel-exists?)))]
     {:channels (cond
-                 (perms/sandboxed-or-impersonated-user?)
+                 (or (perms/sandboxed-or-impersonated-user?)
+                     (some? (:tenant_id @api/*current-user*)))
                  (dissoc chan-types :slack)
 
                  ;; no Slack integration, so we are g2g
@@ -264,109 +372,40 @@
                              [:slack :fields 0 :options]
                              (->> (channel.settings/slack-cached-channels-and-usernames)
                                   :channels
-                                  (map :display-name)))
+                                  (m/distinct-by :id)
+                                  (m/distinct-by :display-name)
+                                  (mapv (fn [{:keys [display-name id]}]
+                                          {:displayName display-name :id id}))))
                    (catch Throwable e
                      (assoc-in chan-types [:slack :error] (.getMessage e)))))}))
 
-(defn- pulse-card-query-results
-  {:arglists '([card])}
-  [{query :dataset_query, card-id :id}]
-  (binding [qp.perms/*card-id* card-id]
-    (qp/process-query
-     (qp/userland-query
-      (assoc query
-             :middleware {:process-viz-settings? true
-                          :js-int-to-string?     false})
-      {:executed-by api/*current-user-id*
-       :context     :pulse
-       :card-id     card-id}))))
-
-(api.macros/defendpoint :get "/preview_card/:id"
-  "Get HTML rendering of a Card with `id`."
-  [{:keys [id]} :- [:map
-                    [:id ms/PositiveInt]]]
-  (let [card   (api/read-check :model/Card id)
-        result (pulse-card-query-results card)]
-    {:status 200
-     :body   (html5
-              [:html
-               [:body {:style "margin: 0;"}
-                (channel.render/render-pulse-card-for-display (channel.render/defaulted-timezone card)
-                                                              card
-                                                              result
-                                                              {:channel.render/include-title? true, :channel.render/include-buttons? true})]])}))
-
-(api.macros/defendpoint :get "/preview_dashboard/:id"
-  "Get HTML rendering of a Dashboard with `id`.
-
-  This endpoint relies on a custom middleware defined in `metabase.channel.render.core/style-tag-nonce-middleware` to
-  allow the style tag to render properly, given our Content Security Policy setup. This middleware is attached to these
-  routes at the bottom of this namespace using `metabase.api.common/define-routes`."
-  [{:keys [id]} :- [:map
-                    [:id ms/PositiveInt]]]
-  (api/read-check :model/Dashboard id)
-  {:status  200
-   :headers {"Content-Type" "text/html"}
-   :body    (channel.render/style-tag-from-inline-styles
-             (html5
-              [:head
-               [:meta {:charset "utf-8"}]
-               [:link {:nonce "%NONCE%" ;; this will be str/replaced by 'style-tag-nonce-middleware
-                       :rel  "stylesheet"
-                       :href "https://fonts.googleapis.com/css2?family=Lato:ital,wght@0,100;0,300;0,400;0,700;0,900;1,100;1,300;1,400;1,700;1,900&display=swap"}]]
-              [:body [:h2 (format "Backend Artifacts Preview for Dashboard %s" id)]
-               (channel.render/render-dashboard-to-html id)]))})
-
-(api.macros/defendpoint :get "/preview_card_info/:id"
-  "Get JSON object containing HTML rendering of a Card with `id` and other information."
-  [{:keys [id]} :- [:map
-                    [:id ms/PositiveInt]]]
-  (let [card      (api/read-check :model/Card id)
-        result    (pulse-card-query-results card)
-        data      (:data result)
-        card-type (channel.render/detect-pulse-chart-type card nil data)
-        card-html (html (channel.render/render-pulse-card-for-display (channel.render/defaulted-timezone card)
-                                                                      card
-                                                                      result
-                                                                      {:channel.render/include-title? true}))]
-    {:id              id
-     :pulse_card_type card-type
-     :pulse_card_html card-html
-     :pulse_card_name (:name card)
-     :pulse_card_url  (urls/card-url (:id card))
-     :row_count       (:row_count result)
-     :col_count       (count (:cols (:data result)))}))
-
-(def ^:private preview-card-width 400)
-
-(api.macros/defendpoint :get "/preview_card_png/:id"
-  "Get PNG rendering of a Card with `id`. Optionally specify `width` as a query parameter."
-  [{:keys [id]} :- [:map
-                    [:id ms/PositiveInt]]
-   {:keys [width]} :- [:map
-                       [:width {:optional true} [:maybe ms/PositiveInt]]]]
-  (let [card   (api/read-check :model/Card id)
-        result (pulse-card-query-results card)
-        width  (or width preview-card-width)
-        ba     (channel.render/render-pulse-card-to-png (channel.render/defaulted-timezone card)
-                                                        card
-                                                        result
-                                                        width
-                                                        {:channel.render/include-title? true})]
-    {:status 200, :headers {"Content-Type" "image/png"}, :body (ByteArrayInputStream. ba)}))
-
+;; TODO (Cam 2025-11-25) please add a response schema to this API endpoint, it makes it easier for our customers to
+;; use our API + we will need it when we make auto-TypeScript-signature generation happen
+;;
+#_{:clj-kondo/ignore [:metabase/validate-defendpoint-has-response-schema]}
 (api.macros/defendpoint :post "/test"
   "Test send an unsaved pulse."
   [_route-params
    _query-params
-   {:keys [cards channels] :as body} :- [:map
+   {:keys [cards channels] :as body} :- [:map {:closed true}
+                                         ;; the saved subscription this is a test send of, when there is one.
+                                         ;; `send-pulse!` builds the non-user unsubscribe link out of it, and the
+                                         ;; email template drops the whole "Unsubscribe" footer without a link
+                                         [:id                  {:optional true} [:maybe ms/PositiveInt]]
                                          [:name                ms/NonBlankString]
                                          [:cards               [:+ models.pulse/CoercibleToCardRef]]
-                                         [:channels            [:+ :map]]
+                                         [:channels            [:+ PulseChannel]]
                                          [:skip_if_empty       {:default false} [:maybe :boolean]]
+                                         [:disable_links       {:default false} [:maybe :boolean]]
                                          [:collection_id       {:optional true} [:maybe ms/PositiveInt]]
                                          [:collection_position {:optional true} [:maybe ms/PositiveInt]]
-                                         [:dashboard_id        {:optional true} [:maybe ms/PositiveInt]]]]
+                                         [:dashboard_id        {:optional true} [:maybe ms/PositiveInt]]
+                                         [:parameters          {:optional true} [:maybe [:sequential ::parameters.schema/parameter-with-value]]]
+                                         [:alert_condition     {:optional true} [:maybe models.pulse/AlertConditions]]
+                                         [:alert_first_only    {:optional true} [:maybe :boolean]]
+                                         [:alert_above_goal    {:optional true} [:maybe :boolean]]]
+   request]
+  (perms/check-has-application-permission :subscription false)
   ;; Check permissions on cards that exist. Placeholders and iframes don't matter.
   (check-card-read-permissions
    (remove (fn [{:keys [id display]}]
@@ -376,24 +415,28 @@
   ;; make sure any email addresses that are specified are allowed before sending the test Pulse.
   (doseq [channel channels]
     (pulse-channel/validate-email-domains channel))
-  (notification/with-default-options {:notification/sync? true}
-    (pulse.send/send-pulse! (assoc body :creator_id api/*current-user-id*)))
+  (let [pulse (-> body
+                  (assoc :creator_id api/*current-user-id*)
+                  (assoc :disable_links
+                         (embed.util/is-modular-embedding-or-modular-embedding-sdk-request? request)))]
+    (notification/with-default-options {:notification/sync? true}
+      (pulse.send/send-pulse! pulse)))
   {:ok true})
 
+;; TODO (Cam 2025-11-25) please add a response schema to this API endpoint, it makes it easier for our customers to
+;; use our API + we will need it when we make auto-TypeScript-signature generation happen
+;;
+#_{:clj-kondo/ignore [:metabase/validate-defendpoint-has-response-schema]}
 (api.macros/defendpoint :delete "/:id/subscription"
   "For users to unsubscribe themselves from a pulse subscription."
-  [{:keys [id]} :- [:map
+  [{:keys [id]} :- [:map {:closed true}
                     [:id ms/PositiveInt]]]
-  (api/let-404 [pulse-id (t2/select-one-pk :model/Pulse :id id)
-                pc-id    (t2/select-one-pk :model/PulseChannel :pulse_id pulse-id :channel_type "email")
-                pcr-id   (t2/select-one-pk :model/PulseChannelRecipient :pulse_channel_id pc-id :user_id api/*current-user-id*)]
-    (t2/delete! :model/PulseChannelRecipient :id pcr-id))
+  (api/let-404 [pulse-id (pulse.db/pulse-id id)
+                pc-id    (pulse.db/email-pulse-channel-id pulse-id)
+                pcr-id   (pulse.db/pulse-channel-recipient-id pc-id api/*current-user-id*)]
+    (pulse.db/delete-pulse-channel-recipient! pcr-id))
   api/generic-204-no-content)
-
-(def ^:private ^{:arglists '([handler])} style-nonce-middleware
-  (metabase.api.routes.common/wrap-middleware-for-open-api-spec-generation
-   (partial channel.render/style-tag-nonce-middleware "/api/pulse/preview_dashboard")))
 
 (def ^{:arglists '([request respond raise])} routes
   "`/api/pulse` endpoints."
-  (api.macros/ns-handler *ns* style-nonce-middleware))
+  (api.macros/ns-handler *ns*))

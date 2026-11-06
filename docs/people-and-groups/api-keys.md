@@ -16,8 +16,8 @@ That said, there are times when it's nice to work with the API, like when managi
 
 To create an API key:
 
-1. Click on the **gear** icon in the upper right.
-2. Select **Admin settings**.
+1. Click the **grid** icon in the upper right.
+2. Select **Admin**.
 3. Go to the **Settings** tab.
 4. Click on the **Authentication** tab on the left menu.
 5. Scroll to **API Keys** and click **Manage**.
@@ -29,17 +29,21 @@ To create an API key:
 
 ### Creating API keys from the config file
 
-If you're on a [Pro or Enterprise self-hosted plan](https://www.metabase.com/pricing/), you can [create API keys via the configuration file](../configuring-metabase/config-file.md#api-keys).
+If you're on a [Pro or Enterprise self-hosted plan](https://www.metabase.com/pricing), you can [create API keys via the configuration file](../configuring-metabase/config-file.md#api-keys).
 
 ## Managing API Keys
 
 To view and manage existing API keys:
 
-1. Click on the **gear** icon in the upper right.
-2. Select **Admin settings**.
+1. Click the **grid** icon in the upper right.
+2. Select **Admin**.
 3. Go to the **Settings** tab.
 4. Click on the **Authentication** tab on the left menu.
 5. Scroll to **API Keys** and click **Manage**.
+
+### See how your API keys get used
+
+See [API key usage](../monitor/api-key-usage.md) in Monitor.
 
 ### Editing API keys
 
@@ -55,8 +59,8 @@ You won't be able to recover a deleted API key. You'll have to create a new key.
 
 To delete an API Key:
 
-1. Click on the **gear** icon in the upper right.
-2. Select **Admin settings**.
+1. Click the **grid** icon in the upper right.
+2. Select **Admin**.
 3. Go to the **Settings** tab.
 4. Click on the **Authentication** tab on the left menu.
 5. Scroll to **API Keys** and click **Manage**.
@@ -77,7 +81,7 @@ Replace `YOUR_API_KEY` with the API key you generated above.
 
 ```sh
 curl \
--H 'x-api-key: YOUR_API_KEY' \
+-H 'X-API-Key: YOUR_API_KEY' \
 -X GET 'http://localhost:3000/api/permissions/group'
 ```
 
@@ -89,7 +93,7 @@ Assuming you've set your key as an environment variable like so:
 export METABASE_API_KEY="YOUR_API_KEY"
 ```
 
-Here's a basic `GET` request using `fetch` to get the list of groups. You can copy the code, save it as file (e.g., as `api-test.js`), and run the code with `node api-test.js`.
+Here's a basic `GET` request using `fetch` to get the list of groups. You can copy the code, save it as a file (e.g., as `api-test.js`), and run the code with `node api-test.js`.
 
 ```js
 // Assuming you've set the key in process with
@@ -99,7 +103,7 @@ const API_KEY = process.env.METABASE_API_KEY;
 const init = {
   headers: {
     "Content-Type": "application/json",
-    "X-API-KEY": API_KEY,
+    "X-API-Key": API_KEY,
   },
 };
 
@@ -110,10 +114,11 @@ async function getGroups() {
   return response.json();
 }
 
-getGroups().then(groups => console.log("Groups in your Metabase:", groups));
+getGroups().then((groups) => console.log("Groups in your Metabase:", groups));
 ```
 
 ## Further reading
 
 - [Metabase API reference](../api.html).
+- [API key usage](../monitor/api-key-usage.md).
 - [Working with the Metabase API](https://www.metabase.com/learn/metabase-basics/administration/administration-and-operation/metabase-api).

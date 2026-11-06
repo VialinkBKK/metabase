@@ -1,77 +1,75 @@
 import { t } from "ttag";
 import _ from "underscore";
 
-import { NULL_DISPLAY_VALUE } from "metabase/lib/constants";
-import { formatChangeWithSign } from "metabase/lib/formatting";
-import { getObjectKeys } from "metabase/lib/objects";
+import { isNative } from "metabase/common/utils/card";
+import { dayjs } from "metabase/dayjs";
+import { selectQuestionFromCard } from "metabase/metadata-store";
+import type { State } from "metabase/redux/store";
+import { getNullDisplayValue } from "metabase/utils/constants";
+import { formatChangeWithSign, formatPercent } from "metabase/utils/formatting";
+import { getObjectKeys } from "metabase/utils/objects";
 import {
   getDaylightSavingsChangeTolerance,
   parseTimestamp,
-} from "metabase/lib/time-dayjs";
-import { checkNumber, isNotNull } from "metabase/lib/types";
-import { formatPercent } from "metabase/static-viz/lib/numbers";
+} from "metabase/utils/time-dayjs";
+import { checkNumber, isNotNull } from "metabase/utils/types";
 import type {
-  EChartsTooltipModel,
-  EChartsTooltipRow,
-} from "metabase/visualizations/components/ChartTooltip/EChartsTooltip";
-import {
-  getPercent,
-  getTotalValue,
-} from "metabase/visualizations/components/ChartTooltip/StackedDataTooltip/utils";
-import { formatValueForTooltip } from "metabase/visualizations/components/ChartTooltip/utils";
-import {
-  INDEX_KEY,
-  IS_WATERFALL_TOTAL_DATA_KEY,
-  OTHER_DATA_KEY,
-  X_AXIS_DATA_KEY,
-  X_AXIS_RAW_VALUE_DATA_KEY,
-} from "metabase/visualizations/echarts/cartesian/constants/dataset";
-import {
-  isBreakoutSeries,
-  isQuarterInterval,
-  isTimeSeriesAxis,
-} from "metabase/visualizations/echarts/cartesian/model/guards";
-import { getOtherSeriesAggregationLabel } from "metabase/visualizations/echarts/cartesian/model/other-series";
-import type {
-  AxisFormatter,
-  BaseCartesianChartModel,
-  BaseSeriesModel,
-  ChartDataset,
-  DataKey,
-  Datum,
-  DimensionModel,
-  SeriesModel,
-  StackModel,
-} from "metabase/visualizations/echarts/cartesian/model/types";
-import type { TimelineEventsModel } from "metabase/visualizations/echarts/cartesian/timeline-events/types";
-import { getMarkerColorClass } from "metabase/visualizations/echarts/tooltip";
-import type {
-  EChartsSeriesBrushEndEvent,
-  EChartsSeriesMouseEvent,
-} from "metabase/visualizations/echarts/types";
-import { computeChange } from "metabase/visualizations/lib/numeric";
-import {
-  hasClickBehavior,
-  isRemappedToString,
-} from "metabase/visualizations/lib/renderer_utils";
-import { dimensionIsTimeseries } from "metabase/visualizations/lib/timeseries";
-import type {
-  ComputedVisualizationSettings,
-  DataPoint,
+  OnBrush,
   OnChangeCardAndRun,
 } from "metabase/visualizations/types";
-import type { ClickObject, ClickObjectDimension } from "metabase-lib";
+import {
+  type AxisFormatter,
+  type BaseCartesianChartModel,
+  type BaseSeriesModel,
+  type ChartDataset,
+  type ComputedVisualizationSettings,
+  type DataKey,
+  type DataPoint,
+  type Datum,
+  type DimensionModel,
+  type EChartsSeriesBrushEndEvent,
+  type EChartsSeriesBrushSelectedEvent,
+  type EChartsSeriesMouseEvent,
+  type EChartsTooltipModel,
+  type EChartsTooltipRow,
+  INDEX_KEY,
+  IS_FOLDED_ROW_DATA_KEY,
+  IS_WATERFALL_TOTAL_DATA_KEY,
+  OTHER_DATA_KEY,
+  type SeriesModel,
+  type StackModel,
+  X_AXIS_DATA_KEY,
+  X_AXIS_RAW_VALUE_DATA_KEY,
+  computeChange,
+  dimensionIsTimeseries,
+  formatValueForTooltip,
+  getMarkerColorClass,
+  getOtherSeriesAggregationLabel,
+  getPercent,
+  getTotalValue,
+  hasClickBehavior,
+  isBreakoutSeries,
+  isLineXBrushRange,
+  isNumericAxis,
+  isQuarterInterval,
+  isRemappedToString,
+  isTimeSeriesAxis,
+} from "metabase/viz-core";
+import type {
+  BrushClickObject,
+  BrushRange,
+  ClickObject,
+  ClickObjectDimension,
+} from "metabase-lib";
 import * as Lib from "metabase-lib";
-import Question from "metabase-lib/v1/Question";
-import type Metadata from "metabase-lib/v1/metadata/Metadata";
-import { isNative } from "metabase-lib/v1/queries/utils/card";
 import { getColumnKey } from "metabase-lib/v1/queries/utils/column-key";
+import { isDate, isDateWithoutTime } from "metabase-lib/v1/types/utils/isa";
 import type {
   CardDisplayType,
   CardId,
+  DatasetColumn,
   RawSeries,
-  TimelineEvent,
-  TimelineEventId,
+  RowValue,
 } from "metabase-types/api";
 import { isSavedCard } from "metabase-types/guards";
 
@@ -121,6 +119,22 @@ const getSameCardDataKeys = (
   });
 };
 
+export const normalizeDimensionValue = (
+  column: DatasetColumn,
+  value: RowValue,
+): RowValue => {
+  if (!isDate(column) || value == null) {
+    return value;
+  }
+
+  const parsed = parseTimestamp(value);
+  if (!parsed.isValid()) {
+    return value;
+  }
+
+  return parsed.format("YYYY-MM-DDTHH:mm:ss");
+};
+
 export const getEventDimensions = (
   chartModel: BaseCartesianChartModel,
   datum: Datum,
@@ -139,11 +153,17 @@ export const getEventDimensions = (
   const hasDimensionValue = sameCardDatumColumns.includes(dimensionColumn);
   const dimensions: ClickObjectDimension[] = [];
 
-  if (hasDimensionValue) {
-    const dimensionValue = datum[X_AXIS_DATA_KEY];
+  if (datum[IS_FOLDED_ROW_DATA_KEY]) {
     dimensions.push({
       column: dimensionColumn,
-      value: dimensionValue,
+      value: (chartModel.foldedDataset ?? []).map((foldedDatum) =>
+        normalizeDimensionValue(dimensionColumn, foldedDatum[X_AXIS_DATA_KEY]),
+      ),
+    });
+  } else if (hasDimensionValue) {
+    dimensions.push({
+      column: dimensionColumn,
+      value: normalizeDimensionValue(dimensionColumn, datum[X_AXIS_DATA_KEY]),
     });
   }
 
@@ -152,6 +172,25 @@ export const getEventDimensions = (
       column: seriesModel.breakoutColumn,
       value: seriesModel.breakoutValue,
     });
+  }
+
+  // Include any other breakout column whose value is present at this data point but isn't yet
+  // captured as a dimension — e.g. a scatterplot whose categorical breakout is not bound to the
+  // series/color in viz settings would otherwise drop that filter from "See these records" (#73803).
+  const alreadyAddedColumns = new Set(
+    dimensions.map((dimension) => dimension.column),
+  );
+  for (const dataKey of sameCardDataKeys) {
+    const column = chartModel.columnByDataKey[dataKey];
+    if (
+      column != null &&
+      column.source === "breakout" &&
+      !alreadyAddedColumns.has(column) &&
+      dataKey in datum
+    ) {
+      dimensions.push({ column, value: datum[dataKey] });
+      alreadyAddedColumns.add(column);
+    }
   }
 
   return dimensions.filter(
@@ -192,7 +231,7 @@ const getEventColumnsData = (
       const displayValue =
         isBreakoutSeries(seriesModel) && seriesModel.breakoutColumn === col
           ? seriesModel.name
-          : (value ?? NULL_DISPLAY_VALUE);
+          : (value ?? getNullDisplayValue());
 
       return {
         key,
@@ -230,7 +269,11 @@ const computeDiffWithPreviousPeriod = (
   const currentDate = getXAxisDataForComparison(datum);
   const previousValue = previousDatum?.[seriesModel.dataKey];
 
-  if (previousValue == null || currentValue == null || currentDate == null) {
+  if (
+    typeof previousValue !== "number" ||
+    typeof currentValue !== "number" ||
+    currentDate == null
+  ) {
     return null;
   }
 
@@ -248,7 +291,7 @@ const computeDiffWithPreviousPeriod = (
     getDaylightSavingsChangeTolerance(xAxisModel.interval.unit);
 
   // Comparing the 2nd and 1st quarter of the year needs to be checked
-  // specially, because there are fewer days in this period due to Feburary
+  // specially, because there are fewer days in this period due to February
   // being shorter than a normal month (89 days in a normal year, 90 days in a
   // leap year).
   if (!isOneIntervalAgo && unit === "quarter") {
@@ -270,16 +313,37 @@ const computeDiffWithPreviousPeriod = (
 export const canBrush = (
   series: RawSeries,
   settings: ComputedVisualizationSettings,
+  dimensionColumn: DatasetColumn | undefined,
   onChangeCardAndRun?: OnChangeCardAndRun | null,
+  onBrush?: OnBrush | null,
 ) => {
-  const hasCombinedCards = series.length > 1;
   const hasBrushableDimension =
     settings["graph.x_axis.scale"] != null &&
     !["ordinal", "histogram"].includes(settings["graph.x_axis.scale"]);
 
+  if (!hasBrushableDimension) {
+    return false;
+  }
+
+  // disable brushing for a binned dimension
+  // binning plus "linear" scale is possible, so excluding "histogram" isn't sufficient
+  // a binned bar "0-10" is centered on the axis value 0. so the brush filter would apply incorrect values
+  if (dimensionColumn?.binning_info) {
+    return false;
+  }
+
+  if (onBrush) {
+    return true;
+  }
+
+  // Can't filter an aggregation in the stage that produces it (metabase#71073).
+  if (dimensionColumn?.source === "aggregation") {
+    return false;
+  }
+
+  const hasCombinedCards = series.length > 1;
   return (
     !!onChangeCardAndRun &&
-    hasBrushableDimension &&
     !hasCombinedCards &&
     (!isNative(series[0].card) || isSavedCard(series[0].card)) &&
     !isRemappedToString(series) &&
@@ -401,6 +465,10 @@ export const getTooltipModel = (
     return null;
   }
 
+  if (datum[IS_FOLDED_ROW_DATA_KEY]) {
+    return getFoldedRowTooltipModel(chartModel, settings, datum, hoveredSeries);
+  }
+
   const seriesStack = chartModel.stackModels.find((stackModel) =>
     stackModel.seriesKeys.includes(hoveredSeries.dataKey),
   );
@@ -437,6 +505,71 @@ export const getTooltipModel = (
   );
 };
 
+// The hovered series leads, as the tooltip's one full-emphasis value column.
+const getFoldedRowTooltipSeries = (
+  chartModel: BaseCartesianChartModel,
+  hoveredSeries: SeriesModel,
+): SeriesModel[] => [
+  hoveredSeries,
+  ...chartModel.seriesModels.filter(
+    (seriesModel) =>
+      seriesModel.visible && seriesModel.dataKey !== hoveredSeries.dataKey,
+  ),
+];
+
+const getFoldedRowTooltipModel = (
+  chartModel: BaseCartesianChartModel,
+  settings: ComputedVisualizationSettings,
+  datum: Datum,
+  hoveredSeries: SeriesModel,
+): EChartsTooltipModel => {
+  const tooltipSeries = getFoldedRowTooltipSeries(chartModel, hoveredSeries);
+  const formatSeriesValues = (seriesDatum: Datum) =>
+    tooltipSeries.map(({ dataKey, column }) =>
+      String(
+        formatValueForTooltip({
+          value: seriesDatum[dataKey],
+          column,
+          settings,
+          isAlreadyScaled: true,
+        }),
+      ),
+    );
+
+  const markerColorClass = getMarkerColorClass(hoveredSeries.color);
+
+  const seriesNamesRows: EChartsTooltipRow[] =
+    tooltipSeries.length > 1
+      ? [
+          {
+            name: "",
+            isSecondary: true,
+            values: tooltipSeries.map((seriesModel) => seriesModel.name),
+          },
+        ]
+      : [];
+
+  const categoryRows: EChartsTooltipRow[] = (
+    chartModel.foldedDataset ?? []
+  ).map((foldedDatum) => ({
+    name: String(
+      formatValueForTooltip({
+        value: foldedDatum[X_AXIS_DATA_KEY],
+        column: chartModel.dimensionModel.column,
+        settings,
+      }),
+    ),
+    markerColorClass,
+    values: formatSeriesValues(foldedDatum),
+  }));
+
+  return {
+    header: String(datum[X_AXIS_DATA_KEY]),
+    rows: [...seriesNamesRows, ...categoryRows],
+    footer: { name: t`Total`, values: formatSeriesValues(datum) },
+  };
+};
+
 const getSingleSeriesTooltipModel = (
   chartModel: BaseCartesianChartModel,
   datum: Datum,
@@ -460,7 +593,9 @@ const getSingleSeriesTooltipModel = (
   );
 
   const seriesToShow = chartModel.seriesModels.filter(
-    (series) => series === hoveredSeries || !isBreakoutSeries(series),
+    (series) =>
+      series === hoveredSeries ||
+      (!isBreakoutSeries(series) && datum[series.dataKey] !== undefined),
   );
   const seriesTooltipRows = seriesToShow.map((series) => {
     const isFocused =
@@ -821,52 +956,12 @@ export const getOtherSeriesTooltipModel = (
   };
 };
 
-export const getTimelineEventsForEvent = (
-  timelineEventsModel: TimelineEventsModel,
-  event: EChartsSeriesMouseEvent,
-) => {
-  return timelineEventsModel.find(
-    (timelineEvents) => timelineEvents.date === event.value,
-  )?.events;
-};
-
-export const hasSelectedTimelineEvents = (
-  timelineEvents: TimelineEvent[],
-  selectedTimelineEventIds?: TimelineEventId[],
-) => {
-  return (
-    selectedTimelineEventIds != null &&
-    selectedTimelineEventIds.length > 0 &&
-    timelineEvents.some((timelineEvent) =>
-      selectedTimelineEventIds.includes(timelineEvent.id),
-    )
-  );
-};
-
-export const getTimelineEventsHoverData = (
-  timelineEventsModel: TimelineEventsModel,
-  event: EChartsSeriesMouseEvent,
-) => {
-  const hoveredTimelineEvents = getTimelineEventsForEvent(
-    timelineEventsModel,
-    event,
-  );
-  const element = event.event.event.target as Element;
-
-  return {
-    element: element?.nodeName === "image" ? element : undefined,
-    timelineEvents: hoveredTimelineEvents,
-  };
-};
-
 export const getGoalLineHoverData = (
   settings: ComputedVisualizationSettings,
-  event: EChartsSeriesMouseEvent,
+  element: EventTarget | null,
   formatGoal?: AxisFormatter,
 ) => {
-  const element = event.event.event.target as Element;
-
-  if (element?.nodeName !== "text") {
+  if (!(element instanceof Element)) {
     return null;
   }
 
@@ -906,6 +1001,13 @@ export const getSeriesClickData = (
   }
 
   const datum = chartModel.dataset[dataIndex];
+  // Binned drills filter to a single bin, not the folded row's set of bins.
+  const isFoldedBinnedRow =
+    datum[IS_FOLDED_ROW_DATA_KEY] &&
+    chartModel.dimensionModel.column.binning_info != null;
+  if (isFoldedBinnedRow) {
+    return null;
+  }
 
   const data = getEventColumnsData(chartModel, seriesModel, datum);
   const dimensions = getEventDimensions(
@@ -926,9 +1028,125 @@ export const getSeriesClickData = (
   };
 };
 
+export const getAdjustedBrushEndEvent = (
+  brushEndEvent: EChartsSeriesBrushEndEvent,
+  brushSelectedEvent: EChartsSeriesBrushSelectedEvent | null,
+  chartModel: BaseCartesianChartModel,
+): EChartsSeriesBrushEndEvent | null => {
+  const coordRange = brushEndEvent.areas[0]?.coordRange;
+  if (!coordRange || !isLineXBrushRange(coordRange)) {
+    return null;
+  }
+  const adjustedCoordRange = getAdjustedCoordRange(
+    coordRange,
+    brushSelectedEvent,
+    chartModel,
+  );
+  return {
+    ...brushEndEvent,
+    areas: [
+      {
+        ...brushEndEvent.areas[0],
+        coordRange: adjustedCoordRange,
+      },
+    ],
+  };
+};
+
+const getAdjustedCoordRange = (
+  coordRange: [number, number],
+  brushSelectedEvent: EChartsSeriesBrushSelectedEvent | null,
+  chartModel: BaseCartesianChartModel,
+): [number, number] => {
+  const { xAxisModel, transformedDataset } = chartModel;
+  // only the time series brush drill "clamps" dates and needs this adjustment
+  if (!isTimeSeriesAxis(xAxisModel) || !brushSelectedEvent) {
+    return coordRange;
+  }
+  let minIndex: number | null = null;
+  let maxIndex: number | null = null;
+  for (const { dataIndex } of brushSelectedEvent.batch[0]?.selected ?? []) {
+    for (const i of dataIndex) {
+      if (minIndex === null || i < minIndex) {
+        minIndex = i;
+      }
+      if (maxIndex === null || i > maxIndex) {
+        maxIndex = i;
+      }
+    }
+  }
+  if (minIndex === null || maxIndex === null) {
+    return coordRange;
+  }
+
+  const getRangeValue = (index: number, defaultValue: number): number => {
+    const axisValue = transformedDataset[index]?.[X_AXIS_DATA_KEY];
+    if (typeof axisValue === "string") {
+      return dayjs.utc(axisValue).valueOf();
+    }
+    return defaultValue;
+  };
+  return [
+    Math.min(coordRange[0], getRangeValue(minIndex, coordRange[0])),
+    Math.max(coordRange[1], getRangeValue(maxIndex, coordRange[1])),
+  ];
+};
+
+export const getBrushClickObject = (
+  chartModel: BaseCartesianChartModel,
+  event: EChartsSeriesBrushEndEvent,
+  chartElement: HTMLElement,
+  settings: ComputedVisualizationSettings,
+): BrushClickObject | null => {
+  const area = event.areas[0];
+  const coordRange = area?.coordRange;
+  const pixelRange = area?.range;
+  if (!isLineXBrushRange(coordRange) || !isLineXBrushRange(pixelRange)) {
+    return null;
+  }
+
+  const [rawStart, rawEnd] = [
+    Number(coordRange[0]),
+    Number(coordRange[1]),
+  ].sort((a, b) => a - b);
+  const { xAxisModel, dimensionModel } = chartModel;
+  const column = dimensionModel.column;
+
+  let brushRange: BrushRange;
+  if (isTimeSeriesAxis(xAxisModel)) {
+    const dateFormat = isDateWithoutTime(column)
+      ? "YYYY-MM-DD"
+      : "YYYY-MM-DDTHH:mm:ss";
+    brushRange = {
+      type: "temporal",
+      start: xAxisModel.fromEChartsAxisValue(rawStart).format(dateFormat),
+      end: xAxisModel.fromEChartsAxisValue(rawEnd).format(dateFormat),
+    };
+  } else if (isNumericAxis(xAxisModel)) {
+    brushRange = {
+      type: "numeric",
+      start: xAxisModel.fromEChartsAxisValue(rawStart),
+      end: xAxisModel.fromEChartsAxisValue(rawEnd),
+    };
+  } else {
+    return null;
+  }
+
+  const chartBounds = chartElement.getBoundingClientRect();
+  const clientX = chartBounds.left + Math.max(pixelRange[0], pixelRange[1]);
+  const clientY = chartBounds.top + chartBounds.height / 2;
+
+  return {
+    brushRange,
+    column,
+    event: new MouseEvent("click", { clientX, clientY }),
+    settings,
+  };
+};
+
 export const getBrushData = (
+  state: State,
   rawSeries: RawSeries,
-  metadata: Metadata | undefined,
   chartModel: BaseCartesianChartModel,
   event: EChartsSeriesBrushEndEvent,
 ) => {
@@ -944,7 +1162,7 @@ export const getBrushData = (
 
   const column = chartModel.dimensionModel.column;
   const card = rawSeries[0].card;
-  const question = new Question(card, metadata);
+  const question = selectQuestionFromCard(state, card);
   const query = question.query();
   const stageIndex = -1;
 

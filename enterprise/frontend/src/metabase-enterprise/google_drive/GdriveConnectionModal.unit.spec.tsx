@@ -1,4 +1,5 @@
 import userEvent from "@testing-library/user-event";
+import fetchMock from "fetch-mock";
 
 import {
   findRequests,
@@ -8,6 +9,7 @@ import {
   setupPropertiesEndpoints,
   setupSettingsEndpoints,
 } from "__support__/server-mocks";
+import { createMockSettingsState } from "__support__/state";
 import { renderWithProviders, screen, waitFor } from "__support__/ui";
 import type { GdrivePayload } from "metabase-types/api";
 import {
@@ -15,16 +17,17 @@ import {
   createMockTokenFeatures,
   createMockUser,
 } from "metabase-types/api/mocks";
-import { createMockSettingsState } from "metabase-types/store/mocks";
 
 import { GdriveConnectionModal } from "./GdriveConnectionModal";
 
 const setup = ({
   status,
   isAdmin = true,
+  folderResponse,
 }: {
   status: GdrivePayload["status"];
   isAdmin?: boolean;
+  folderResponse?: Promise<Partial<GdrivePayload>>;
 }) => {
   const settings = createMockSettings({
     "show-google-sheets-integration": true,
@@ -39,6 +42,9 @@ const setup = ({
   setupGdriveGetFolderEndpoint({
     status,
   });
+  if (folderResponse) {
+    fetchMock.modifyRoute("gdrive-get-folder", { response: folderResponse });
+  }
   setupGdriveServiceAccountEndpoint(
     "super-service-account@testing.metabase.com",
   );
@@ -62,6 +68,20 @@ describe("Google Drive > Connect / Disconnect modal", () => {
     expect(await screen.findByText("Disconnect")).toBeInTheDocument();
   });
 
+  it("should not show connection modal while the connection status is loading", async () => {
+    const { promise: folderResponse, resolve } =
+      Promise.withResolvers<Partial<GdrivePayload>>();
+    setup({ status: "active", folderResponse });
+
+    await waitFor(() =>
+      expect(fetchMock.callHistory.called("gdrive-get-folder")).toBe(true),
+    );
+    expect(screen.queryByText("Import Google Sheets")).not.toBeInTheDocument();
+
+    resolve({ status: "active" });
+    expect(await screen.findByText("Disconnect")).toBeInTheDocument();
+  });
+
   it("should show connection modal if not connected", async () => {
     setup({
       status: "not-connected",
@@ -69,12 +89,11 @@ describe("Google Drive > Connect / Disconnect modal", () => {
     expect(await screen.findByText("Import Google Sheets")).toBeInTheDocument();
   });
 
-  it("should show service acocunt email", async () => {
+  it("should show service account email", async () => {
     setup({
       status: "not-connected",
     });
     expect(await screen.findByText("Import Google Sheets")).toBeInTheDocument();
-
     expect(
       await screen.findByText("super-service-account@testing.metabase.com"),
     ).toBeInTheDocument();

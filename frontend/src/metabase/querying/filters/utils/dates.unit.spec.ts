@@ -1,8 +1,21 @@
-import type { DateFilterValue } from "metabase/querying/filters/types";
+import type {
+  DateFilterValue,
+  DatePickerTruncationUnit,
+} from "metabase/querying/common/types";
+import { setLocalization } from "metabase/utils/i18n";
 import * as Lib from "metabase-lib";
-import { columnFinder, createQuery } from "metabase-lib/test-helpers";
+import {
+  DEFAULT_TEST_QUERY,
+  SAMPLE_PROVIDER,
+  columnFinder,
+} from "metabase-lib/test-helpers";
+import type { DateFormattingSettings } from "metabase-types/api";
 
-import { getDateFilterClause, getDateFilterDisplayName } from "./dates";
+import {
+  formatDate,
+  getDateFilterClause,
+  getDateFilterDisplayName,
+} from "./dates";
 
 type DateFilterClauseCase = {
   value: DateFilterValue;
@@ -10,7 +23,7 @@ type DateFilterClauseCase = {
 };
 
 describe("getDateFilterClause", () => {
-  const query = createQuery();
+  const query = Lib.createTestQuery(SAMPLE_PROVIDER, DEFAULT_TEST_QUERY);
   const stageIndex = 0;
   const columns = Lib.filterableColumns(query, stageIndex);
   const findColumn = columnFinder(query, columns);
@@ -67,8 +80,54 @@ describe("getDateFilterClause", () => {
       displayName: "Created At is today",
     },
     {
+      value: { type: "relative", value: -1, unit: "day" },
+      displayName: "Created At is yesterday",
+    },
+    {
+      value: { type: "relative", value: -1, unit: "week" },
+      displayName: "Created At is in the previous week",
+    },
+    {
+      value: { type: "relative", value: -7, unit: "day" },
+      displayName: "Created At is in the previous 7 days",
+    },
+    {
+      value: { type: "relative", value: -30, unit: "day" },
+      displayName: "Created At is in the previous 30 days",
+    },
+    {
+      value: { type: "relative", value: -1, unit: "month" },
+      displayName: "Created At is in the previous month",
+    },
+    {
+      value: { type: "relative", value: -3, unit: "month" },
+      displayName: "Created At is in the previous 3 months",
+    },
+    {
+      value: { type: "relative", value: -12, unit: "month" },
+      displayName: "Created At is in the previous 12 months",
+    },
+    {
       value: { type: "relative", value: -2, unit: "year" },
       displayName: "Created At is in the previous 2 years",
+    },
+    {
+      value: {
+        type: "relative",
+        value: -30,
+        unit: "day",
+        options: { includeCurrent: true },
+      },
+      displayName: "Created At is in the previous 30 days or today",
+    },
+    {
+      value: {
+        type: "relative",
+        value: 30,
+        unit: "year",
+        options: { includeCurrent: true },
+      },
+      displayName: "Created At is in the next 30 years or this year",
     },
     {
       value: {
@@ -79,6 +138,27 @@ describe("getDateFilterClause", () => {
         offsetUnit: "year",
       },
       displayName: "Created At is in the previous 2 years, starting 1 year ago",
+    },
+    {
+      value: {
+        type: "relative",
+        value: -1,
+        unit: "year",
+        offsetValue: -2,
+        offsetUnit: "year",
+      },
+      displayName: "Created At is in the previous year, starting 2 years ago",
+    },
+    {
+      value: {
+        type: "relative",
+        value: 30,
+        unit: "day",
+        offsetValue: 7,
+        offsetUnit: "day",
+      },
+      displayName:
+        "Created At is in the next 30 days, starting 7 days from now",
     },
     {
       value: { type: "relative", value: 4, unit: "month" },
@@ -137,12 +217,48 @@ describe("getDateFilterClause", () => {
       });
     },
   );
+
+  it.each<[DatePickerTruncationUnit, string]>([
+    ["minute", "minutes"],
+    ["hour", "hours"],
+    ["day", "days"],
+    ["week", "weeks"],
+    ["month", "months"],
+    ["quarter", "quarters"],
+    ["year", "years"],
+  ])(
+    "should convert a relative filter value with a %s offset to a filter clause",
+    (unit, pluralUnit) => {
+      const pastFilter = getDateFilterClause(column, {
+        type: "relative",
+        value: -10,
+        unit,
+        offsetValue: -10,
+        offsetUnit: unit,
+      });
+      const futureFilter = getDateFilterClause(column, {
+        type: "relative",
+        value: 10,
+        unit,
+        offsetValue: 10,
+        offsetUnit: unit,
+      });
+
+      expect(Lib.displayInfo(query, stageIndex, pastFilter)).toMatchObject({
+        displayName: `Created At is in the previous 10 ${pluralUnit}, starting 10 ${pluralUnit} ago`,
+      });
+      expect(Lib.displayInfo(query, stageIndex, futureFilter)).toMatchObject({
+        displayName: `Created At is in the next 10 ${pluralUnit}, starting 10 ${pluralUnit} from now`,
+      });
+    },
+  );
 });
 
 type DateFilterDisplayNameCase = {
   value: DateFilterValue;
   displayName: string;
   withPrefix?: boolean;
+  formattingSettings?: DateFormattingSettings;
 };
 
 describe("getDateFilterDisplayName", () => {
@@ -244,6 +360,15 @@ describe("getDateFilterDisplayName", () => {
     {
       value: {
         type: "relative",
+        value: 30,
+        unit: "year",
+        options: { includeCurrent: true },
+      },
+      displayName: "Next 30 years or this year",
+    },
+    {
+      value: {
+        type: "relative",
         value: 3,
         unit: "month",
         offsetValue: 1,
@@ -312,12 +437,77 @@ describe("getDateFilterDisplayName", () => {
       },
       displayName: "Not empty",
     },
+    {
+      value: {
+        type: "specific",
+        operator: "=",
+        values: [new Date(2024, 2, 5)],
+        hasTime: false,
+      },
+      formattingSettings: {
+        date_style: "dddd MMMM D, YYYY",
+      },
+      displayName: "Tuesday March 5, 2024",
+    },
+    {
+      value: {
+        type: "specific",
+        operator: "=",
+        values: [new Date(2024, 2, 5)],
+        hasTime: false,
+      },
+      formattingSettings: {
+        date_style: "dddd MMMM D, YYYY",
+        date_abbreviate: true,
+      },
+      displayName: "Tue Mar 5, 2024",
+    },
+    {
+      value: {
+        type: "specific",
+        operator: "=",
+        values: [new Date(2024, 2, 5)],
+        hasTime: true,
+      },
+      formattingSettings: {
+        date_style: "dddd MMMM D, YYYY",
+        date_abbreviate: true,
+      },
+      displayName: "Tue Mar 5, 2024 12:00 AM",
+    },
   ])(
     "should format a relative date filter",
-    ({ value, displayName, withPrefix }) => {
-      expect(getDateFilterDisplayName(value, { withPrefix })).toEqual(
-        displayName,
-      );
+    ({ value, displayName, withPrefix, formattingSettings }) => {
+      expect(
+        getDateFilterDisplayName(value, { withPrefix, formattingSettings }),
+      ).toEqual(displayName);
+    },
+  );
+});
+
+describe("formatDate", () => {
+  afterAll(() => jest.resetModules());
+
+  describe.each([{ hasTime: false }, { hasTime: true }])(
+    "with hasTime=$hasTime",
+    ({ hasTime }) => {
+      it.each([
+        { locale: "en", expectedDate: "January 2, 2025" },
+        { locale: "de", expectedDate: "2. Januar 2025" },
+      ])("respects locale $locale", ({ locale, expectedDate }) => {
+        setLocalization({
+          headers: {
+            language: locale,
+            "plural-forms": "nplurals=2; plural=(n != 1);",
+          },
+          translations: { "": {} },
+        });
+
+        const date = new Date(2025, 0, 2, 0, 0);
+        const expectedTime = hasTime ? " 12:00 AM" : "";
+        const expected = `${expectedDate}${expectedTime}`;
+        expect(formatDate(date, hasTime)).toBe(expected);
+      });
     },
   );
 });

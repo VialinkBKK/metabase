@@ -2,14 +2,17 @@
   "Code and constants related to getting and setting cookies in Ring requests and responses."
   (:require
    [java-time.api :as t]
+   [metabase.api.macros :as api.macros]
    [metabase.config.core :as config]
+   [metabase.request.schema :as request.schema]
    [metabase.request.settings :as request.settings]
    [metabase.request.util :as request.util]
+   [metabase.session.schema]
    [metabase.session.settings :as session.settings]
-   [metabase.util :as u]
    [metabase.util.i18n :refer [tru]]
    [metabase.util.log :as log]
    [metabase.util.malli :as mu]
+   [metabase.util.malli.schema :as ms]
    [ring.util.response :as response]))
 
 (def metabase-session-cookie
@@ -37,7 +40,7 @@
   [response]
   (if (and (map? response) (contains? response :body))
     response
-    {:body response, :status 200}))
+    (with-meta {:body response, :status 200} (meta response))))
 
 (defn clear-session-cookie
   "Add a header to `response` to clear the current Metabase session cookie."
@@ -63,16 +66,18 @@
     ;; TODO - we should set `site-path` as well. Don't want to enable this yet so we don't end
     ;; up breaking things issue: https://github.com/metabase/metabase/issues/39346
     :path      "/" #_(site-path)}
-   ;; If the authentication request request was made over HTTPS (hopefully always except for
-   ;; local dev instances) add `Secure` attribute so the cookie is only sent over HTTPS.
-   (when (request.util/https? request)
+   ;; If the authentication request was made over HTTPS (hopefully always except for local dev instances) add the
+   ;; `Secure` attribute so the cookie is only sent over HTTPS. `:unknown` counts: adding `Secure` to a cookie that
+   ;; turns out to be travelling in the clear costs nothing, while omitting it on a TLS request that we could not
+   ;; positively identify would leave the session exposed.
+   (when (#{:https :unknown} (request.util/https-state request))
      {:secure true})))
 
 (defmethod default-session-cookie-attributes :full-app-embed
   [_ request]
   (merge
    {:path "/"}
-   (when (request.util/https? request)
+   (when (#{:https :unknown} (request.util/https-state request))
      ;; SameSite=None is required for cross-domain full-app embedding. This is safe because
      ;; security is provided via anti-CSRF token. Note that most browsers will only accept
      ;; SameSite=None with secure cookies, thus we are setting it only over HTTPS to prevent
@@ -121,36 +126,57 @@
     metabase-embedded-session-cookie))
 
 (defn- use-permanent-cookies?
-  "Check if we should use permanent cookies for a given request, which are not cleared when a browser sesion ends."
+  "Check if we should use permanent cookies for a given request, which are not cleared when a browser session ends."
   [request]
   (if (session.settings/session-cookies)
     ;; Disallow permanent cookies if MB_SESSION_COOKIES is set
     false
     ;; Otherwise check whether the user selected "remember me" during login
-    (get-in request [:body :remember])))
+    (let [body (:body request)]
+      (if (map? body)
+        (or (get body "remember") (get body :remember))
+        false))))
 
 (mu/defn set-session-cookies
   "Add the appropriate cookies to the `response` for the Session."
-  [request
-   response
+  [request  :- ::request.schema/request
+   response :- ::api.macros/response
    {session-key :key
     session-type :type
     anti-csrf-token :anti_csrf_token
-    :as _session-instance} :- [:map [:key [:or
-                                           uuid?
-                                           [:re u/uuid-regex]]]]
-   request-time]
-  (let [cookie-options (merge
+    session-expires-at :expires_at
+    :as _session-instance} :- :metabase.session.schema/session
+   request-time :- (ms/InstanceOfClass java.time.temporal.Temporal)]
+  (let [;; Calculate max-age based on session expiration if present
+        max-age-seconds (when session-expires-at
+                          (let [expires-time (if (instance? java.time.OffsetDateTime session-expires-at)
+                                               session-expires-at
+                                               (t/offset-date-time session-expires-at))
+                                now (t/offset-date-time request-time)
+                                seconds-until-expiration (t/time-between now expires-time :seconds)]
+                            (when (pos? seconds-until-expiration)
+                              seconds-until-expiration)))
+        default-max-age-seconds (* 60 (config/config-int :max-session-age))
+        cookie-options (merge
                         (default-session-cookie-attributes session-type request)
                         {:http-only true}
-                        ;; If permanent cookies should be used, set the `Max-Age` directive; cookies with no
-                        ;; `Max-Age` and no `Expires` directives are session cookies, and are deleted when the
-                        ;; browser is closed.
-                        ;; See https://developer.mozilla.org/en-US/docs/Web/HTTP/Cookies#define_the_lifetime_of_a_cookie
-                        ;; max-session age-is in minutes; Max-Age= directive should be in seconds
-                        (when (use-permanent-cookies? request)
-                          {:max-age (* 60 (config/config-int :max-session-age))}))]
-    (when (and (= (request.settings/session-cookie-samesite) :none) (not (request.util/https? request)))
+                        ;; If session has expires_at, use it to calculate max-age
+                        ;; This overrides permanent cookie settings
+                        (cond
+                          ;; Session expires_at takes precedence
+                          max-age-seconds
+                          {:max-age (min max-age-seconds default-max-age-seconds)}
+
+                          ;; Otherwise use permanent cookies if requested
+                          ;; If permanent cookies should be used, set the `Max-Age` directive; cookies with no
+                          ;; `Max-Age` and no `Expires` directives are session cookies, and are deleted when the
+                          ;; browser is closed.
+                          ;; See https://developer.mozilla.org/en-US/docs/Web/HTTP/Cookies#define_the_lifetime_of_a_cookie
+                          ;; max-session age-is in minutes; Max-Age= directive should be in seconds
+                          (use-permanent-cookies? request)
+                          {:max-age default-max-age-seconds}))]
+    (when (and (= (request.settings/session-cookie-samesite) :none)
+               (= :http (request.util/https-state request)))
       (log/warn
        (str "Session cookie's SameSite is configured to \"None\", but site is served over an insecure connection."
             " Some browsers will reject cookies under these conditions."

@@ -1,12 +1,19 @@
-import { renderWithProviders, screen } from "__support__/ui";
-import type { SetupStep } from "metabase/setup/types";
-import type { DatabaseData } from "metabase-types/api";
-import { createMockDatabaseData } from "metabase-types/api/mocks";
+import userEvent from "@testing-library/user-event";
+import fetchMock from "fetch-mock";
+
+import { setupEnginesEndpoint } from "__support__/server-mocks";
 import {
   createMockSettingsState,
   createMockSetupState,
   createMockState,
-} from "metabase-types/store/mocks";
+} from "__support__/state";
+import { renderWithProviders, screen, within } from "__support__/ui";
+import type { SetupStep } from "metabase/redux/store";
+import type { DatabaseData } from "metabase-types/api";
+import {
+  createMockDatabaseData,
+  createMockEngines,
+} from "metabase-types/api/mocks";
 
 import { DatabaseStep } from "./DatabaseStep";
 
@@ -31,6 +38,8 @@ const setup = ({
     }),
   });
 
+  setupEnginesEndpoint(createMockEngines());
+
   renderWithProviders(<DatabaseStep stepLabel={0} />, {
     storeInitialState: state,
   });
@@ -52,7 +61,7 @@ describe("DatabaseStep", () => {
     expect(screen.getByText("Connecting to Test")).toBeInTheDocument();
   });
 
-  it("should render a user invite form", () => {
+  it("should render a user invite form", async () => {
     setup({
       isEmailConfigured: true,
     });
@@ -60,5 +69,53 @@ describe("DatabaseStep", () => {
     expect(
       screen.getByText("Need help connecting to your data?"),
     ).toBeInTheDocument();
+
+    await userEvent.click(
+      within(screen.getByRole("button", { name: "Setup section" })).getByRole(
+        "img",
+        { name: "chevrondown icon" },
+      ),
+    );
+
+    expect(screen.getByTestId("invite-user-form")).toBeInTheDocument();
+  });
+
+  it("should handle status properly when invitation request fails", async () => {
+    jest.spyOn(console, "error").mockImplementation(() => {});
+
+    setup({
+      isEmailConfigured: true,
+    });
+
+    const chevronDownIcon = within(
+      screen.getByRole("button", { name: "Setup section" }),
+    ).getByRole("img", { name: "chevrondown icon" });
+
+    await userEvent.click(chevronDownIcon);
+
+    const form = screen.getByTestId("invite-user-form");
+
+    expect(within(form).getByRole("button")).toBeDisabled();
+
+    await userEvent.type(within(form).getByLabelText("First name"), "Jack");
+    await userEvent.type(within(form).getByLabelText("Last name"), "Chan");
+    await userEvent.type(
+      within(form).getByLabelText("Email"),
+      "jack.chan@example.com",
+    );
+
+    expect(within(form).getByRole("button")).toBeEnabled();
+
+    fetchMock.postOnce("/api/user", {
+      status: 400,
+      body: {
+        errors: {
+          email: "This email is not valid",
+        },
+      },
+    });
+    await userEvent.click(within(form).getByRole("button"));
+    await within(form).findByRole("button", { name: "Failed" });
+    await within(form).findByText(/This email is not valid/);
   });
 });

@@ -4,12 +4,12 @@
    [clojure.test :refer [are deftest is testing]]
    [medley.core :as m]
    [metabase.lib.core :as lib]
-   [metabase.lib.join :as lib.join]
+   [metabase.lib.equality :as lib.equality]
+   [metabase.lib.field :as lib.field]
    [metabase.lib.metadata :as lib.metadata]
    [metabase.lib.metadata.calculation :as lib.metadata.calculation]
    [metabase.lib.metadata.result-metadata :as lib.metadata.result-metadata]
    [metabase.lib.schema :as lib.schema]
-   [metabase.lib.stage :as lib.stage]
    [metabase.lib.test-metadata :as meta]
    [metabase.lib.test-util :as lib.tu]
    [metabase.lib.test-util.macros :as lib.tu.macros]
@@ -24,7 +24,6 @@
   (testing "make sure columns are coming back the way we'd expect for :field clauses"
     (let [query {:lib/type     :mbql/query
                  :stages       [{:lib/type     :mbql.stage/mbql
-                                 :lib/options  {:lib/uuid "0311c049-4973-4c2a-8153-1e2c887767f9"}
                                  :source-table (meta/id :venues)
                                  :fields       [(lib.tu/field-clause :venues :price)]}]
                  :database     (meta/id)
@@ -169,20 +168,20 @@
                  {:id (meta/id :venues :price), :name "PRICE", :lib/source :source/table-defaults}
                  {:name "ID + 1", :lib/source :source/expressions}
                  {:name "ID + 2", :lib/source :source/expressions}
-                 {:id                       (meta/id :categories :id)
-                  :name                     "ID_2"
-                  :lib/source               :source/joins
-                  :source-alias             "Cat"
-                  :display-name             "ID"
-                  :lib/source-column-alias  "ID"
-                  :lib/desired-column-alias "Cat__ID"}
-                 {:id                       (meta/id :categories :name)
-                  :name                     "NAME_2"
-                  :lib/source               :source/joins
-                  :source-alias             "Cat"
-                  :display-name             "Name"
-                  :lib/source-column-alias  "NAME"
-                  :lib/desired-column-alias "Cat__NAME"}]
+                 {:id                           (meta/id :categories :id)
+                  :name                         "ID_2"
+                  :lib/source                   :source/joins
+                  :lib/join-alias "Cat"
+                  :display-name                 "ID"
+                  :lib/source-column-alias      "ID"
+                  :lib/desired-column-alias     "Cat__ID"}
+                 {:id                           (meta/id :categories :name)
+                  :name                         "NAME_2"
+                  :lib/source                   :source/joins
+                  :lib/join-alias "Cat"
+                  :display-name                 "Name"
+                  :lib/source-column-alias      "NAME"
+                  :lib/desired-column-alias     "Cat__NAME"}]
                 metadata))
         (testing ":long display names"
           (is (= ["ID"
@@ -238,9 +237,8 @@
     (is (=? [[:field
               (fn expected-opts? [opts]
                 (and
-                 ;; should retain the effective type of `:type/Integer` since `:year` is an extraction operation.
                  (= (:base-type opts) :type/Date)
-                 (= (:effective-type opts) :type/Integer)
+                 (= (:effective-type opts) :type/Date)
                  (not (:temporal-unit opts))))
               "DATE"]]
             (map lib/ref cols)))))
@@ -260,28 +258,28 @@
               :name "ID"
               :lib/source :source/previous-stage
               :effective-type :type/BigInteger
-              :lib/desired-column-alias "ID"
+              :lib/source-column-alias "ID"
               :display-name "ID"}
              {:base-type :type/Text
               :semantic-type :type/Name
               :name "NAME"
               :lib/source :source/previous-stage
               :effective-type :type/Text
-              :lib/desired-column-alias "NAME"
+              :lib/source-column-alias "NAME"
               :display-name "Name"}
              {:base-type :type/BigInteger
               :semantic-type :type/PK
               :name "ID"
               :lib/source :source/previous-stage
               :effective-type :type/BigInteger
-              :lib/desired-column-alias "Cat__ID"
+              :lib/source-column-alias "Cat__ID"
               :display-name "ID"}
              {:base-type :type/Text
               :semantic-type :type/Name
               :name "NAME"
               :lib/source :source/previous-stage
               :effective-type :type/Text
-              :lib/desired-column-alias "Cat__NAME"
+              :lib/source-column-alias "Cat__NAME"
               :display-name "Name"}]
             (lib/visible-columns query)))))
 
@@ -321,16 +319,16 @@
     (let [query (metadata-for-breakouts-from-joins-test-query)]
       (is (= [{:name                     "CATEGORY"
                :lib/source-column-alias  "CATEGORY"
-               ::lib.join/join-alias     "P1"
+               :lib/join-alias     "P1"
                :lib/desired-column-alias "P1__CATEGORY"}
               {:name                     "SOURCE"
                :lib/source-column-alias  "SOURCE"
-               ::lib.join/join-alias     "People"
+               :lib/join-alias     "People"
                :lib/desired-column-alias "People__SOURCE"}
               {:name                     "count"
                :lib/source-column-alias  "count"
                :lib/desired-column-alias "count"}]
-             (map #(select-keys % [:name :lib/source-column-alias ::lib.join/join-alias :lib/desired-column-alias])
+             (map #(select-keys % [:name :lib/source-column-alias :lib/join-alias :lib/desired-column-alias])
                   (lib/returned-columns query)))))))
 
 (defn- metadata-for-breakouts-from-joins-test-query-2
@@ -352,7 +350,7 @@
     (let [query (metadata-for-breakouts-from-joins-test-query-2)]
       (is (= [{:name "CATEGORY", :lib/source-column-alias "P2__CATEGORY", :lib/desired-column-alias "P2__CATEGORY"}
               {:name "avg", :lib/source-column-alias "avg", :lib/desired-column-alias "avg"}]
-             (map #(select-keys % [:name :lib/source-column-alias ::lib.join/join-alias :lib/desired-column-alias])
+             (map #(select-keys % [:name :lib/source-column-alias :lib/join-alias :lib/desired-column-alias])
                   (lib/returned-columns query)))))))
 
 (defn- metadata-for-breakouts-from-joins-from-previous-stage-test-query
@@ -383,13 +381,13 @@
                :lib/desired-column-alias "count"}
               {:name                     "CATEGORY_2"
                :lib/source-column-alias  "P2__CATEGORY"
-               ::lib.join/join-alias     "Q2"
+               :lib/join-alias     "Q2"
                :lib/desired-column-alias "Q2__P2__CATEGORY"}
               {:name                     "avg"
                :lib/source-column-alias  "avg"
-               ::lib.join/join-alias     "Q2"
+               :lib/join-alias     "Q2"
                :lib/desired-column-alias "Q2__avg"}]
-             (map #(select-keys % [:name :lib/source-column-alias ::lib.join/join-alias :lib/desired-column-alias])
+             (map #(select-keys % [:name :lib/source-column-alias :lib/join-alias :lib/desired-column-alias])
                   (lib/returned-columns query)))))))
 
 (deftest ^:parallel ensure-filter-stage-test
@@ -564,7 +562,7 @@
         (testing (str "Stage number = " stage-number)
           (is (=? [{:name "Total_number_of_people_from_each_state_separated_by_state_and_then_we_do_a_count"}
                    {:name "coun"}]
-                  (lib/returned-columns query stage-number (lib.util/query-stage query stage-number) {}))))))))
+                  (lib/returned-columns query stage-number stage-number {}))))))))
 
 (deftest ^:parallel remapped-columns-in-joined-source-queries-test
   (testing "Remapped columns in joined source queries should work (#15578)"
@@ -616,7 +614,31 @@
                              ;; this is already here, DO NOT add a duplicate of it.
                              &CATEGORIES__via__CATEGORY_ID.categories.name]}))]
       (is (= ["ID" "NAME" "CATEGORY_ID" "LATITUDE" "LONGITUDE" "PRICE" "CATEGORIES__via__CATEGORY_ID__NAME"]
-             (map :lib/desired-column-alias (lib/returned-columns query -1 (lib.util/query-stage query -1) {:include-remaps? true})))))))
+             (map :lib/desired-column-alias (lib/returned-columns query -1 -1 {:include-remaps? true})))))))
+
+(deftest ^:parallel dont-show-remap-target-columns-from-source-card-test
+  (testing "Remapped columns from source cards don't show up in the \"select specific columns\" picker (#74177)"
+    (let [mp (-> meta/metadata-provider
+                 (lib.tu/remap-metadata-provider (meta/id :orders :user-id) (meta/id :people :email))
+                 (lib.tu/remap-metadata-provider (meta/id :orders :product-id) (meta/id :products :title)))
+          card-query (-> (lib/query mp (meta/table-metadata :orders))
+                         (lib/aggregate (lib/count))
+                         (lib/breakout (meta/field-metadata :orders :user-id))
+                         (lib/breakout (meta/field-metadata :orders :product-id)))
+          cols (lib/returned-columns card-query -1 -1 {:include-remaps? true})
+          remap-to->remap-from (into {} (keep (fn [col]
+                                                (when-let [field-id (get-in col [:lib/external-remap :field-id])]
+                                                  [field-id (:name col)])))
+                                     cols)
+          result-md (mapv (fn [col]
+                            (cond-> col
+                              (remap-to->remap-from (:id col)) (assoc :remapped-from (remap-to->remap-from (:id col)))))
+                          cols)
+          card-mp (lib.tu/metadata-provider-with-card-from-query mp 1 card-query {:result-metadata result-md})
+          query (lib/query card-mp (lib.metadata/card card-mp 1))]
+      (is (= ["USER_ID" "PRODUCT_ID" "count"]
+             (map :name (lib.field/fieldable-columns query 0))
+             (map :name (lib/returned-columns query 0)))))))
 
 (deftest ^:parallel propagate-binning-info-test
   (testing "binning info from previous stages should get propagated"
@@ -714,18 +736,20 @@
             base-type               [nil :type/Date]
             effective-type          [nil :type/Date]
             inherited-temporal-unit [nil :default]
-            ;; make sure random keys don't affect this either
-            nonsense-key            [nil 1337]
-            lib-key                 [nil "PRODUCTS"]
+            ;; make sure options that have nothing to do with bucketing don't affect this either. They have to be
+            ;; options the schema actually declares -- a made-up key is dropped before the ref is ever resolved, so it
+            ;; could not tell us anything.
+            irrelevant-option       [nil :type/Category]
+            irrelevant-lib-option   [nil "PRODUCTS"]
             :let                    [opts (cond-> {:join-alias "People"}
                                             temporal-unit           (assoc :temporal-unit temporal-unit)
                                             base-type               (assoc :base-type base-type)
                                             effective-type          (assoc :effective-type effective-type)
                                             inherited-temporal-unit (assoc :inherited-temporal-unit inherited-temporal-unit)
-                                            nonsense-key            (assoc :nonsense-key nonsense-key)
-                                            lib-key                 (assoc :lib/nonsense-key lib-key))
+                                            irrelevant-option       (assoc :semantic-type irrelevant-option)
+                                            irrelevant-lib-option   (assoc :lib/source-name irrelevant-lib-option))
                                      clause [:field (meta/id :people :birth-date) opts]]]
-      (testing (pr-str (lib/->pMBQL clause))
+      (testing (pr-str (lib/->mbql5 clause))
         (testing `lib/returned-columns
           (let [query (lib/query
                        meta/metadata-provider
@@ -753,7 +777,7 @@
                     "Price"]
                    (map :display-name (lib/returned-columns query))))))))))
 
-;;; adapted from [[metabase.query-processor-test.explicit-joins-test/join-against-saved-question-with-sort-test]]
+;;; adapted from [[metabase.query-processor.explicit-joins-test/join-against-saved-question-with-sort-test]]
 (deftest ^:parallel join-against-same-table-returned-columns-test
   (testing "Joining against a query that ultimately have the same source table SHOULD result in 'duplicate' columns being included."
     (let [query (lib/query
@@ -783,8 +807,30 @@
                 "Q1 → Count"]
                (map :display-name (lib/returned-columns query))))))))
 
+(deftest ^:parallel aggregating-stage-returned-columns-ignore-fields-test
+  (testing "a stage with :aggregation/:breakout should not advertise :fields columns as returned columns. (#62539)"
+    (are [stage expected]
+         (= expected
+            (mapv :display-name
+                  (lib/returned-columns
+                   (lib/query meta/metadata-provider
+                              (lib.tu.macros/mbql-query orders stage)))))
+
+      {:aggregation [[:count]]
+       :fields      [$orders.id $orders.total]}
+      ["Count"]
+
+      {:breakout [$orders.user-id]
+       :fields   [$orders.id $orders.total]}
+      ["User ID"]
+
+      {:aggregation [[:count]]
+       :breakout    [$orders.user-id]
+       :fields      [$orders.id $orders.total]}
+      ["User ID" "Count"])))
+
 (deftest ^:parallel expressions-with-aggregations-and-breakouts-returned-columns-test
-  (testing "expressions in :fields should be returned AFTER breakouts and aggregations"
+  (testing "expression refs in :fields on an aggregating stage are stripped from returned columns (#62539)"
     (let [query (lib/query
                  meta/metadata-provider
                  (lib.tu.macros/mbql-query orders
@@ -794,18 +840,17 @@
                                   $orders.product-id->products.category]
                     :expressions {:test-expr [:ltrim "wheeee"]}
                     :fields      [[:expression "test-expr"]]}))]
-      (is (= ["User → State"              ; from breakouts
-              "User → Source"             ; from breakouts
-              "Product → Category"        ; from breakouts
-              "Count"                     ; from aggregations
-              "Sum of Quantity"           ; from aggregations
-              "test-expr"]                ; from expressions/fields ???
+      (is (= ["User → State"
+              "User → Source"
+              "Product → Category"
+              "Count"
+              "Sum of Quantity"]
              (binding [lib.metadata.calculation/*display-name-style* :long]
                (mapv :display-name (lib/returned-columns query))))))))
 
 (deftest ^:parallel return-correct-deduplicated-names-test
   (testing "Deduplicated names from previous stage should be preserved even when excluding certain fields"
-    ;; e.g. a field called CREATED_AT_2 in the previous stage should continue to be called that. See ;; see
+    ;; e.g. a field called CREATED_AT_2 in the previous stage should continue to be called that. See
     ;; https://metaboat.slack.com/archives/C0645JP1W81/p1750961267171999
     (let [query (-> (lib/query
                      meta/metadata-provider
@@ -820,23 +865,65 @@
                     lib/append-stage
                     lib/append-stage
                     (as-> query (lib/remove-field query -1 (first (lib/fieldable-columns query -1)))))]
-      (is (=? [{:name                     "CREATED_AT_2"
-                :lib/original-name        "CREATED_AT"
-                :lib/deduplicated-name    "CREATED_AT_2"
-                :lib/source-column-alias  "CREATED_AT_2"
-                :lib/desired-column-alias "CREATED_AT_2"
-                :display-name             "Created At: Month"}
-               {:name                     "count"
-                :lib/original-name        "count"
-                :lib/deduplicated-name    "count"
-                :lib/source-column-alias  "count"
-                :lib/desired-column-alias "count"
-                :display-name             "Count"}]
-              (lib/returned-columns query))))))
+      (testing "Stage 1 of 3"
+        (is (=? [{:name                     "CREATED_AT"
+                  :lib/original-name        "CREATED_AT"
+                  :lib/deduplicated-name    "CREATED_AT"
+                  :lib/source-column-alias  "CREATED_AT"
+                  :lib/desired-column-alias "CREATED_AT"
+                  :display-name             "Created At: Year"}
+                 {:name                     "CREATED_AT"
+                  :lib/original-name        "CREATED_AT"
+                  :lib/deduplicated-name    "CREATED_AT_2"
+                  :lib/source-column-alias  "CREATED_AT"
+                  :lib/desired-column-alias "CREATED_AT_2"
+                  :display-name             "Created At: Month"}
+                 {:name                     "count"
+                  :lib/original-name        "count"
+                  :lib/deduplicated-name    "count"
+                  :lib/source-column-alias  "count"
+                  :lib/desired-column-alias "count"
+                  :display-name             "Count"}]
+                (lib/returned-columns query 0))))
+      (testing "Stage 2 of 3"
+        (is (=? [{:name                     "CREATED_AT"
+                  :lib/original-name        "CREATED_AT"
+                  :lib/deduplicated-name    "CREATED_AT"
+                  :lib/source-column-alias  "CREATED_AT"
+                  :lib/desired-column-alias "CREATED_AT"
+                  :display-name             "Created At: Year"}
+                 {:name                     "CREATED_AT"
+                  :lib/original-name        "CREATED_AT"
+                  :lib/deduplicated-name    "CREATED_AT_2"
+                  :lib/source-column-alias  "CREATED_AT_2"
+                  :lib/desired-column-alias "CREATED_AT_2"
+                  :display-name             "Created At: Month"}
+                 {:name                     "count"
+                  :lib/original-name        "count"
+                  :lib/deduplicated-name    "count"
+                  :lib/source-column-alias  "count"
+                  :lib/desired-column-alias "count"
+                  :display-name             "Count"}]
+                (lib/returned-columns query 1))))
+      (testing "Stage 3 of 3"
+        (is (=? [{:name                     "CREATED_AT_2" ; name should get deduplicated in the last stage for historical reasons
+                  :lib/original-name        "CREATED_AT"
+                  :lib/deduplicated-name    "CREATED_AT_2"
+                  :lib/source-column-alias  "CREATED_AT_2"
+                  :lib/desired-column-alias "CREATED_AT_2"
+                  :display-name             "Created At: Month"}
+                 {:name                     "count"
+                  :lib/original-name        "count"
+                  :lib/deduplicated-name    "count"
+                  :lib/source-column-alias  "count"
+                  :lib/desired-column-alias "count"
+                  :display-name             "Count"}]
+                (lib/returned-columns query)))))))
 
+;;; TODO (Cam 8/7/25) -- move these tests that test [[lib.equality/=]] to [[metabase.lib.equality-test]]
 (deftest ^:parallel test-QUE-1607
-  (testing "QUE-1607"
-    (is (#'lib.stage/add-cols-from-join-duplicate?
+  (testing "do not add duplicate columns whne join uses name refs in :fields (QUE-1607)"
+    (is (lib.equality/=
          {:base-type                    :type/Integer
           :display-name                 "Sum of Quantity"
           :effective-type               :type/Integer
@@ -848,10 +935,9 @@
           :lib/source-column-alias      "sum"
           :lib/source-uuid              "4d059464-4190-40ae-bc4e-717ff016e157"
           :lib/type                     :metadata/column
-          :metabase.lib.join/join-alias "Orders"
+          :lib/join-alias "Orders"
           :name                         "sum"
-          :semantic-type                :type/Quantity
-          :source-alias                 "Orders"}
+          :semantic-type                :type/Quantity}
          {:base-type                    :type/Integer
           :display-name                 "Sum"
           :effective-type               :type/Integer
@@ -859,8 +945,51 @@
           :lib/source                   :source/joins
           :lib/source-uuid              "91b22976-279d-4052-b269-e4cd83a6683b"
           :lib/type                     :metadata/column
-          :metabase.lib.join/join-alias "Orders"
+          :lib/join-alias "Orders"
           :name                         "sum"}))))
+
+(deftest ^:parallel column-equality-test
+  (let [join-col     {:active                       true
+                      :base-type                    :type/Text
+                      :caveats                      nil
+                      :coercion-strategy            nil
+                      :custom-position              0
+                      :database-is-auto-increment   false
+                      :database-position            2
+                      :database-required            false
+                      :database-type                "CHARACTER VARYING"
+                      :description                  nil
+                      :display-name                 "Orders → Title"
+                      :effective-type               :type/Text,
+                      :fingerprint-version          5
+                      :fk-target-field-id           nil
+                      :has-field-values             :auto-list
+                      :id                           24504
+                      :name                         "TITLE"
+                      :nfc-path                     nil
+                      :parent-id                    nil
+                      :points-of-interest           nil
+                      :position                     2
+                      :preview-display              true
+                      :semantic-type                :type/Title
+                      :settings                     nil
+                      :table-id                     24050
+                      :visibility-type              :normal
+                      :lib/breakout?                false
+                      :lib/original-display-name    "Title"
+                      :lib/original-join-alias      "Orders"
+                      :lib/original-name            "TITLE"
+                      :lib/source                   :source/joins
+                      :lib/source-column-alias      "TITLE"
+                      :lib/type                     :metadata/column
+                      :lib/join-alias "Orders"}
+        existing-col {:base-type               :type/Integer
+                      :display-name            "Orders → Sum"
+                      :name                    "sum"
+                      :lib/source              :source/previous-stage
+                      :lib/type                :metadata/column
+                      :lib/original-join-alias "Orders"}]
+    (is (not (lib.equality/= join-col existing-col)))))
 
 (deftest ^:parallel sane-desired-column-aliases-test
   (testing "Do not 'double-dip' a desired-column alias and do `__via__` twice"
@@ -901,3 +1030,35 @@
                       :lib/source-column-alias  "count"
                       :lib/desired-column-alias "count"}]
                     (f query)))))))))
+
+(deftest ^:parallel propagate-crazy-long-native-identifiers-test
+  (testing "respect crazy-long identifiers from native query stages (we need to use these to refer to native columns in the second stage) (#47584)"
+    (let [query (lib.tu.macros/mbql-5-query nil
+                  {:stages [{:native             "SELECT *"
+                             :lib/stage-metadata {:columns [{:base-type                :type/Text
+                                                             :database-type            "CHARACTER VARYING"
+                                                             :display-name             "Total_number_of_people_from_each_state_separated_by_state_and_then_we_do_a_count"
+                                                             :effective-type           :type/Text
+                                                             :name                     "Total_number_of_people_from_each_state_separated_by_state_and_then_we_do_a_count"
+                                                             :lib/desired-column-alias "Total_number_of_people_from_each_state_separated_by_state_and_then_we_do_a_count"
+                                                             :lib/source               :source/native
+                                                             :lib/source-column-alias  "Total_number_of_people_from_each_state_separated_by_state_and_then_we_do_a_count"
+                                                             :lib/type                 :metadata/column}]}}
+                            {}
+                            {}]})]
+      (are [stage-number expected] (=? [expected]
+                                       (lib/returned-columns query stage-number))
+        0
+        {:lib/source               :source/native
+         :lib/source-column-alias  "Total_number_of_people_from_each_state_separated_by_state_and_then_we_do_a_count"
+         :lib/desired-column-alias "Total_number_of_people_from_each_state_separated_by_state_and_then_we_do_a_count"}
+
+        1
+        {:lib/source               :source/previous-stage
+         :lib/source-column-alias  "Total_number_of_people_from_each_state_separated_by_state_and_then_we_do_a_count"
+         :lib/desired-column-alias "Total_number_of_people_from_each_state_separated_by_00028d48"}
+
+        2
+        {:lib/source               :source/previous-stage
+         :lib/source-column-alias  "Total_number_of_people_from_each_state_separated_by_00028d48"
+         :lib/desired-column-alias "Total_number_of_people_from_each_state_separated_by_00028d48"}))))

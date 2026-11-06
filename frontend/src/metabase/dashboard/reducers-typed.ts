@@ -1,62 +1,74 @@
+import type { UnknownAction } from "@reduxjs/toolkit";
 import { createReducer } from "@reduxjs/toolkit";
-import { assocIn, dissocIn } from "icepick";
-import { omit } from "underscore";
+import { assocIn } from "icepick";
+import _ from "underscore";
 
 import {
   createDashboardPublicLink,
   deleteDashboardPublicLink,
+  updateDashboard,
   updateDashboardEmbeddingParams,
   updateDashboardEnableEmbedding,
 } from "metabase/api";
-import Dashboards from "metabase/entities/dashboards";
-import Questions from "metabase/entities/questions";
-import Revisions from "metabase/entities/revisions";
-import { handleActions } from "metabase/lib/redux";
-import { NAVIGATE_BACK_TO_DASHBOARD } from "metabase/query_builder/actions";
+import { handleActions } from "metabase/redux";
+import { CARD_UPDATED } from "metabase/redux/cards";
+import {
+  INITIALIZE,
+  RESET,
+  SET_PARAMETER_VALUES,
+  SHOW_ADD_PARAMETER_POPOVER,
+  initialize,
+  reset,
+} from "metabase/redux/dashboard";
+import {
+  NAVIGATE_BACK_TO_DASHBOARD,
+  REVERT_CARD_TO_REVISION,
+} from "metabase/redux/query-builder";
+import type {
+  DashboardLinkTargets,
+  StoreDashboard,
+} from "metabase/redux/store/dashboard";
 import type { UiParameter } from "metabase-lib/v1/parameters/types";
 import type {
   Card,
-  DashCardId,
   Dashboard,
   ParameterId,
   ParameterValueOrArray,
+  ParameterValuesMap,
   Revision,
 } from "metabase-types/api";
-import type {
-  DashboardSidebarName,
-  StoreDashboard,
-} from "metabase-types/store/dashboard";
 
 import {
   CLOSE_SIDEBAR,
   HIDE_ADD_PARAMETER_POPOVER,
-  INITIALIZE,
   REMOVE_PARAMETER,
-  RESET,
   RESET_PARAMETERS,
   SET_EDITING_DASHBOARD,
   SET_PARAMETER_VALUE,
-  SET_PARAMETER_VALUES,
-  SET_SIDEBAR,
-  SHOW_ADD_PARAMETER_POPOVER,
   SHOW_AUTO_APPLY_FILTERS_TOAST,
   addCardToDash,
   addDashcardIdsToLoadingQueue,
   addManyCardsToDash,
   cancelFetchCardData,
   clearCardData,
+  dashboardLayoutFetched,
   fetchCardDataAction,
   fetchDashboard,
   fetchDashboardCardDataAction,
-  initialize,
   markCardAsSlow,
-  reset,
   setDashboardAttributes,
-  setDisplayTheme,
   setDocumentTitle,
   setShowLoadingCompleteFavicon,
+  setSidebar,
 } from "./actions";
-import { INITIAL_DASHBOARD_STATE } from "./constants";
+import {
+  deselectTimelineEvents,
+  markTimelineEventsShown,
+  selectTimelineEvents,
+  setDashCardTimelineEventsEnabled,
+  setDashCardTimelineEventsVisibility,
+} from "./actions/timeline-events";
+import { INITIAL_DASHBOARD_STATE, SIDEBAR_NAME } from "./constants";
 import { syncParametersAndEmbeddingParams } from "./utils";
 
 export const dashboardId = createReducer(
@@ -104,10 +116,6 @@ export const autoApplyFilters = createReducer(
     });
   },
 );
-
-export const theme = createReducer(INITIAL_DASHBOARD_STATE.theme, (builder) => {
-  builder.addCase(setDisplayTheme, (_state, { payload }) => payload || null);
-});
 
 export const slowCards = createReducer(
   INITIAL_DASHBOARD_STATE.slowCards,
@@ -199,22 +207,50 @@ export const sidebar = createReducer(
     builder.addCase(SET_EDITING_DASHBOARD, () => DEFAULT_SIDEBAR);
     builder.addCase(CLOSE_SIDEBAR, () => DEFAULT_SIDEBAR);
 
-    builder.addCase<
-      string,
-      {
-        type: string;
-        payload: {
-          name: DashboardSidebarName;
-          props?: {
-            dashcardId?: DashCardId;
-            parameterId?: ParameterId;
-          };
-        };
-      }
-    >(SET_SIDEBAR, (_state, { payload: { name, props } }) => ({
+    builder.addCase(setSidebar, (_state, { payload: { name, props } }) => ({
       name,
       props: props || {},
     }));
+  },
+);
+
+export const timelineEvents = createReducer(
+  INITIAL_DASHBOARD_STATE.timelineEvents,
+  (builder) => {
+    builder.addCase(INITIALIZE, () => INITIAL_DASHBOARD_STATE.timelineEvents);
+    builder.addCase(RESET, () => INITIAL_DASHBOARD_STATE.timelineEvents);
+    builder.addCase(SET_EDITING_DASHBOARD, (state) => ({
+      ...INITIAL_DASHBOARD_STATE.timelineEvents,
+      hasTrackedEventsShown: state.hasTrackedEventsShown,
+    }));
+    builder.addCase(CLOSE_SIDEBAR, (state) => {
+      state.selection = null;
+    });
+    builder.addCase(setSidebar, (state, { payload: { name } }) => {
+      if (name !== SIDEBAR_NAME.events) {
+        state.selection = null;
+      }
+    });
+    builder.addCase(setDashCardTimelineEventsVisibility, (state, action) => {
+      state.overrides = { ...state.overrides, ...action.payload };
+    });
+    builder.addCase(
+      setDashCardTimelineEventsEnabled,
+      (state, { payload: { dashcardId, isEnabled } }) => {
+        if (state.enabledByDashCard[dashcardId] !== isEnabled) {
+          state.enabledByDashCard[dashcardId] = isEnabled;
+        }
+      },
+    );
+    builder.addCase(selectTimelineEvents, (state, action) => {
+      state.selection = action.payload;
+    });
+    builder.addCase(deselectTimelineEvents, (state) => {
+      state.selection = null;
+    });
+    builder.addCase(markTimelineEventsShown, (state) => {
+      state.hasTrackedEventsShown = true;
+    });
   },
 );
 
@@ -238,7 +274,7 @@ export const parameterValues = createReducer(
         type: string;
         payload: {
           id: ParameterId;
-          value: ParameterValueOrArray;
+          value: ParameterValueOrArray | undefined | null;
           isDraft: boolean;
         };
       }
@@ -252,7 +288,7 @@ export const parameterValues = createReducer(
       string,
       {
         type: string;
-        payload: Record<ParameterId, ParameterValueOrArray>;
+        payload: ParameterValuesMap;
       }
     >(SET_PARAMETER_VALUES, (_state, { payload }) => {
       return payload;
@@ -289,10 +325,25 @@ function newDashboard(
     ...before,
     // mimic the StoreDashboard type - this function is only made to update attributes
     // rather than deep values like dashcards or tabs
-    ...omit(after, "dashcards", "tabs"),
+    ..._.omit(after, "dashcards", "tabs"),
     embedding_params: syncParametersAndEmbeddingParams(before, after),
     isDirty,
   };
+}
+
+// Replaced rather than merged: the targets belong to the dashboard being
+// loaded, and a stale entry would let a removed click behavior keep resolving.
+export function linkTargets(
+  state: DashboardLinkTargets = INITIAL_DASHBOARD_STATE.linkTargets,
+  action: UnknownAction,
+): DashboardLinkTargets {
+  if (fetchDashboard.fulfilled.match(action)) {
+    return action.payload.linkTargets;
+  }
+  if (action.type === RESET) {
+    return INITIAL_DASHBOARD_STATE.linkTargets;
+  }
+  return state;
 }
 
 export const dashboards = createReducer(
@@ -303,36 +354,31 @@ export const dashboards = createReducer(
         ...state,
         ...payload.entities.dashboard,
       }))
+      .addCase(dashboardLayoutFetched, (state, { payload }) => ({
+        ...state,
+        ...payload.dashboard,
+      }))
       .addCase(
         setDashboardAttributes,
-        (state, { payload: { id, attributes, isDirty = true } }) => ({
-          ...state,
-          [id]: newDashboard(state[id], attributes, isDirty),
-        }),
-      )
-      .addCase(addCardToDash, (state, { payload: dashcard }) => ({
-        ...state,
-        [dashcard.dashboard_id]: {
-          ...state[dashcard.dashboard_id],
-          dashcards: [...state[dashcard.dashboard_id].dashcards, dashcard.id],
+        (state, { payload: { id, attributes, isDirty = true } }) => {
+          // Cast to avoid infinite type instantiation error.
+          const dashboards = state as Record<string, StoreDashboard>;
+          dashboards[id] = newDashboard(dashboards[id], attributes, isDirty);
         },
-      }))
+      )
+      .addCase(addCardToDash, (state, { payload: dashcard }) => {
+        state[dashcard.dashboard_id].dashcards.push(dashcard.id);
+      })
       .addCase(addManyCardsToDash, (state, { payload: dashcards }) => {
         const [{ dashboard_id }] = dashcards;
         const dashcardIds = dashcards.map(({ id }) => id);
-        return {
-          ...state,
-          [dashboard_id]: {
-            ...state[dashboard_id],
-            dashcards: [...state[dashboard_id].dashcards, ...dashcardIds],
-          },
-        };
+        state[dashboard_id].dashcards.push(...dashcardIds);
       })
-      .addCase(Dashboards.actionTypes.UPDATE, (state, { payload }) => {
-        const draftDashboard = state[payload.dashboard.id];
+      .addMatcher(updateDashboard.matchFulfilled, (state, { payload }) => {
+        const draftDashboard = state[payload.id];
         if (draftDashboard) {
-          draftDashboard.collection_id = payload.dashboard.collection_id;
-          draftDashboard.collection = payload.dashboard.collection;
+          draftDashboard.collection_id = payload.collection_id;
+          draftDashboard.collection = payload.collection;
         }
       })
       .addMatcher(
@@ -347,18 +393,18 @@ export const dashboards = createReducer(
       )
       .addMatcher(
         updateDashboardEmbeddingParams.matchFulfilled,
-        (state, { payload }) =>
-          assocIn(
-            state,
-            [payload.id, "embedding_params"],
-            payload.embedding_params,
-          ),
+        (state, { payload }) => {
+          const dashboard = state[payload.id];
+          dashboard.embedding_params = payload.embedding_params;
+          dashboard.embedding_type = payload.embedding_type;
+        },
       )
       .addMatcher(
         updateDashboardEnableEmbedding.matchFulfilled,
         (state, { payload }) => {
           const dashboard = state[payload.id];
           dashboard.enable_embedding = payload.enable_embedding;
+          dashboard.embedding_type = payload.embedding_type;
           dashboard.initially_published_at = payload.initially_published_at;
         },
       );
@@ -433,16 +479,19 @@ export const dashcardData = createReducer(
       })
       .addCase(fetchCardDataAction.fulfilled, (state, action) => {
         const { dashcard_id, card_id, result } = action.payload ?? {};
-        if (dashcard_id && card_id) {
-          return assocIn(state, [dashcard_id, card_id], result);
+        if (dashcard_id && card_id && result != null) {
+          // Mutates the draft: icepick would copy child drafts into a frozen
+          // object Immer skips when finalizing, leaving revoked proxies behind.
+          // Object.assign because DashCardDataMap does not model { error } results.
+          Object.assign((state[dashcard_id] ??= {}), { [card_id]: result });
         }
       })
       .addCase(clearCardData, (state, action) => {
         const { cardId, dashcardId } = action.payload;
-        return dissocIn(state, [dashcardId, cardId]);
+        delete state[dashcardId]?.[cardId];
       })
       .addCase<string, { type: string; payload: { object?: Card } }>(
-        Questions.actionTypes.UPDATE,
+        CARD_UPDATED,
         (state, { payload: { object: card } }) => {
           if (card) {
             const { id } = card;
@@ -453,12 +502,12 @@ export const dashcardData = createReducer(
         },
       )
       .addCase<string, { type: string; payload: Revision }>(
-        Revisions.actionTypes.REVERT,
+        REVERT_CARD_TO_REVISION,
         (state, action) => {
-          const { model_id } = action.payload;
-          if (model_id) {
+          const { id } = action.payload;
+          if (id != null) {
             for (const dashcardId in state) {
-              delete state[dashcardId][model_id];
+              delete state[dashcardId][id];
             }
           }
         },

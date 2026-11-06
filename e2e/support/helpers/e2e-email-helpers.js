@@ -1,4 +1,7 @@
-import { openSharingMenu, sidebar } from "e2e/support/helpers";
+import {
+  sidebar,
+  toggleDashboardSubscriptionsSidebar,
+} from "e2e/support/helpers";
 
 import { WEBMAIL_CONFIG } from "../cypress_data";
 
@@ -8,10 +11,11 @@ const INBOX_INTERVAL = 100;
 const { WEB_PORT, SMTP_PORT } = WEBMAIL_CONFIG;
 
 /**
- * Make sure you have webmail Docker image running locally:
- * `docker run -d -p 1080:1080 -p 1025:1025 maildev/maildev:2.0.5`
+ * `bun run test-cypress` starts maildev for you via
+ * e2e/test/scenarios/docker-compose.yml. To start it manually instead:
+ * `docker run -d -p 127.0.0.1:1180:1080 -p 127.0.0.1:1125:1025 maildev/maildev:2.2.1`
  * or
- * `npx maildev -s 1025 -w 1080`
+ * `npx maildev -s 1125 -w 1180`
  */
 export const setupSMTP = () => {
   cy.log("Set up Webmail SMTP server");
@@ -31,19 +35,22 @@ export const setupSMTP = () => {
   clearInbox();
 };
 
-export const getInbox = () => {
-  return getInboxWithRetry();
+export const getInbox = (emailsCount) => {
+  return getInboxWithRetry(emailsCount);
 };
 
-const getInboxWithRetry = (timeout = INBOX_TIMEOUT) => {
+const getInboxWithRetry = (emailsCount, timeout = INBOX_TIMEOUT) => {
   return cy
     .request("GET", `http://localhost:${WEB_PORT}/email`)
     .then((response) => {
-      if (response.body.length) {
+      if (
+        response.body.length &&
+        (emailsCount == null || emailsCount === response.body.length)
+      ) {
         return cy.wrap(response);
       } else if (timeout > 0) {
         cy.wait(INBOX_INTERVAL);
-        return getInboxWithRetry(timeout - INBOX_INTERVAL);
+        return getInboxWithRetry(emailsCount, timeout - INBOX_INTERVAL);
       } else {
         throw new Error("Inbox retry timeout");
       }
@@ -82,7 +89,7 @@ export const clickSend = () => {
 };
 
 export const openAndAddEmailsToSubscriptions = (recipients) => {
-  openSharingMenu("Subscriptions");
+  toggleDashboardSubscriptionsSidebar();
 
   sidebar().findByText("Set up a dashboard subscription").should("be.visible");
 
@@ -92,7 +99,7 @@ export const openAndAddEmailsToSubscriptions = (recipients) => {
     cy.findByTestId("token-field")
       .find("input")
       .click()
-      .type(`${recipient}{enter}`)
+      .type(`${recipient}{downarrow}{enter}`)
       .blur();
   });
 };

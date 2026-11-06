@@ -1,34 +1,22 @@
 import Bowser from "bowser";
 
-import { b64url_to_utf8 } from "metabase/lib/encoding";
-import { CardApi, CollectionsApi, DashboardApi } from "metabase/services";
+import { cardApi, collectionApi, dashboardApi } from "metabase/api";
+import { runRtkEndpoint } from "metabase/api/utils/run-rtk-endpoint";
+import type { DispatchFn } from "metabase/redux";
+import { b64url_to_utf8 } from "metabase/utils/encoding";
 
 import type { ReportableEntityName } from "./types";
-
-export function downloadObjectAsJson(
-  exportObj: Record<string, any>,
-  exportName: string,
-) {
-  const dataStr =
-    "data:text/json;charset=utf-8," +
-    encodeURIComponent(JSON.stringify(exportObj, null, 2));
-  const downloadAnchorNode = document.createElement("a");
-  downloadAnchorNode.setAttribute("href", dataStr);
-  downloadAnchorNode.setAttribute("aria-label", "download diagnostic info");
-  downloadAnchorNode.setAttribute("download", exportName + ".json");
-  document.body.appendChild(downloadAnchorNode);
-  downloadAnchorNode.click();
-  downloadAnchorNode.remove();
-}
 
 export const getEntityDetails = ({
   entity,
   id,
   isAdHoc,
+  dispatch,
 }: {
   entity?: ReportableEntityName;
   id?: string;
   isAdHoc?: boolean;
+  dispatch: DispatchFn;
 }) => {
   if (!id || !entity) {
     return Promise.resolve(null);
@@ -46,11 +34,21 @@ export const getEntityDetails = ({
           return Promise.resolve("unable to decode ad-hoc question");
         }
       }
-      return CardApi.get({ cardId: id }).catch(nullOnCatch);
+      return runRtkEndpoint({ id }, dispatch, cardApi.endpoints.getCard).catch(
+        nullOnCatch,
+      );
     case "dashboard":
-      return DashboardApi.get({ id }).catch(nullOnCatch);
+      return runRtkEndpoint(
+        { id },
+        dispatch,
+        dashboardApi.endpoints.getDashboard,
+      ).catch(nullOnCatch);
     case "collection":
-      return CollectionsApi.get({ id }).catch(nullOnCatch);
+      return runRtkEndpoint(
+        { id },
+        dispatch,
+        collectionApi.endpoints.getCollection,
+      ).catch(nullOnCatch);
     default:
       return Promise.resolve(null);
   }

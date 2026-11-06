@@ -1,5 +1,5 @@
 (ns metabase.util.formatting.internal.numbers
-  "JVM Clojure implementation of the [[core/NumberFormatter]] abstaction."
+  "JVM Clojure implementation of the [[core/NumberFormatter]] abstraction."
   (:require
    [clojure.string :as str]
    [metabase.util.currency :as currency]
@@ -47,7 +47,7 @@
 
 (defn- active-locale [options]
   (if (:locale options)
-    (Locale. (:locale options))
+    (Locale/of (:locale options))
     (Locale/getDefault)))
 
 (defn- number-formatter-for-options-baseline

@@ -1,12 +1,11 @@
 import type { CompletionContext } from "@codemirror/autocomplete";
 
 import type * as Lib from "metabase-lib";
-import type Metadata from "metabase-lib/v1/metadata/Metadata";
+import type { Database } from "metabase-types/api";
 
 import { getSupportedClauses } from "../clause";
 import { tokenAtPos } from "../position";
 import { GROUP } from "../pratt";
-import { getDatabase } from "../utils";
 
 import {
   expressionClauseCompletion,
@@ -16,26 +15,20 @@ import {
 } from "./util";
 
 export type Options = {
-  query: Lib.Query;
   expressionMode: Lib.ExpressionMode;
-  metadata: Metadata;
+  database: Pick<Database, "features"> | undefined;
 };
 
-export function suggestAggregations({
-  expressionMode,
-  query,
-  metadata,
-}: Options) {
+export function suggestAggregations({ expressionMode, database }: Options) {
   if (expressionMode !== "aggregation") {
     return null;
   }
 
-  const database = getDatabase(query, metadata);
   const aggregations = getSupportedClauses({ expressionMode, database }).map(
     (agg) => expressionClauseCompletion(agg, { type: "aggregation" }),
   );
 
-  const matcher = fuzzyMatcher({ options: aggregations });
+  const matcher = fuzzyMatcher(aggregations);
 
   return function (context: CompletionContext) {
     const source = context.state.doc.toString();
@@ -56,7 +49,6 @@ export function suggestAggregations({
       from: token.start,
       to: token.end,
       options,
-      filter: false,
     };
   };
 }

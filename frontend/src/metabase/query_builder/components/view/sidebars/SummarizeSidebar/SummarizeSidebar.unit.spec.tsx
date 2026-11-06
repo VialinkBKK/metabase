@@ -1,16 +1,36 @@
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 
-import { renderWithProviders, screen, waitFor, within } from "__support__/ui";
-import * as Lib from "metabase-lib";
-import { createQuery, createQueryWithClauses } from "metabase-lib/test-helpers";
-import { createMockCard } from "metabase-types/api/mocks";
+import { createMockMetadata } from "__support__/metadata";
+import { setupDatabaseEndpoints } from "__support__/server-mocks";
 import {
   createMockQueryBuilderState,
   createMockState,
-} from "metabase-types/store/mocks";
+} from "__support__/state";
+import { renderWithProviders, screen, waitFor, within } from "__support__/ui";
+import * as Lib from "metabase-lib";
+import {
+  DEFAULT_TEST_QUERY,
+  SAMPLE_PROVIDER,
+  createMetadataProvider,
+} from "metabase-lib/test-helpers";
+import { createMockCard } from "metabase-types/api/mocks";
+import {
+  ORDERS,
+  ORDERS_ID,
+  createOrdersTable,
+  createSampleDatabase,
+  createSavedStructuredCard,
+} from "metabase-types/api/mocks/presets";
 
 import { SummarizeSidebar } from "./SummarizeSidebar";
+
+// The search debounce is idle time in these tests: they assert what a search
+// returns, not that the input waits before it asks.
+jest.mock("metabase/utils/constants", () => ({
+  ...jest.requireActual("metabase/utils/constants"),
+  SEARCH_DEBOUNCE_DURATION: 0,
+}));
 
 type SetupOpts = {
   query?: Lib.Query;
@@ -18,48 +38,68 @@ type SetupOpts = {
 };
 
 function createSummarizedQuery() {
-  return createQueryWithClauses({
-    aggregations: [
-      { operatorName: "max", tableName: "ORDERS", columnName: "QUANTITY" },
-    ],
-    breakouts: [
+  return Lib.createTestQuery(SAMPLE_PROVIDER, {
+    stages: [
       {
-        tableName: "ORDERS",
-        columnName: "CREATED_AT",
-        temporalBucketName: "Month",
-      },
-      {
-        tableName: "PRODUCTS",
-        columnName: "CATEGORY",
+        source: { type: "table", id: ORDERS_ID },
+        aggregations: [
+          {
+            type: "operator",
+            operator: "max",
+            args: [{ type: "column", name: "QUANTITY" }],
+          },
+        ],
+        breakouts: [
+          {
+            type: "column",
+            name: "CREATED_AT",
+            unit: "month",
+          },
+          {
+            type: "column",
+            sourceFieldId: ORDERS.PRODUCT_ID,
+            name: "CATEGORY",
+          },
+        ],
       },
     ],
   });
 }
 
 function createQueryWithBreakoutsForSameColumn() {
-  return createQueryWithClauses({
-    aggregations: [{ operatorName: "count" }],
-    breakouts: [
+  return Lib.createTestQuery(SAMPLE_PROVIDER, {
+    stages: [
       {
-        tableName: "ORDERS",
-        columnName: "CREATED_AT",
-        temporalBucketName: "Year",
-      },
-      {
-        tableName: "ORDERS",
-        columnName: "CREATED_AT",
-        temporalBucketName: "Quarter",
+        source: { type: "table", id: ORDERS_ID },
+        aggregations: [{ type: "operator", operator: "count", args: [] }],
+        breakouts: [
+          {
+            type: "column",
+            name: "CREATED_AT",
+            unit: "year",
+          },
+          {
+            type: "column",
+            name: "CREATED_AT",
+            unit: "quarter",
+          },
+        ],
       },
     ],
   });
 }
 
 async function setup({
-  query: initialQuery = createQuery(),
+  query: initialQuery = Lib.createTestQuery(
+    SAMPLE_PROVIDER,
+    DEFAULT_TEST_QUERY,
+  ),
   withDefaultAggregation = true,
 }: SetupOpts = {}) {
   const onQueryChange = jest.fn();
   const onClose = jest.fn();
+
+  setupDatabaseEndpoints(createSampleDatabase());
 
   function Wrapper() {
     const [query, setQuery] = useState(initialQuery);
@@ -144,8 +184,13 @@ describe("SummarizeSidebar", () => {
 
     it("should allow to remove last not default aggregation (metabase#48033)", async () => {
       await setup({
-        query: createQueryWithClauses({
-          aggregations: [{ operatorName: "count" }],
+        query: Lib.createTestQuery(SAMPLE_PROVIDER, {
+          stages: [
+            {
+              source: { type: "table", id: ORDERS_ID },
+              aggregations: [{ type: "operator", operator: "count", args: [] }],
+            },
+          ],
         }),
       });
 
@@ -177,7 +222,7 @@ describe("SummarizeSidebar", () => {
   });
 
   it("should list breakoutable columns", async () => {
-    const query = createQuery();
+    const query = Lib.createTestQuery(SAMPLE_PROVIDER, DEFAULT_TEST_QUERY);
     const columns = Lib.breakoutableColumns(query, -1);
     await setup({ query });
 
@@ -422,6 +467,69 @@ describe("SummarizeSidebar", () => {
       expect(breakout.displayName).toBe("Created At: Quarter");
     });
     expect(getNextBreakouts()).toHaveLength(1);
+  });
+
+  it("should update the sort when changing the temporal bucket of a sorted breakout (metabase#16770)", async () => {
+    const { onQueryChange } = await setup({
+      query: Lib.createTestQuery(SAMPLE_PROVIDER, {
+        stages: [
+          {
+            source: { type: "table", id: ORDERS_ID },
+            aggregations: [{ type: "operator", operator: "count", args: [] }],
+            breakouts: [{ type: "column", name: "CREATED_AT", unit: "month" }],
+            orderBys: [{ type: "column", name: "CREATED_AT", unit: "month" }],
+          },
+        ],
+      }),
+    });
+
+    const createdAt = within(getPinnedColumnList()).getByLabelText(
+      "Created At",
+    );
+    await userEvent.click(within(createdAt).getByText("by month"));
+    await userEvent.click(await screen.findByText("Year"));
+
+    await waitFor(() => expect(onQueryChange).toHaveBeenCalled());
+    const [nextQuery] = onQueryChange.mock.lastCall;
+    expect(
+      Lib.breakouts(nextQuery, -1).map(
+        (breakout) => Lib.displayInfo(nextQuery, -1, breakout).displayName,
+      ),
+    ).toEqual(["Created At: Year"]);
+    expect(
+      Lib.orderBys(nextQuery, -1).map(
+        (orderBy) => Lib.displayInfo(nextQuery, -1, orderBy).displayName,
+      ),
+    ).toEqual(["Created At: Year"]);
+  });
+
+  it("should offer all temporal buckets for a column of a saved question source (metabase#10441, metabase#11439)", async () => {
+    const card = createSavedStructuredCard({
+      id: 2,
+      name: "11439",
+      result_metadata: (createOrdersTable().fields ?? []).map((field) => ({
+        ...field,
+        field_ref: ["field", Number(field.id), null],
+      })),
+    });
+    const provider = createMetadataProvider({
+      metadata: createMockMetadata({
+        databases: [createSampleDatabase()],
+        questions: [card],
+      }),
+    });
+    await setup({
+      query: Lib.createTestQuery(provider, {
+        stages: [{ source: { type: "card", id: card.id } }],
+      }),
+    });
+
+    const [createdAt] = screen.getAllByLabelText("Created At");
+    await userEvent.hover(createdAt);
+    await userEvent.click(within(createdAt).getByText("by month"));
+    await userEvent.click(await screen.findByText("More…"));
+
+    expect(await screen.findByText("Hour of day")).toBeInTheDocument();
   });
 
   it("should allow picking a binning strategy for breakout columns", async () => {

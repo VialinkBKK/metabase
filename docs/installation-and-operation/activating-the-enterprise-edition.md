@@ -7,7 +7,7 @@ redirect_from:
 
 # Activating your Metabase commercial license
 
-The [paid Pro and Enterprise editions](https://www.metabase.com/pricing/) of Metabase are distinct from the free [Open Source edition](../installation-and-operation/running-the-metabase-jar-file.md) and the [Starter version of Metabase Cloud](https://www.metabase.com/cloud/).
+The [paid Pro and Enterprise editions](https://www.metabase.com/pricing) of Metabase are distinct from the free [Open Source edition](../installation-and-operation/running-the-metabase-jar-file.md) and the [Starter version of Metabase Cloud](https://www.metabase.com/cloud).
 
 ## If you're running on Metabase Cloud
 
@@ -20,20 +20,18 @@ To use your Pro/Enterprise features, you’ll need to do two things:
 - Download Metabase Enterprise Edition
 - Enter your license.
 
-You can get a license by signing up for a free trial of the [Pro or Enterprise edition plans](https://www.metabase.com/pricing/), both of which can be self-hosted or hosted on Metabase Cloud.
+You can get a license by signing up for a free trial of the [Pro or Enterprise edition plans](https://www.metabase.com/pricing), both of which can be self-hosted or hosted on Metabase Cloud.
 
 ### Download the Enterprise edition
 
-- [Enterprise Docker image](https://hub.docker.com/r/metabase/metabase-enterprise/) at `metabase/metabase-enterprise:latest`. (RECOMMENDED)
-- [Enterprise JAR](https://downloads.metabase.com/enterprise/latest/metabase.jar).
-
-You'll also need to set up a dedicated [application database](../installation-and-operation/configuring-application-database.md) to store your Metabase data.
+- **Download Enterprise Edition**. You can download the latest Docker image or jar file from [Metabase releases](https://github.com/metabase/metabase/releases). Find the release with the latest badge. Download that specific point version. For example, `metabase/metabase-enterprise:v1.XX.X.x`. We recommend using Docker in production.
+- **Set up your application database**. You'll also need to set up a dedicated [application database](../installation-and-operation/configuring-application-database.md) to store your Metabase data.
 
 ### Activate your license
 
 There are two ways to activate your license when self-hosting Metabase:
 
-- **When Metabase is running**: go to **Settings** > **Admin settings**, and click **License and Billing** in the lefthand sidebar. Paste in your license token under **License** and click **Activate**.
+- **When Metabase is running**: go to **Admin** > **Settings**, and click **License** in the lefthand sidebar. Paste in your license token under **License** and click **Activate**.
 
 OR
 
@@ -41,7 +39,7 @@ OR
 
 ## Upgrading from a self-hosted Metabase Open Source Edition to a Pro or Enterprise plan
 
-To get all the features available when upgrading to a _self-hosted_ [Pro or Enterprise plan](https://www.metabase.com/pricing/), you'll need to:
+To get all the features available when upgrading to a _self-hosted_ [Pro or Enterprise plan](https://www.metabase.com/pricing), you'll need to:
 
 1. Change to the Metabase Enterprise Edition (that goes for both the Pro and Enterprise plans).
 2. Activate your license.
@@ -91,7 +89,7 @@ Depending on your organization’s setup, you may need to take additional config
 
 ## IP addresses to whitelist
 
-If you're hosting Metabase behind a firewall that blocks outgoing connections, **you must allow outbound stateful connections to port 443 on the all of the following IP addresses**:
+If you're hosting Metabase behind a firewall that blocks outgoing connections, **you must allow outbound stateful connections to port 443 on all of the following IP addresses**:
 
 ```
 23.23.111.13

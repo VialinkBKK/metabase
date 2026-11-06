@@ -2,11 +2,14 @@
   (:require
    [clojure.test :refer :all]
    [metabase.app-db.core :as mdb]
+   [metabase.app-db.setting :as mdb.setting]
    [metabase.settings.models.setting-test :as setting-test]
    [metabase.settings.models.setting.cache :as setting.cache]
    [metabase.system.core :as system]
    [metabase.test :as mt]
    [metabase.test.fixtures :as fixtures]
+   [metabase.util.encryption :as encryption]
+   [metabase.util.honey-sql-2 :as h2x]
    [toucan2.core :as t2]))
 
 (set! *warn-on-reflection* true)
@@ -23,15 +26,28 @@
 
 (defn- update-settings-last-updated-value-in-db!
   "Simulate a different instance updating the value of `settings-last-updated` in the DB by updating its value without
-  updating our locally cached value.."
+  updating our locally cached value.
+
+  Written raw, and to both columns, exactly as
+  [[metabase.settings.models.setting.cache/update-settings-last-updated!]] writes them -- through `:model/Setting` the
+  query below would end up inside the JSON envelope rather than being evaluated."
   []
-  (t2/update! :model/Setting {:key setting.cache/settings-last-updated-key}
-              {:value [:raw (case (mdb/db-type)
-                              ;; make it one second in the future so we don't end up getting an exact match when we try to test
-                              ;; to see if things update below
-                              :h2       "cast(dateadd('second', 1, current_timestamp) AS text)"
-                              :mysql    "cast((current_timestamp + interval 1 second) AS char)"
-                              :postgres "cast((current_timestamp + interval '1 second') AS text)")]}))
+  (let [ts (-> (t2/query-one
+                {:select [[(let [db-type          (mdb/db-type)
+                                 now-form         (h2x/current-datetime-honeysql-form db-type)
+                                 target-cast-type (case db-type
+                                                    (:h2 :postgres) :text
+                                                    :mysql          :char)]
+                             [:cast
+                              ;; make it one second in the future so we don't end up getting an exact match when we try
+                              ;; to test to see if things update below
+                              (h2x/add-interval-honeysql-form db-type now-form 1 :second)
+                              target-cast-type])
+                           :timestamp]]})
+               :timestamp)]
+    (t2/update! :setting {:key setting.cache/settings-last-updated-key}
+                {:value          ts
+                 :value_with_aad (encryption/maybe-encrypt ts {:aad (mdb.setting/setting-aad setting.cache/settings-last-updated-key)})})))
 
 (defn- simulate-another-instance-updating-setting! [setting-name new-value]
   (if new-value
@@ -49,10 +65,8 @@
     (setting-test/clear-settings-last-updated-value-in-db!)
     (setting-test/toucan-name! "Bird Can")
     (is (string? (setting-test/settings-last-updated-value-in-db)))
-
     (testing "...and is the value updated in the cache as well?"
       (is (string? (settings-last-updated-value-in-cache))))
-
     (testing "..and if I update it again, will the value be updated?"
       (let [first-value (setting-test/settings-last-updated-value-in-db)]
         ;; MySQL only has the resolution of one second on the timestamps here so we should wait that long to make sure
@@ -68,13 +82,11 @@
   (testing "If there is no cache, it should be considered out of date!"
     (clear-cache!)
     (#'setting.cache/cache-out-of-date?))
-
   (testing "But if I set a setting, it should cause the cache to be populated, and be up-to-date"
     (clear-cache!)
     (setting-test/toucan-name! "Reggae Toucan")
     (is (= false
            (#'setting.cache/cache-out-of-date?))))
-
   (testing "If another instance updates a Setting, `cache-out-of-date?` should return `true` based on DB comparisons..."
     (clear-cache!)
     (setting-test/toucan-name! "Reggae Toucan")

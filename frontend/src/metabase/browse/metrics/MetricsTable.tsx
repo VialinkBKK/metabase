@@ -1,50 +1,44 @@
+import cx from "classnames";
 import { type MouseEvent, useCallback, useMemo, useState } from "react";
-import { push } from "react-router-redux";
 import { c, t } from "ttag";
 
 import {
   useCreateBookmarkMutation,
   useDeleteBookmarkMutation,
 } from "metabase/api";
-import { getCollectionName } from "metabase/collections/utils";
+import { useSetArchive } from "metabase/archive/hooks";
+import { getCollectionName } from "metabase/common/collections/utils";
 import { EllipsifiedCollectionPath } from "metabase/common/components/EllipsifiedPath/EllipsifiedCollectionPath";
-import EntityItem from "metabase/common/components/EntityItem";
+import { EntityItemName } from "metabase/common/components/EntityItemName";
 import { SortableColumnHeader } from "metabase/common/components/ItemsTable/BaseItemsTable";
+import { Columns } from "metabase/common/components/ItemsTable/Columns";
 import {
   ColumnHeader,
   ItemNameCell,
-  MaybeItemLink,
   TBody,
   Table,
   TableColumn,
-} from "metabase/common/components/ItemsTable/BaseItemsTable.styled";
-import { Columns } from "metabase/common/components/ItemsTable/Columns";
+} from "metabase/common/components/ItemsTable/TableElements";
 import type { ResponsiveProps } from "metabase/common/components/ItemsTable/utils";
+import { Link } from "metabase/common/components/Link";
 import { MarkdownPreview } from "metabase/common/components/MarkdownPreview";
-import Bookmarks from "metabase/entities/bookmarks";
-import Questions from "metabase/entities/questions";
-import { useDispatch } from "metabase/lib/redux";
-import * as Urls from "metabase/lib/urls";
+import CS from "metabase/css/core/index.css";
+import { useNavigate } from "metabase/router";
 import {
-  Button,
+  ActionIcon,
   FixedSizeIcon,
   Flex,
   Icon,
-  type IconName,
   Menu,
   Repeat,
   Skeleton,
 } from "metabase/ui";
-import { SortDirection, type SortingOptions } from "metabase-types/api/sorting";
+import * as Urls from "metabase/urls";
+import type { IconName, SortingOptions } from "metabase-types/api";
 
-import {
-  Cell,
-  CollectionLink,
-  CollectionTableCell,
-  NameColumn,
-  TableRow,
-} from "../components/BrowseTable.styled";
+import BrowseTableS from "../components/BrowseTable.module.css";
 
+import { trackMetricBookmarked } from "./analytics";
 import type { MetricResult, SortColumn } from "./types";
 import { getMetricDescription, sortMetrics } from "./utils";
 
@@ -55,31 +49,15 @@ type MetricsTableProps = {
 
 const DEFAULT_SORTING_OPTIONS: SortingOptions<SortColumn> = {
   sort_column: "name",
-  sort_direction: SortDirection.Asc,
-};
-
-export const itemsTableContainerName = "ItemsTableContainer";
-
-const sharedProps = {
-  containerName: itemsTableContainerName,
-};
-
-const nameProps = {
-  ...sharedProps,
+  sort_direction: "asc",
 };
 
 const descriptionProps: ResponsiveProps = {
-  ...sharedProps,
   hideAtContainerBreakpoint: "md",
 };
 
 const collectionProps: ResponsiveProps = {
-  ...sharedProps,
   hideAtContainerBreakpoint: "sm",
-};
-
-const menuProps = {
-  ...sharedProps,
 };
 
 const DOTMENU_WIDTH = 34;
@@ -102,10 +80,10 @@ export function MetricsTable({
     <Table aria-label={skeleton ? undefined : t`Table of metrics`}>
       <colgroup>
         {/* <col> for Name column */}
-        <NameColumn {...nameProps} />
+        <col className={BrowseTableS.nameColumn} />
         <TableColumn {...collectionProps} width={`${collectionWidth}%`} />
         <TableColumn {...descriptionProps} width={`${descriptionWidth}%`} />
-        <TableColumn {...menuProps} width={DOTMENU_WIDTH} />
+        <TableColumn width={DOTMENU_WIDTH} />
         <Columns.RightEdge.Col />
       </colgroup>
       <thead>
@@ -114,7 +92,6 @@ export function MetricsTable({
             name="name"
             sortingOptions={sortingOptions}
             onSortingOptionsChange={handleSortingOptionsChange}
-            {...nameProps}
             style={{ paddingInlineStart: ".625rem" }}
             columnHeaderProps={{
               style: { paddingInlineEnd: ".5rem" },
@@ -172,7 +149,7 @@ export function MetricsTable({
 }
 
 function MetricRow({ metric }: { metric?: MetricResult }) {
-  const dispatch = useDispatch();
+  const navigate = useNavigate();
 
   const handleClick = useCallback(
     (event: MouseEvent) => {
@@ -188,7 +165,7 @@ function MetricRow({ metric }: { metric?: MetricResult }) {
       }
 
       const { id, name } = metric;
-      const url = Urls.metric({ id, name });
+      const url = Urls.metric({ id, name, type: "metric" });
       const subpathSafeUrl = Urls.getSubpathSafeUrl(url);
 
       // TODO: metabase/metabse#47713
@@ -200,20 +177,23 @@ function MetricRow({ metric }: { metric?: MetricResult }) {
       if ((event.ctrlKey || event.metaKey) && event.button === 0) {
         Urls.openInNewTab(subpathSafeUrl);
       } else {
-        dispatch(push(url));
+        navigate(url);
       }
     },
-    [metric, dispatch],
+    [metric, navigate],
   );
 
   return (
-    <TableRow onClick={handleClick}>
+    <tr
+      className={metric ? BrowseTableS.tableRow : BrowseTableS.tableRowSkeleton}
+      onClick={handleClick}
+    >
       <NameCell metric={metric} />
       <CollectionCell metric={metric} />
       <DescriptionCell metric={metric} />
       <MenuCell metric={metric} />
       <Columns.RightEdge.Cell />
-    </TableRow>
+    </tr>
   );
 }
 
@@ -231,34 +211,25 @@ function preventDefault(event: MouseEvent) {
 
 function NameCell({ metric }: { metric?: MetricResult }) {
   const headingId = `metric-${metric?.id ?? "dummy"}-heading`;
-
   return (
-    <ItemNameCell
-      data-testid="metric-name"
-      aria-labelledby={headingId}
-      {...nameProps}
-    >
-      <MaybeItemLink
-        to={
-          metric ? Urls.metric({ id: metric.id, name: metric.name }) : undefined
-        }
-        style={{
-          // To align the icons with "Name" in the <th>
-          paddingInlineStart: "1.4rem",
-          paddingInlineEnd: ".5rem",
-        }}
-        onClick={preventDefault}
-      >
+    <ItemNameCell data-testid="metric-name" aria-labelledby={headingId}>
+      <Flex align="center" gap="0.5rem" ps="1.4rem" pe="0.5rem">
         {metric ? (
-          <EntityItem.Name
-            name={metric?.name || ""}
-            variant="list"
-            id={headingId}
-          />
+          <Link
+            className={CS.overflowHidden}
+            to={Urls.metric({
+              id: metric.id,
+              name: metric.name,
+              type: "metric",
+            })}
+            onClick={preventDefault}
+          >
+            <EntityItemName name={metric.name} id={headingId} />
+          </Link>
         ) : (
           <SkeletonText />
         )}
-      </MaybeItemLink>
+      </Flex>
     </ItemNameCell>
   );
 }
@@ -281,27 +252,28 @@ function CollectionCell({ metric }: { metric?: MetricResult }) {
   );
 
   return (
-    <CollectionTableCell
+    <td
+      className={cx(BrowseTableS.collectionCell, BrowseTableS.hideAtSm)}
       data-testid={`path-for-collection: ${collectionName}`}
-      {...collectionProps}
     >
       {metric?.collection ? (
-        <CollectionLink
+        <Link
+          className={BrowseTableS.collectionLink}
           to={Urls.collection(metric.collection)}
           onClick={stopPropagation}
         >
           {content}
-        </CollectionLink>
+        </Link>
       ) : (
         content
       )}
-    </CollectionTableCell>
+    </td>
   );
 }
 
 function DescriptionCell({ metric }: { metric?: MetricResult }) {
   return (
-    <Cell {...descriptionProps}>
+    <td className={cx(BrowseTableS.cell, BrowseTableS.hideAtMd)}>
       {metric ? (
         <MarkdownPreview
           lineClamp={12}
@@ -313,7 +285,7 @@ function DescriptionCell({ metric }: { metric?: MetricResult }) {
       ) : (
         <SkeletonText />
       )}
-    </Cell>
+    </td>
   );
 }
 
@@ -327,7 +299,8 @@ type MetricAction = {
 function MenuCell({ metric }: { metric?: MetricResult }) {
   const [createBookmark] = useCreateBookmarkMutation();
   const [deleteBookmark] = useDeleteBookmarkMutation();
-  const dispatch = useDispatch();
+  const navigate = useNavigate();
+  const archive = useSetArchive();
 
   const actions = useMemo(() => {
     if (!metric) {
@@ -346,8 +319,6 @@ function MenuCell({ metric }: { metric?: MetricResult }) {
             id: metric.id,
             type: "card",
           });
-
-          dispatch(Bookmarks.actions.invalidateLists());
         },
       });
     } else {
@@ -360,7 +331,8 @@ function MenuCell({ metric }: { metric?: MetricResult }) {
             id: metric.id,
             type: "card",
           });
-          dispatch(Bookmarks.actions.invalidateLists());
+
+          trackMetricBookmarked();
         },
       });
     }
@@ -371,7 +343,7 @@ function MenuCell({ metric }: { metric?: MetricResult }) {
         title: t`Open collection`,
         icon: "folder",
         action() {
-          dispatch(push(Urls.collection(metric.collection)));
+          navigate(Urls.collection(metric.collection));
         },
       });
     }
@@ -382,32 +354,25 @@ function MenuCell({ metric }: { metric?: MetricResult }) {
         title: t`Move to trash`,
         icon: "trash",
         action() {
-          dispatch(
-            Questions.actions.setArchived(
-              { id: metric.id, model: "metric" },
-              true,
-            ),
-          );
+          archive({ id: metric.id, model: "metric" }, true);
         },
       });
     }
 
     return actions;
-  }, [metric, createBookmark, deleteBookmark, dispatch]);
+  }, [metric, createBookmark, deleteBookmark, navigate, archive]);
 
   return (
-    <Cell onClick={stopPropagation} style={{ padding: 0 }}>
+    <td
+      className={BrowseTableS.cell}
+      onClick={stopPropagation}
+      style={{ padding: 0 }}
+    >
       <Menu position="bottom-end">
         <Menu.Target>
-          <Button
-            size="xs"
-            variant="subtle"
-            px="sm"
-            aria-label={t`Metric options`}
-            c="text-dark"
-          >
+          <ActionIcon variant="subtle" size="sm" aria-label={t`Metric options`}>
             <Icon name="ellipsis" />
-          </Button>
+          </ActionIcon>
         </Menu.Target>
         <Menu.Dropdown>
           {actions.map((action) => (
@@ -421,6 +386,6 @@ function MenuCell({ metric }: { metric?: MetricResult }) {
           ))}
         </Menu.Dropdown>
       </Menu>
-    </Cell>
+    </td>
   );
 }

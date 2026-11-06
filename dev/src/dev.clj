@@ -51,6 +51,8 @@
   "Put everything needed for REPL development within easy reach"
   (:require
    [clojure.core.async :as a]
+   [clojure.core.memoize :as memoize]
+   [clojure.main]
    [clojure.string :as str]
    [clojure.test]
    [dev.debug-qp :as debug-qp]
@@ -78,12 +80,12 @@
    [metabase.query-processor.compile :as qp.compile]
    [metabase.query-processor.timezone :as qp.timezone]
    [metabase.server.core :as server]
-   [metabase.server.test-handler :as server.test-handler]
    [metabase.settings.core :as setting]
    [metabase.sync.core :as sync]
    [metabase.test :as mt]
    [metabase.test-runner]
    [metabase.test.data.impl :as data.impl]
+   [metabase.test.server.handler :as test.server.handler]
    [metabase.util :as u]
    [metabase.util.log :as log]
    [methodical.core :as methodical]
@@ -100,7 +102,10 @@
   model-tracking/keep-me
   dev.h2/keep-me)
 
-#_:clj-kondo/ignore
+(apply require clojure.main/repl-requires)
+
+;; REPL spy helper; tap> is the point
+#_{:clj-kondo/ignore [:discouraged-var :missing-docstring]}
 (defn tap>-spy [x]
   (doto x tap>))
 
@@ -154,7 +159,6 @@
   (let [h2-dbs (t2/select :model/Database :engine :h2)
         in-memory? (fn [db] (some-> db :details :db (str/starts-with? "mem:")))
         can-connect? (fn [db]
-                       #_:clj-kondo/ignore
                        (binding [driver.settings/*allow-testing-h2-connections* true]
                          (try
                            (driver/can-connect? :h2 (:details db))
@@ -176,7 +180,7 @@
 (defn start!
   "Start Metabase"
   []
-  (server/start-web-server! (server.test-handler/test-handler))
+  (server/start-web-server! (test.server.handler/test-handler))
   (init!)
   (when config/is-dev?
     (prune-deleted-inmem-databases!)
@@ -345,7 +349,9 @@
     (do
       ;; prevent things like dereferencing metabase.api.common/*current-user-permissions-set* from triggering the check
       ;; by calling `next-method` *twice*. To reduce the performance impact, just call it with the first instance.
-      (maybe-realize (next-method model strategy k [(first instances)]))
+      ;; we do this for each model because e.g. we may have one `:RootCollection` and several `:Collection`s.
+      (doseq [[_instance-model instances] (group-by t2/model instances)]
+        (maybe-realize (next-method model strategy k [(first instances)])))
       ;; Now we can actually run the hydration with the full set of instances and make sure no more DB calls happened.
       (t2/with-call-count [call-count]
         (let [res (maybe-realize (next-method model strategy k instances))]
@@ -360,10 +366,9 @@
   []
   (binding [t2.connection/*current-connectable* nil]
     (or (t2/select-one :model/Database :name "Application Database")
-        #_:clj-kondo/ignore
-        (let [details (#'metabase.app-db.env/broken-out-details
+        (let [details (#'mdb.env/broken-out-details
                        (mdb/db-type)
-                       @#'metabase.app-db.env/env)
+                       @#'mdb.env/env)
               app-db  (first (t2/insert-returning-instances! :model/Database
                                                              {:name    "Application Database"
                                                               :engine  (mdb/db-type)
@@ -387,7 +392,8 @@
   [form]
   (hashp/p* form))
 
-#_:clj-kondo/ignore
+;; pipeline tap helper; calling tap> is the point
+#_{:clj-kondo/ignore [:discouraged-var]}
 (defn tap
   "#tap, but to use in pipelines like `(-> 1 inc dev/tap prn inc)`."
   [form]
@@ -462,3 +468,9 @@
   (mt/initialize-if-needed! :test-users)
   ;; seed test db
   (mt/id))
+
+(defn reset-static!
+  "Reset static and template caches to pick up new js"
+  []
+  ((requiring-resolve 'stencil.loader/invalidate-cache))
+  (memoize/memo-clear! @(requiring-resolve 'metabase.server.routes.index/load-inline-js)))

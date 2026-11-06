@@ -12,14 +12,44 @@ type ResponseInfo = {
 export async function findRequests(
   method: "PUT" | "POST" | "GET" | "DELETE",
 ): Promise<ResponseInfo[]> {
-  const calls = fetchMock.calls();
-  const data = calls.filter((call) => call[1]?.method === method) ?? [];
+  // Ensure all async call history is complete
+  await fetchMock.callHistory.flush();
 
-  const reqs = data.map(async ([url, details]) => {
-    const body = ((await details?.body) as string) ?? "{}";
+  const calls = fetchMock.callHistory.calls();
+  const filteredCalls = calls.filter((call) => call.request?.method === method);
 
-    return { url, body: JSON.parse(body ?? "{}") };
-  });
+  return Promise.all(
+    filteredCalls.map(async (call) => {
+      let bodyText = "";
 
-  return Promise.all(reqs);
+      // Try to get body from options first, then from request
+      if (call.options?.body) {
+        bodyText = call.options.body.toString();
+      } else if (call.request?.body && !call.request.bodyUsed) {
+        bodyText = await call.request.clone().text();
+      }
+
+      return {
+        url: call.url || "",
+        body: bodyText ? JSON.parse(bodyText) : {},
+      };
+    }),
+  );
+}
+
+/**
+ * Returns the bodies of the `method` requests whose URL ends with
+ * `urlSuffix`, in the order they were sent.
+ */
+export async function findRequestBodies({
+  method,
+  urlSuffix,
+}: {
+  method: Parameters<typeof findRequests>[0];
+  urlSuffix: string;
+}): Promise<unknown[]> {
+  const requests = await findRequests(method);
+  return requests
+    .filter(({ url }) => url.endsWith(urlSuffix))
+    .map(({ body }): unknown => body);
 }

@@ -12,7 +12,7 @@ While tables are useful for looking up information or finding specific numbers, 
 
 ## Visualize query results
 
-The query builder will automatically select an appropriate chart to visual your results. With native queries, however, you'll need to manually select a chart type.
+The query builder will automatically select an appropriate chart to visualize your results. With native queries, however, you'll need to manually select a chart type.
 
 ### Visualizing questions in the query builder
 
@@ -36,7 +36,7 @@ To change how the answer to your question is displayed, click on the **Visualiza
 
 ![Visualization options](../images/VisualizeChoices.png)
 
-If a particular visualization doesn’t really make sense for your answer, that option will appear in the "Other charts" section. You can still select one of these other charts, though you might need to fiddle with the chart options to make the chart work with your data.
+If a particular visualization doesn't make sense for your answer, that option will appear in the "More charts" section. You can still select one of these other charts, though you might need to fiddle with the chart options to make the chart work with your data.
 
 Not sure which visualization type to use? Check out [Which chart should you use?](https://www.metabase.com/learn/metabase-basics/querying-and-dashboards/visualization/chart-guide)
 
@@ -58,9 +58,15 @@ Each visualization type has its own advanced options. To change the settings for
 
 ![Bar chart](../images/bar.png)
 
+## Box plots
+
+[Box plots](./box-plot.md) show the distribution of numeric data, displaying the median, quartiles, and outliers for each group.
+
+![Box plot](../images/box-plot.png)
+
 ## Combo charts
 
-[Combo charts](./combo-chart.md) let you combine bars and lines (or areas) on the same chart.
+[Combo charts](./line-bar-and-area-charts.md#combo-charts) let you combine bars and lines (or areas) on the same chart.
 
 ![Line + bar](../images/combo-chart.png)
 
@@ -84,7 +90,7 @@ The [Detail](./detail.md) visualization shows a single result record (row) in an
 
 ## Line charts
 
-[Line charts](./line-bar-and-area-charts.md) are best for displaying the trend of a number over time, especially when you have lots of x-axis values. For more, check out our [Guide to line charts](https://www.metabase.com/learn/metabase-basics/querying-and-dashboards/visualization/line-charts) and [Time series analysis](https://www.metabase.com/learn/metabase-basics/querying-and-dashboards/time-series) tutorials.
+[Line charts](./line-bar-and-area-charts.md) are best for displaying the trend of a number over time, especially when you have lots of x-axis values. For more, check out our [Time series analysis](https://www.metabase.com/learn/metabase-basics/querying-and-dashboards/time-series) tutorial.
 
 ![Trend lines](../images/trend-lines.png)
 
@@ -110,9 +116,15 @@ A [sunburst chart](./pie-or-donut-chart.md) is a pie chart with more than one ri
 
 ## Pivot tables
 
-[Pivot tables](./pivot-table.md) allow you swap rows and columns, group data, and include subtotals in your table. You can group one or more metrics by one or more dimensions.
+[Pivot tables](./pivot-table.md) allow you to swap rows and columns, group data, and include subtotals in your table. You can group one or more metrics by one or more dimensions.
 
 ![Pivot table options](../images/pivot-table-options.png)
+
+## Treemaps
+
+[Treemaps](./treemap.md) display hierarchical data as nested rectangles, sized by a metric. Use them to break a total down across one or two nested categorical dimensions.
+
+![Treemap](../images/treemap.png)
 
 ## Progress bars
 
@@ -162,6 +174,10 @@ If you have a bar chart like Count of Users by Age, where the x-axis is a number
 
 ![Scatter](../images/scatter.png)
 
+## Custom visualizations
+
+On [Pro and Enterprise plans](https://www.metabase.com/pricing), admins can add [custom visualizations](./custom.md): chart types you build with the Custom Visualizations SDK and upload to Metabase. Once a custom visualization is installed, it shows up in the visualization picker alongside the built-in charts.
+
 ## Styling and formatting data in charts
 
 ![Chart formatting options](../images/chart-formatting-options.png)
@@ -170,10 +186,11 @@ You can access formatting options for the columns used in a chart. Just open the
 
 Options differ depending on the chart, and can include settings for the chart's data, its display, and its axes.
 
-See also [Formatting defaults](../../data-modeling/formatting.md).
+See also [Formatting defaults](../../data-modeling/metadata/formatting.md).
 
 ## Further reading
 
 - [Charts with multiple series](../../dashboards/multiple-series.md)
+- [Custom visualizations](./custom.md)
 - [Appearance](../../configuring-metabase/appearance.md)
-- [BI dashboard best practices](https://www.metabase.com/learn/metabase-basics/querying-and-dashboards/dashboards/bi-dashboard-best-practices.html)
+- [BI dashboard best practices](https://www.metabase.com/learn/metabase-basics/querying-and-dashboards/dashboards/bi-dashboard-best-practices)

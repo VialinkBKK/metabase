@@ -1,13 +1,17 @@
+;; grandfathered two-segment ns; deps.edn aliases invoke metabase.test-runner/find-and-run-tests-cli
 #_{:clj-kondo/ignore [:metabase/namespace-name]}
 (ns metabase.test-runner
   "The only purpose of this namespace is to make sure all of the other stuff below gets loaded."
   (:require
+   [clojure.edn :as edn]
    [clojure.java.classpath :as classpath]
    [clojure.java.io :as io]
    [clojure.set :as set]
    [clojure.string :as str]
+   [hooks.common.modules :as hooks.modules]
    [humane-are.core :as humane-are]
    [mb.hawk.core :as hawk]
+   [metabase.analytics.core :as analytics.core]
    [metabase.config.core :as config]
    [metabase.core.bootstrap]
    [metabase.test-runner.assert-exprs]
@@ -87,20 +91,56 @@
    "test_config"
    "test_resources"])
 
+;; snowflake and bigquery tests are very unreliable; let's bypass an additional
+;; potential source of unreliability by running tests without any parallelism.
+(def ^:private non-parallel-drivers #{:snowflake :bigquery-cloud-sdk})
+
 (defn- default-options []
   {:namespace-pattern   #"^(?:(?:metabase.*)|(?:hooks\..*))" ; anything starting with `metabase*` (including `metabase-enterprise`) or `hooks.*`
    :exclude-directories excluded-directories
-   :test-warn-time      3000})
+   :test-warn-time      60000
+   :multithread?        (if (empty? (set/intersection (tx.env/test-drivers)
+                                                      non-parallel-drivers))
+                          :vars
+                          false)})
+
+(defn module-folders
+  [modules]
+  (let [config (-> (slurp ".clj-kondo/config/modules/config.edn") edn/read-string :metabase/modules)]
+    (for [m modules
+          :let [ns-prefix (hooks.modules/module-ns-prefix config m)]]
+      (str (when (str/starts-with? ns-prefix "metabase-enterprise.") "enterprise/backend/")
+           "test/"
+           (-> ns-prefix (str/replace "." "/") (str/replace "-" "_"))))))
+
+(defn parse-options
+  [options]
+  (let [base (merge (default-options) options)]
+    (cond-> base
+      (or (:modules options) (:module options))
+      (-> (assoc :only (let [modules (cond-> #{}
+                                       (:module options) (conj (:module options))
+                                       (:modules options) (into (:modules options)))]
+                         (module-folders modules)))
+          (dissoc :modules)))))
+
+(comment
+  (parse-options {:modules '[sql-parsing]})
+  (parse-options {:module 'sql-parsing}))
 
 (defn find-tests
   "Find all tests, in case you wish to run them yourself."
   ([]
    (find-tests {}))
   ([options]
-   (hawk/find-tests-with-options (merge (default-options) options))))
+   (hawk/find-tests-with-options (parse-options options))))
 
+;; runs once at runner startup before any tests execute, so the thread-safety naming rule is moot
+#_{:clj-kondo/ignore [:metabase/test-helpers-use-non-thread-safe-functions]}
 (defn- initialize-all-fixtures []
   (let [steps (initialize/all-components)]
+    (analytics.core/setup!)
+    (log/info "Initialized prometheus collector")
     (u/with-timer-ms [duration-ms]
       (doseq [init-step steps]
         (fixtures/initialize init-step))
@@ -110,10 +150,10 @@
   "Find and run tests from the REPL."
   [options]
   (initialize-all-fixtures)
-  (hawk/find-and-run-tests-repl (merge (default-options) options)))
+  (hawk/find-and-run-tests-repl (parse-options options)))
 
 (defn find-and-run-tests-cli
   "Entrypoint for `clojure -X:test`."
   [options]
   (initialize-all-fixtures)
-  (hawk/find-and-run-tests-cli (merge (default-options) options)))
+  (hawk/find-and-run-tests-cli (parse-options options)))

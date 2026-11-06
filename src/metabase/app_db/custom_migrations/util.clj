@@ -2,12 +2,15 @@
   (:require
    [clojurewerkz.quartzite.scheduler :as qs]
    [metabase.app-db.connection :as mdb.connection]
-   [metabase.classloader.core :as classloader]
-   [metabase.task.bootstrap]))
+   [metabase.app-db.quartz]
+   [metabase.classloader.core :as classloader]))
+
+(set! *warn-on-reflection* true)
 
 (defn- set-jdbc-backend-properties! []
-  (metabase.task.bootstrap/set-jdbc-backend-properties! (mdb.connection/db-type)))
+  (metabase.app-db.quartz/set-jdbc-backend-properties! (mdb.connection/db-type)))
 
+#_{:clj-kondo/ignore [:metabase/discourage-dynamic-vars]}
 (def ^:dynamic *allow-temp-scheduling*
   "If true, the scheduler will be started temporarily for migrations that require it. If false, migrations that use `do-with-temp-schedule` will be a no-op."
   true)
@@ -27,10 +30,21 @@
   (when *allow-temp-scheduling*
     (classloader/the-classloader)
     (set-jdbc-backend-properties!)
+    ;; quartz.properties sets acquireTriggersWithinLock=true to prevent duplicate trigger firing in
+    ;; multi-pod clusters (GDGT-1790). However, the temp migration scheduler is single-instance and
+    ;; doesn't need that lock. We must disable it here because on a fresh DB, Quartz's
+    ;; StdRowLockSemaphore lazily INSERTs into QRTZ_LOCKS, and if the row already exists (e.g. from a
+    ;; prior migration step), the INSERT fails. On Postgres, a failed INSERT poisons the entire
+    ;; transaction, causing subsequent operations to fail with
+    ;; "current transaction is aborted, commands ignored until end of transaction block".
+    ;; We use a System property override because StdSchedulerFactory merges system props on top of
+    ;; quartz.properties during initialize(), and we clear it immediately after so the main scheduler
+    ;; later picks up the correct `true` value from quartz.properties.
+    (System/setProperty "org.quartz.jobStore.acquireTriggersWithinLock" "false")
     (let [scheduler (qs/initialize)]
+      (System/clearProperty "org.quartz.jobStore.acquireTriggersWithinLock")
       (when (qs/started? scheduler)
         (throw (ex-info "Scheduler is already started, cannot start temporary one" {})))
-
       (qs/start scheduler)
       (f scheduler)
       (qs/shutdown scheduler))))

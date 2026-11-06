@@ -1,18 +1,15 @@
-import { onlyOn } from "@cypress/skip-test";
-
 import { USERS, USER_GROUPS } from "e2e/support/cypress_data";
 import {
-  ORDERS_COUNT_QUESTION_ID,
   ORDERS_DASHBOARD_ID,
   ORDERS_QUESTION_ID,
 } from "e2e/support/cypress_sample_instance_data";
+import { onlyOn } from "e2e/support/helpers/e2e-skip-test-helpers";
 
 const { H } = cy;
 
 const PERMISSIONS = {
   curate: ["admin", "normal", "nodata"],
   view: ["readonly"],
-  no: ["nocollection", "nosql", "none"],
 };
 
 describe(
@@ -37,18 +34,16 @@ describe(
                 H.visitQuestion(ORDERS_QUESTION_ID);
               });
 
-              it("should be able to edit question details (metabase#11719-1)", () => {
+              it("should be able to edit question title and description (metabase#11719-1)", () => {
                 cy.findByTestId("saved-question-header-title")
                   .click()
                   .type("1")
                   .blur();
                 assertRequestNot403("updateQuestion");
-                assertNoPermissionsError();
-                // eslint-disable-next-line no-unscoped-text-selectors -- deprecated usage
+                // eslint-disable-next-line metabase/no-unscoped-text-selectors -- deprecated usage
                 cy.findByText("Orders1");
-              });
+                assertNoPermissionsError();
 
-              it("should be able to edit a question's description", () => {
                 H.questionInfoButton().click();
 
                 cy.findByPlaceholderText("Add description")
@@ -56,10 +51,9 @@ describe(
                   .blur();
 
                 assertRequestNot403("updateQuestion");
-                assertNoPermissionsError();
-
-                // eslint-disable-next-line no-unscoped-text-selectors -- deprecated usage
+                // eslint-disable-next-line metabase/no-unscoped-text-selectors -- deprecated usage
                 cy.findByText("foo");
+                assertNoPermissionsError();
               });
 
               describe("move", () => {
@@ -75,7 +69,7 @@ describe(
                       .should("have.attr", "aria-selected", "false");
                   });
 
-                  moveQuestionTo(/Personal Collection/, user === "admin");
+                  moveQuestionTo(/Personal Collection/);
                   assertRequestNot403("updateQuestion");
 
                   cy.findAllByRole("status")
@@ -102,12 +96,15 @@ describe(
                     H.openQuestionActions();
                     cy.findByTestId("move-button").click();
                     H.entityPickerModal().within(() => {
-                      cy.findByRole("button", {
-                        name: /Orders in a dashboard/,
-                      }).should("exist");
-                      cy.findByRole("button", { name: /Bobby Table/ }).should(
-                        "not.exist",
-                      );
+                      cy.findByText("Recent items").click();
+                      H.entityPickerModalLevel(1).within(() => {
+                        cy.findByRole("link", {
+                          name: /Orders in a dashboard/,
+                        }).should("exist");
+                        cy.findByRole("link", { name: /Bobby Table/ }).should(
+                          "not.exist",
+                        );
+                      });
                     });
                   }
                 });
@@ -118,9 +115,6 @@ describe(
                   H.openQuestionActions();
                   cy.findByTestId("move-button").click();
                   H.entityPickerModal().within(() => {
-                    if (user === "admin") {
-                      cy.findByRole("tab", { name: /Browse/ }).click();
-                    }
                     cy.findByText(/Personal Collection/).click();
                     cy.findByText("New collection").click();
                   });
@@ -137,44 +131,44 @@ describe(
                   cy.get("header").findByText(NEW_COLLECTION_NAME);
                 });
 
-                it("should be able to move models", () => {
-                  // TODO: Currently nodata users can't turn a question into a model
-                  cy.skipOn(user === "nodata");
+                // TODO: Currently nodata users can't turn a question into a model
+                onlyOn(user !== "nodata", () => {
+                  it("should be able to move models", () => {
+                    turnIntoModel();
 
-                  turnIntoModel();
+                    H.openNavigationSidebar();
+                    H.navigationSidebar().within(() => {
+                      // Highlight "Our analytics"
+                      cy.findByText("Our analytics")
+                        .parents("li")
+                        .should("have.attr", "aria-selected", "true");
+                      cy.findByText("Your personal collection")
+                        .parents("li")
+                        .should("have.attr", "aria-selected", "false");
+                    });
 
-                  H.openNavigationSidebar();
-                  H.navigationSidebar().within(() => {
-                    // Highlight "Our analytics"
-                    cy.findByText("Our analytics")
-                      .parents("li")
-                      .should("have.attr", "aria-selected", "true");
-                    cy.findByText("Your personal collection")
-                      .parents("li")
-                      .should("have.attr", "aria-selected", "false");
-                  });
+                    moveQuestionTo(/Personal Collection/);
+                    assertRequestNot403("updateQuestion");
 
-                  moveQuestionTo(/Personal Collection/, user === "admin");
-                  assertRequestNot403("updateQuestion");
+                    cy.findAllByRole("status")
+                      .contains(
+                        `Model moved to ${H.getPersonalCollectionName(
+                          USERS[user],
+                        )}`,
+                      )
+                      .should("exist");
+                    assertNoPermissionsError();
+                    cy.findAllByRole("gridcell").contains("37.65");
 
-                  cy.findAllByRole("status")
-                    .contains(
-                      `Model moved to ${H.getPersonalCollectionName(
-                        USERS[user],
-                      )}`,
-                    )
-                    .should("exist");
-                  assertNoPermissionsError();
-                  cy.findAllByRole("gridcell").contains("37.65");
-
-                  H.navigationSidebar().within(() => {
-                    // Highlight "Your personal collection" after move
-                    cy.findByText("Our analytics")
-                      .parents("li")
-                      .should("have.attr", "aria-selected", "false");
-                    cy.findByText("Your personal collection")
-                      .parents("li")
-                      .should("have.attr", "aria-selected", "true");
+                    H.navigationSidebar().within(() => {
+                      // Highlight "Your personal collection" after move
+                      cy.findByText("Our analytics")
+                        .parents("li")
+                        .should("have.attr", "aria-selected", "false");
+                      cy.findByText("Your personal collection")
+                        .parents("li")
+                        .should("have.attr", "aria-selected", "true");
+                    });
                   });
                 });
               });
@@ -187,6 +181,7 @@ describe(
                   H.entityPickerModal()
                     .as("modal")
                     .within(() => {
+                      cy.findByText("Our analytics").click();
                       cy.findByText("Orders in a dashboard").click();
                       cy.button("Select").click();
                     });
@@ -237,7 +232,7 @@ describe(
 
                   cy.log("Move the question to a personal collection");
 
-                  moveQuestionTo(/Personal Collection/, true);
+                  moveQuestionTo(/Personal Collection/);
 
                   cy.log("assert public collections are not visible");
                   H.openQuestionActions();
@@ -248,16 +243,12 @@ describe(
                       "be.visible",
                     );
 
-                    H.tabsShouldBe("Recents", ["Recents", "Dashboards"]);
-
-                    cy.findByRole("button", {
+                    cy.findByRole("link", {
                       name: /Personal Dashboard/,
                     }).should("exist");
-                    cy.findByRole("button", {
+                    cy.findByRole("link", {
                       name: /Orders in a dashboard/,
                     }).should("not.exist");
-
-                    H.entityPickerModalTab("Dashboards").click();
 
                     cy.findByText(/'s personal collection/i).should(
                       "be.visible",
@@ -267,7 +258,7 @@ describe(
                   });
 
                   cy.log("Move the question to the root collection");
-                  moveQuestionTo("Our analytics", true);
+                  moveQuestionTo("Our analytics");
 
                   cy.log("assert all collections are visible");
                   H.openQuestionActions();
@@ -276,44 +267,24 @@ describe(
                     cy.findByText("Add this question to a dashboard").should(
                       "be.visible",
                     );
-
-                    H.tabsShouldBe("Recents", ["Recents", "Dashboards"]);
-
-                    cy.findByRole("button", {
+                    cy.findByText("Recent items").click();
+                    cy.findByRole("link", {
                       name: /Personal Dashboard/,
                     }).should("exist");
-                    cy.findByRole("button", {
+                    cy.findByRole("link", {
                       name: /Orders in a dashboard/,
                     }).should("exist");
 
-                    H.entityPickerModalTab("Dashboards").click();
-
-                    cy.findByText(/'s personal collection/i).should(
-                      "be.visible",
-                    );
-                    cy.findByText(/our analytics/i).should("be.visible");
+                    H.entityPickerModalLevel(0).within(() => {
+                      cy.findByText(/'s personal collection/i).should(
+                        "be.visible",
+                      );
+                      cy.findByText(/our analytics/i).should("be.visible");
+                    });
                   });
                 });
 
                 onlyOn(user === "normal", () => {
-                  it("should preselect the most recently visited dashboard", () => {
-                    H.openQuestionActions();
-                    cy.findByTestId("add-to-dashboard-button").click();
-
-                    findInactivePickerItem("Orders in a dashboard");
-
-                    // before visiting the dashboard, we don't have any history
-                    H.visitDashboard(ORDERS_DASHBOARD_ID);
-                    H.visitQuestion(ORDERS_COUNT_QUESTION_ID);
-
-                    H.openQuestionActions();
-                    cy.findByTestId("add-to-dashboard-button").click();
-
-                    H.entityPickerModalTab("Dashboards").click();
-
-                    findActivePickerItem("Orders in a dashboard");
-                  });
-
                   it("should handle lost access", () => {
                     cy.intercept(
                       "GET",
@@ -334,9 +305,6 @@ describe(
                     cy.findByTestId("add-to-dashboard-button").click();
 
                     cy.wait("@mostRecentlyViewedDashboard");
-                    H.entityPickerModal()
-                      .findByRole("tab", { name: /Dashboards/ })
-                      .click();
 
                     findActivePickerItem("Orders in a dashboard");
 
@@ -358,7 +326,11 @@ describe(
 
                     cy.wait("@mostRecentlyViewedDashboard");
 
-                    findInactivePickerItem("Orders in a dashboard");
+                    H.entityPickerModalItem(1, "Orders in a dashboard").should(
+                      "have.attr",
+                      "data-disabled",
+                      "true",
+                    );
                   });
                 });
               });
@@ -372,13 +344,39 @@ describe(
                 H.visitQuestion(ORDERS_QUESTION_ID);
               });
 
-              it("should not be offered to add question to dashboard inside a collection they have `read` access to", () => {
+              it("should not offer to update, clone, or add the question to a dashboard it can't write to", () => {
+                cy.intercept(
+                  "GET",
+                  "/api/activity/most_recently_viewed_dashboard",
+                ).as("mostRecentlyViewedDashboard");
+
+                cy.findByTestId("saved-question-header-title").should(
+                  "be.disabled",
+                );
+                H.questionInfoButton().click();
+                H.sidesheet()
+                  .findByPlaceholderText("No description")
+                  .should("be.disabled");
+                H.sidesheet().findByLabelText("Close").click();
+
                 H.openQuestionActions();
+
+                H.popover().within(() => {
+                  cy.findByTestId("add-to-dashboard-button").should(
+                    "be.visible",
+                  );
+                  cy.findByTestId("move-button").should("not.exist");
+                  cy.findByTestId("clone-button").should("not.exist");
+                  cy.findByTestId("archive-button").should("not.exist");
+                });
+
                 cy.findByTestId("add-to-dashboard-button").click();
+                cy.wait("@mostRecentlyViewedDashboard");
 
                 H.entityPickerModal()
-                  .findByText("First collection")
-                  .should("be.visible");
+                  .findByText(/Orders in a dashboard/)
+                  .closest("a")
+                  .should("have.attr", "data-disabled", "true");
 
                 findInactivePickerItem("Orders in a dashboard");
 
@@ -387,35 +385,8 @@ describe(
                     "Orders in a dashboard{Enter}",
                     { delay: 0 },
                   );
-                  cy.findByText(/weren't any results/).should("be.visible");
+                  cy.findByText(/didn't find anything/).should("be.visible");
                 });
-              });
-
-              it("should not offer a user the ability to update or clone the question", () => {
-                cy.findByTestId("edit-details-button").should("not.exist");
-                cy.findByRole("button", { name: "Add a description" }).should(
-                  "not.exist",
-                );
-
-                H.openQuestionActions();
-
-                H.popover().within(() => {
-                  cy.findByTestId("move-button").should("not.exist");
-                  cy.findByTestId("clone-button").should("not.exist");
-                  cy.findByTestId("archive-button").should("not.exist");
-                });
-
-                // eslint-disable-next-line no-unscoped-text-selectors -- deprecated usage
-                cy.findByText("Revert").should("not.exist");
-              });
-
-              it("should not preselect the most recently visited dashboard", () => {
-                H.openQuestionActions();
-                cy.findByTestId("add-to-dashboard-button").click();
-
-                H.entityPickerModal()
-                  .findByText("Orders in a dashboard")
-                  .should("not.exist");
 
                 // before visiting the dashboard, we don't have any history
                 H.visitDashboard(ORDERS_DASHBOARD_ID);
@@ -423,11 +394,26 @@ describe(
 
                 H.openQuestionActions();
                 cy.findByTestId("add-to-dashboard-button").click();
+                cy.wait("@mostRecentlyViewedDashboard");
 
-                // still no data
                 H.entityPickerModal()
-                  .findByText("Orders in a dashboard")
-                  .should("not.exist");
+                  .findByText(/Orders in a dashboard/)
+                  .closest("a")
+                  .should("have.attr", "data-disabled", "true");
+
+                cy.log("the history is visible but can't be reverted");
+                cy.signInAsAdmin();
+                cy.request("PUT", `/api/card/${ORDERS_QUESTION_ID}`, {
+                  description: "foo",
+                });
+                cy.signIn(user);
+                H.visitQuestion(ORDERS_QUESTION_ID);
+                H.questionInfoButton().click();
+                H.sidesheet().within(() => {
+                  cy.findByRole("tab", { name: "History" }).click();
+                  cy.findByText(/added a description/i).should("be.visible");
+                  cy.findByTestId("question-revert-button").should("not.exist");
+                });
               });
             });
           });
@@ -437,7 +423,57 @@ describe(
   },
 );
 
-H.describeWithSnowplow("send snowplow question events", () => {
+describe("question moving", () => {
+  beforeEach(() => {
+    H.restore();
+    cy.signInAsAdmin();
+    cy.intercept("PUT", `/api/card/${ORDERS_QUESTION_ID}`).as("updateQuestion");
+    H.visitQuestion(ORDERS_QUESTION_ID);
+  });
+
+  it("should move a question between collections, showing an error when the move fails", () => {
+    cy.intercept(
+      { method: "PUT", url: `/api/card/${ORDERS_QUESTION_ID}`, times: 1 },
+      {
+        statusCode: 400,
+        body: { message: "Sorry buddy, only cool kids in this collection" },
+      },
+    ).as("updateQuestionFail");
+
+    H.appBar().findByText("Our analytics").should("be.visible");
+    cy.findByTestId("qb-header-action-panel")
+      .icon("ellipsis")
+      .closest("button")
+      .click();
+    H.popover().findByTestId("move-button").click();
+    H.pickEntity({
+      path: ["Our analytics", "First collection", "Second collection"],
+      select: true,
+    });
+    cy.wait("@updateQuestionFail");
+    H.modal()
+      .findByText("Sorry buddy, only cool kids in this collection")
+      .should("be.visible");
+    H.entityPickerModal().findByLabelText("Close").click();
+
+    H.appBar().findByText("Our analytics").should("be.visible");
+    cy.findByTestId("qb-header-action-panel")
+      .icon("ellipsis")
+      .closest("button")
+      .click();
+    H.popover().findByTestId("move-button").click();
+    H.pickEntity({
+      path: ["Our analytics", "First collection", "Second collection"],
+      select: true,
+    });
+    cy.wait("@updateQuestion").its("response.statusCode").should("eq", 200);
+    cy.findAllByRole("status").contains("Question moved to Second collection");
+    H.appBar().findByText("Second collection").should("be.visible");
+    H.modal().should("not.exist");
+  });
+});
+
+describe("send snowplow question events", () => {
   beforeEach(() => {
     H.restore();
     H.resetSnowplow();
@@ -496,11 +532,10 @@ function findInactivePickerItem(name) {
   });
 }
 
-function moveQuestionTo(newCollectionName, clickTab = false) {
+function moveQuestionTo(newCollectionName) {
   H.openQuestionActions();
   cy.findByTestId("move-button").click();
   H.entityPickerModal().within(() => {
-    clickTab && cy.findByRole("tab", { name: /Collections|Browse/ }).click();
     cy.findByText(newCollectionName).click();
     cy.button("Move").click();
   });

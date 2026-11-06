@@ -1,30 +1,40 @@
 import cx from "classnames";
-import type { PropsWithChildren } from "react";
 
-import CS from "metabase/css/core/index.css";
-import { Group, type GroupProps } from "metabase/ui";
-interface FormFooterProps {
-  hasTopBorder?: boolean;
-  justify?: GroupProps["justify"];
-  className?: string;
-}
+import {
+  Group,
+  type GroupProps,
+  Modal,
+  type ModalFooterProps,
+  useIsInModal,
+} from "metabase/ui";
 
+type FormFooterProps = ModalFooterProps & {
+  /** Applied only outside a modal, where the footer is a right-aligned row. */
+  pageProps?: GroupProps;
+};
+
+/** A form's button row: `Modal.Footer` inside a `Modal`, otherwise a right-aligned row */
 export const FormFooter = ({
-  hasTopBorder,
-  children,
-  justify = "right",
+  pageProps,
   className,
-}: PropsWithChildren<FormFooterProps>) => {
-  const groupProps = hasTopBorder
-    ? {
-        mt: "sm",
-        pt: "lg",
-        className: cx(className, CS.borderTop),
-      }
-    : { className };
+  ...props
+}: FormFooterProps) => {
+  const isInModal = useIsInModal();
+
+  if (isInModal) {
+    return <Modal.Footer className={className} {...props} />;
+  }
+
+  const { className: pageClassName, ...pageGroupProps } = pageProps ?? {};
+
   return (
-    <Group align="center" justify={justify} gap="sm" {...groupProps}>
-      {children}
-    </Group>
+    <Group
+      align="center"
+      justify="right"
+      gap="sm"
+      className={cx(className, pageClassName)}
+      {...pageGroupProps}
+      {...props}
+    />
   );
 };

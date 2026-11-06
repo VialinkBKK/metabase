@@ -1,31 +1,8 @@
 import { createSelector } from "@reduxjs/toolkit";
 
-import { getPlan } from "metabase/common/utils/plan";
+import type { State } from "metabase/redux/store";
+import { getPlan, getSetting } from "metabase/settings";
 import type { TokenStatus, Version } from "metabase-types/api";
-import type { State } from "metabase-types/store";
-
-export const getSettings: <S extends State>(state: S) => GetSettings<S> =
-  createSelector(
-    (state: State) => state.settings,
-    (settings) => settings.values,
-  );
-
-export const getSettingsLoading = createSelector(
-  (state: State) => state.settings,
-  (settings) => settings.loading,
-);
-
-type GetSettings<S extends State> = S["settings"]["values"];
-type GetSettingKey<S extends State> = keyof GetSettings<S>;
-
-export const getSetting = <S extends State, T extends GetSettingKey<S>>(
-  state: S,
-  key: T,
-): GetSettings<S>[T] => {
-  const settings = getSettings(state);
-  const setting = settings[key];
-  return setting;
-};
 
 export const isSsoEnabled = (state: State) =>
   getSetting(state, "ldap-enabled") ||
@@ -45,27 +22,28 @@ export type StorePaths =
   /** redirects to the specific instance storage management page */
   | "account/storage"
   /** EE, self-hosted upsell that communicates back with the instance */
-  | "checkout/upgrade/self-hosted";
+  | "checkout/upgrade/self-hosted"
+  /** transforms add-ons management page */
+  | "account/transforms";
 
-// @deprecated Please use getStoreUrlFromState or useStoreUrl that read the store-url from the state
-export const getStoreUrl = (path: StorePaths = "") => {
-  return `https://store.metabase.com/${path}`;
-};
+const DEFAULT_STORE_URL = "https://store.metabase.com/";
 
-export function getStoreUrlFromState(state: State, path: StorePaths = "") {
-  const storeUrl = getSetting(state, "store-url");
-  if (!storeUrl) {
-    return undefined;
+export function getStoreUrl(state: State, path: StorePaths = "") {
+  try {
+    const storeUrl = getSetting(state, "store-url");
+    const url = new URL(path, storeUrl);
+    return url.toString();
+  } catch {
+    return DEFAULT_STORE_URL;
   }
-  const url = new URL(path, storeUrl);
-  return url.toString();
 }
 
 export const migrateToCloudGuideUrl = () =>
-  "https://www.metabase.com/cloud/docs/migrate/guide";
+  // eslint-disable-next-line metabase/no-unconditional-metabase-links-render -- Only shown on Cloud during setup, before whitelabeling can be configured
+  "https://www.metabase.com/docs/latest/cloud/migrate/guide";
 
 export const getLearnUrl = (path = "") => {
-  // eslint-disable-next-line no-unconditional-metabase-links-render -- This is the implementation of getLearnUrl()
+  // eslint-disable-next-line metabase/no-unconditional-metabase-links-render -- This is the implementation of getLearnUrl()
   return `https://www.metabase.com/learn/${path}`;
 };
 
@@ -111,12 +89,20 @@ export const getUrlWithUtm = createSelector(
 interface DocsUrlProps {
   page?: string;
   anchor?: string;
+  searchQuery?: string;
   utm?: UtmProps;
 }
 
 export const getDocsUrl = (state: State, props: DocsUrlProps) => {
-  const version = getSetting(state, "version");
-  const url = getDocsUrlForVersion(version, props.page, props.anchor);
+  const url = props.searchQuery
+    ? `https://www.metabase.com/search?${new URLSearchParams({
+        query: props.searchQuery,
+      })}`
+    : getDocsUrlForVersion(
+        getSetting(state, "version"),
+        props.page,
+        props.anchor,
+      );
 
   if (!props.utm) {
     return url;
@@ -124,9 +110,6 @@ export const getDocsUrl = (state: State, props: DocsUrlProps) => {
 
   return getUrlWithUtm(state, { url, ...props.utm });
 };
-
-export const getDocsSearchUrl = (query: Record<string, string>) =>
-  `https://www.metabase.com/search?${new URLSearchParams(query)}`;
 
 export const getDocsUrlForVersion = (
   version: Version | undefined,
@@ -161,7 +144,7 @@ export const getDocsUrlForVersion = (
     anchor = `#${anchor}`;
   }
 
-  // eslint-disable-next-line no-unconditional-metabase-links-render -- This function is only used by this file and "metabase/lib/settings"
+  // eslint-disable-next-line metabase/no-unconditional-metabase-links-render -- This function is only used by this file and "metabase/utils/settings"
   return `https://www.metabase.com/docs/${tag}/${page}${anchor}`;
 };
 
@@ -183,8 +166,7 @@ export const getUpgradeUrl = createSelector(
       utm_content: utmTags.utm_content,
       source_plan: plan,
     };
-    for (const key in searchParams) {
-      const utmValue = searchParams[key as keyof typeof searchParams];
+    for (const [key, utmValue] of Object.entries(searchParams)) {
       if (utmValue) {
         url.searchParams.append(key, utmValue);
       }
@@ -206,3 +188,6 @@ export const getIsPaidPlan = createSelector(
     return tokenStatus != null && tokenStatus.valid;
   },
 );
+
+export const getTokenStatus = (state: State): TokenStatus | null =>
+  getSetting(state, "token-status");

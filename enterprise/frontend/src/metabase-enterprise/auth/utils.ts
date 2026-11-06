@@ -1,5 +1,4 @@
-import { useGetSettingsQuery } from "metabase/api";
-import { hasAnySsoFeature } from "metabase/common/utils/plan";
+import { hasAnySsoFeature, useGetSettingsQuery } from "metabase/settings";
 
 export const getSSOUrl = (siteUrl: string, redirectUrl?: string): string => {
   if (redirectUrl) {
@@ -15,7 +14,8 @@ export function useHasSsoEnabled() {
     settings?.["google-auth-enabled"] ||
     settings?.["ldap-enabled"] ||
     settings?.["saml-enabled"] ||
-    settings?.["jwt-enabled"];
+    settings?.["jwt-enabled"] ||
+    settings?.["oidc-enabled"];
 
   return hasAnySsoProviderEnabled;
 }

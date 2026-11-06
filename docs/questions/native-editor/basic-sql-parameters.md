@@ -7,7 +7,7 @@ summary: Text, number, and date variables let you plug basic values into your SQ
 
 > If you want to filter on a database field in your query, you should prefer using [field filter variables](./sql-parameters.md), which require a different syntax.
 
-Text, number, and date variables let you plug basic values into your SQL code. 
+Text, number, and date variables let you plug basic values into your SQL code.
 
 To add a basic variable to a SQL query, enclose the variable in double braces: `{% raw %}{{variable_name}}{% endraw %}`.
 
@@ -24,7 +24,7 @@ WHERE
 {% endraw %}
 ```
 
-These basic variabless simply plug in the values set by the widget into the placeholder in the code. Basic variables have a different syntax than [field filters](./sql-parameters.md).
+These basic variables simply plug in the values set by the widget into the placeholder in the code. Basic variables have a different syntax than [field filters](./sql-parameters.md).
 
 Here's the [field filter](./field-filters.md) syntax:
 
@@ -67,7 +67,7 @@ If you're writing a native MongoDB query, your query would look more like this, 
 
 ![Basic variable with multiple values](../images/multiple-values.png)
 
-To let people plug multiple values into your variable, you'll need to write the code in such a way that multiple values will make sense when interpolated into your code. The most common way to do this would be to use an `WHERE` clause with `IN`:
+To let people plug multiple values into your variable, you'll need to write the code in such a way that multiple values will make sense when interpolated into your code. The most common way to do this would be to use a `WHERE` clause with `IN`:
 
 ```sql
 {% raw %}

@@ -2,28 +2,38 @@
 import createAsyncCallback from "@loki/create-async-callback";
 import type { StoryContext, StoryFn } from "@storybook/react";
 import { HttpResponse, http } from "msw";
-import { useEffect, useMemo } from "react";
+import { type ComponentType, useEffect, useMemo } from "react";
 import _ from "underscore";
 
-import { getStore } from "__support__/entities-store";
-import { createWaitForResizeToStopDecorator } from "__support__/storybook";
+import { getPublicStore } from "__support__/entities-store";
+import {
+  createMockDashboardState,
+  createMockSettingsState,
+  createMockState,
+} from "__support__/state";
+import {
+  createWaitForChartsDecorator,
+  createWaitForResizeToStopDecorator,
+} from "__support__/storybook";
 import { getNextId } from "__support__/utils";
 import { NumberColumn, StringColumn } from "__support__/visualizations";
-import { Api } from "metabase/api";
 import { DASHBOARD_DISPLAY_ACTIONS } from "metabase/dashboard/components/DashboardHeader/DashboardHeaderButtonRow/constants";
-import { MetabaseReduxProvider } from "metabase/lib/redux";
 import {
   MockDashboardContext,
   type MockDashboardContextProps,
-} from "metabase/public/containers/PublicOrEmbeddedDashboard/mock-context";
-import { publicReducers } from "metabase/reducers-public";
+} from "metabase/dashboard/context/mock-context";
+import { MetabaseReduxProvider } from "metabase/redux";
 import { Box, Card, Popover, Text, Tooltip } from "metabase/ui";
-import { registerVisualization } from "metabase/visualizations";
 import { BarChart } from "metabase/visualizations/visualizations/BarChart";
-import ObjectDetail from "metabase/visualizations/visualizations/ObjectDetail";
-import Table from "metabase/visualizations/visualizations/Table/Table";
+import { ObjectDetail } from "metabase/visualizations/visualizations/ObjectDetail";
+import { Table } from "metabase/visualizations/visualizations/Table/Table";
 import TABLE_RAW_SERIES from "metabase/visualizations/visualizations/Table/stories-data/orders-with-people.json";
-import type { Dashboard, DashboardCard } from "metabase-types/api";
+import { registerVisualization } from "metabase/viz-core";
+import type {
+  Dashboard,
+  DashboardCard,
+  DashboardTab,
+} from "metabase-types/api";
 import {
   createMockCard,
   createMockColumn,
@@ -34,17 +44,10 @@ import {
   createMockDatasetData,
   createMockParameter,
 } from "metabase-types/api/mocks";
-import {
-  createMockDashboardState,
-  createMockSettingsState,
-  createMockState,
-} from "metabase-types/store/mocks";
 
 import { PublicOrEmbeddedDashboardView } from "./PublicOrEmbeddedDashboardView";
 
-// @ts-expect-error: incompatible prop types with registerVisualization
 registerVisualization(Table);
-// @ts-expect-error: incompatible prop types with registerVisualization
 registerVisualization(BarChart);
 
 export default {
@@ -52,8 +55,8 @@ export default {
   component: PublicOrEmbeddedDashboardView,
   decorators: [
     ReduxDecorator,
+    createWaitForChartsDecorator(),
     createWaitForResizeToStopDecorator(),
-    MockIsEmbeddingDecorator,
   ],
   parameters: {
     layout: "fullscreen",
@@ -67,7 +70,8 @@ export default {
   },
 };
 
-function ReduxDecorator(Story: StoryFn, context: StoryContext) {
+function ReduxDecorator(Story: ComponentType, context: StoryContext) {
+  // Unjustified type cast. FIXME
   const dashboard = (context.args.dashboard as Dashboard) ?? createDashboard();
   const initialState = createMockState({
     currentUser: null,
@@ -105,22 +109,12 @@ function ReduxDecorator(Story: StoryFn, context: StoryContext) {
       },
     }),
   });
-  const store = getStore(publicReducers, initialState, [Api.middleware]);
+  const store = getPublicStore(initialState);
   return (
     <MetabaseReduxProvider store={store}>
       <Story />
     </MetabaseReduxProvider>
   );
-}
-
-declare global {
-  interface Window {
-    overrideIsWithinIframe?: boolean;
-  }
-}
-function MockIsEmbeddingDecorator(Story: StoryFn) {
-  window.overrideIsWithinIframe = true;
-  return <Story />;
 }
 
 const DASHBOARD_ID = getNextId();
@@ -134,13 +128,19 @@ const PARAMETER_ID = "param-hex";
 interface CreateDashboardOpts {
   hasScroll?: boolean;
   dashcards?: DashboardCard[];
+  tabs?: DashboardTab[];
 }
-function createDashboard({ hasScroll, dashcards }: CreateDashboardOpts = {}) {
+function createDashboard({
+  hasScroll,
+  dashcards,
+  tabs,
+}: CreateDashboardOpts = {}) {
   return createMockDashboard({
     id: DASHBOARD_ID,
     name: "My dashboard",
     width: "full",
     parameters: [createMockParameter({ id: PARAMETER_ID })],
+    tabs,
     dashcards: dashcards ?? [
       createMockDashboardCard({
         id: DASHCARD_BAR_ID,
@@ -195,6 +195,47 @@ const defaultArgs: Partial<MockDashboardContextProps> = {
   slowCards: {},
   selectedTabId: TAB_ID,
   withFooter: true,
+};
+
+export const NarrowWithManyTabs = {
+  render: Template,
+  args: {
+    ...defaultArgs,
+    titled: false,
+    dashboard: createDashboard({
+      dashcards: [],
+      tabs: [
+        { id: 0, dashboard_id: DASHBOARD_ID, name: "Tab 1" },
+        { id: 1, dashboard_id: DASHBOARD_ID, name: "Tab 2" },
+        { id: 2, dashboard_id: DASHBOARD_ID, name: "Tab 3" },
+        { id: 3, dashboard_id: DASHBOARD_ID, name: "Tab 4" },
+        { id: 4, dashboard_id: DASHBOARD_ID, name: "Tab 5" },
+        { id: 5, dashboard_id: DASHBOARD_ID, name: "Tab 6" },
+        { id: 6, dashboard_id: DASHBOARD_ID, name: "Tab 7" },
+        { id: 7, dashboard_id: DASHBOARD_ID, name: "Tab 8" },
+        { id: 8, dashboard_id: DASHBOARD_ID, name: "Tab 9" },
+        { id: 9, dashboard_id: DASHBOARD_ID, name: "Tab 10" },
+        { id: 10, dashboard_id: DASHBOARD_ID, name: "Tab 11" },
+        { id: 11, dashboard_id: DASHBOARD_ID, name: "Tab 12" },
+        { id: 12, dashboard_id: DASHBOARD_ID, name: "Tab 13" },
+        { id: 13, dashboard_id: DASHBOARD_ID, name: "Tab 14" },
+        { id: 14, dashboard_id: DASHBOARD_ID, name: "Tab 15" },
+        { id: 15, dashboard_id: DASHBOARD_ID, name: "Tab 16" },
+        { id: 16, dashboard_id: DASHBOARD_ID, name: "Tab 17" },
+        { id: 17, dashboard_id: DASHBOARD_ID, name: "Tab 18" },
+      ],
+    }),
+  },
+  decorators: [NarrowDecorator],
+};
+
+export const NarrowWithManyTabsDarkTheme = {
+  render: Template,
+  args: {
+    ...NarrowWithManyTabs.args,
+    theme: "night",
+  },
+  decorators: [NarrowDecorator, DarkBackgroundDecorator],
 };
 
 export const LightThemeDefault = {
@@ -346,7 +387,7 @@ export function ComponentCompatibility() {
     <Box pb="50px">
       <Tooltip
         label={
-          <Text size="sm" c="var(--mb-color-text-primary)">
+          <Text size="sm" c="text-primary">
             Label
           </Text>
         }
@@ -356,14 +397,14 @@ export function ComponentCompatibility() {
           Mantine Tooltip
         </Card>
       </Tooltip>
-      <Popover withArrow shadow="md" opened>
+      <Popover withArrow shadow="sm" opened>
         <Popover.Target>
           <Card withBorder display="inline-block">
             Mantine Popover
           </Card>
         </Popover.Target>
         <Popover.Dropdown>
-          <Text size="sm" c="var(--mb-color-text-primary)">
+          <Text size="sm" c="text-primary">
             Dropdown
           </Text>
         </Popover.Dropdown>
@@ -374,7 +415,6 @@ export function ComponentCompatibility() {
 
 // Card visualizations
 
-// @ts-expect-error: incompatible prop types with registerVisualization
 registerVisualization(ObjectDetail);
 
 export const CardVisualizationsLightTheme = {
@@ -409,7 +449,7 @@ export const CardVisualizationsDarkTheme = {
   },
 };
 
-function ScrollDecorator(Story: StoryFn) {
+function ScrollDecorator(Story: ComponentType) {
   const asyncCallback = useMemo(() => createAsyncCallback(), []);
 
   useEffect(() => {
@@ -431,17 +471,25 @@ function ScrollDecorator(Story: StoryFn) {
   return <Story />;
 }
 
-function DarkBackgroundDecorator(Story: StoryFn) {
+function DarkBackgroundDecorator(Story: ComponentType) {
   return (
-    <Box bg="#434e56" mih="100vh">
+    <Box style={{ backgroundColor: "#434e56" }} mih="100vh">
       <Story />
     </Box>
   );
 }
 
-function LightBackgroundDecorator(Story: StoryFn) {
+function LightBackgroundDecorator(Story: ComponentType) {
   return (
-    <Box bg="#ddd" mih="100vh">
+    <Box style={{ backgroundColor: "#ddd" }} mih="100vh">
+      <Story />
+    </Box>
+  );
+}
+
+function NarrowDecorator(Story: ComponentType) {
+  return (
+    <Box w={800} h={600} style={{ position: "relative" }}>
       <Story />
     </Box>
   );

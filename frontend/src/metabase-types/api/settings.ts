@@ -1,12 +1,21 @@
 import type { ReactNode } from "react";
 
-import type { SdkIframeEmbedSetupSettings } from "metabase-enterprise/embedding_iframe_sdk_setup/types";
-
 import type { InputSettingType } from "./actions";
 import type { DashboardId } from "./dashboard";
 import type { DatabaseId } from "./database";
-import type { GroupId } from "./group";
+import type { SdkIframeEmbedSetupTheme } from "./embedding-theme";
+import type { CurrencyStyle } from "./formatting";
+import type { GroupMappings } from "./group";
+import type { MetabotLimitPeriod, MetabotLimitType } from "./metabot";
+import type { NotificationRecipient } from "./notification";
 import type { UserId } from "./user";
+
+export interface OidcAuthProvider {
+  type: "oidc";
+  key: string;
+  "login-prompt": string;
+  "sso-url": string;
+}
 
 export interface FormattingSettings {
   "type/Temporal"?: DateFormattingSettings;
@@ -27,19 +36,87 @@ export interface NumberFormattingSettings {
 
 export interface CurrencyFormattingSettings {
   currency?: string;
-  currency_style?: string;
+  currency_style?: CurrencyStyle;
   currency_in_header?: boolean;
 }
 
+export const engineKeys = [
+  "athena",
+  "bigquery-cloud-sdk",
+  "clickhouse",
+  "databricks",
+  "druid-jdbc",
+  "druid",
+  "mongo",
+  "mysql",
+  "oracle",
+  "postgres",
+  "presto-jdbc",
+  "redshift",
+  "snowflake",
+  "sparksql",
+  "sqlite",
+  "sqlserver",
+  "starburst",
+  "vertica",
+] as const;
+
+export const providerNames = [
+  "Aiven",
+  "Amazon RDS",
+  "Azure",
+  "Crunchy Data",
+  "DigitalOcean",
+  "Fly.io",
+  "Neon",
+  "PlanetScale",
+  "Railway",
+  "Render",
+  "Scaleway",
+  "Supabase",
+  "Timescale",
+] as const;
+
+export type DatabaseProviderName = (typeof providerNames)[number];
+
+export type DatabaseProvider = {
+  name: DatabaseProviderName;
+  pattern: string;
+};
+
+export type EngineKey = (typeof engineKeys)[number];
+
+export type ContainerStyleType = "grid" | "component";
+export type ContainerStyle = [ContainerStyleType, string];
+
+export function isContainerStyle(value: unknown): value is ContainerStyle {
+  return (
+    Array.isArray(value) &&
+    value.length === 2 &&
+    (value[0] === "grid" || value[0] === "component") &&
+    typeof value[1] === "string"
+  );
+}
+
+export interface DatabaseFieldGroup {
+  type: "group";
+  "container-style": unknown;
+  fields: EngineField[];
+}
+
+export type DatabaseFieldOrGroup = EngineField | DatabaseFieldGroup;
+
 export interface Engine {
   "driver-name": string;
-  "details-fields"?: EngineField[];
+  "details-fields"?: DatabaseFieldOrGroup[];
   source: EngineSource;
   "superseded-by": string | null;
+  "creatable?"?: boolean;
   "extra-info": {
     "db-routing-info": {
       text: string;
     };
+    providers?: DatabaseProvider[];
   } | null;
 }
 
@@ -87,22 +164,14 @@ export interface EngineSourceContact {
 }
 
 export interface ScheduleSettings {
-  schedule_type?: ScheduleType | null;
+  schedule_type: ScheduleType;
   schedule_day?: ScheduleDayType | null;
   schedule_frame?: ScheduleFrameType | null;
   schedule_hour?: number | null;
   schedule_minute?: number | null;
 }
 
-export type ScheduleType =
-  | "every_n_minutes"
-  | "hourly"
-  | "daily"
-  | "weekly"
-  | "monthly"
-  // 'cron' type implies usage of more complex expressions represented
-  // by raw cron string.
-  | "cron";
+export type ScheduleType = "hourly" | "daily" | "weekly" | "monthly";
 
 export type ScheduleDayType =
   | "sun"
@@ -114,6 +183,8 @@ export type ScheduleDayType =
   | "sat";
 
 export type ScheduleFrameType = "first" | "mid" | "last";
+
+export type ScheduleDisplayType = "cron/builder" | "cron/raw" | null;
 
 export interface FontFile {
   src: string;
@@ -135,11 +206,27 @@ export interface VersionInfoRecord {
   announcement_url?: string;
 }
 
+export interface AlertUpgradeVersion {
+  min: string;
+  fixed: string;
+  message: string;
+  id?: string;
+}
+
+export interface MajorVersionSupport {
+  major: number;
+  released: string;
+  lts: boolean;
+  eol: string;
+}
+
 export interface VersionInfo {
   nightly?: VersionInfoRecord;
   beta?: VersionInfoRecord;
   latest?: VersionInfoRecord;
   older?: VersionInfoRecord[];
+  alert_upgrade_versions?: AlertUpgradeVersion[];
+  major_version_support?: MajorVersionSupport[];
 }
 
 export type LocaleData = [string, string];
@@ -152,7 +239,13 @@ export type LoadingMessage =
 export type TokenStatusStatus = "unpaid" | "past-due" | "invalid" | string;
 
 export type GdrivePayload = {
-  status: "not-connected" | "syncing" | "active" | "paused" | "error";
+  status:
+    | "not-connected"
+    | "initializing"
+    | "syncing"
+    | "active"
+    | "paused"
+    | "error";
   url?: string;
   message?: string; // only for errors
   created_at?: number;
@@ -168,6 +261,7 @@ export type GdrivePayload = {
 const tokenStatusFeatures = [
   "advanced-config",
   "advanced-permissions",
+  "attached-dwh",
   "audit-app",
   "cache-granular-controls",
   "collection-cleanup",
@@ -175,6 +269,7 @@ const tokenStatusFeatures = [
   "content-management",
   "content-translation",
   "content-verification",
+  "data-complexity-score",
   "dashboard-subscription-filters",
   "database-auth-providers",
   "disable-password-login",
@@ -183,7 +278,10 @@ const tokenStatusFeatures = [
   "embedding-sdk",
   "embedding",
   "embedding-simple",
+  "embedding-hub",
   "hosting",
+  "offer-metabase-ai-managed",
+  "metabase-ai-managed",
   "metabase-store-managed",
   "metabot-v3",
   "no-upsell",
@@ -201,11 +299,21 @@ const tokenStatusFeatures = [
   "sso-ldap",
   "sso-saml",
   "sso",
+  "transforms-basic",
+  "transforms-python",
+  "transforms-testing",
   "upload-management",
   "whitelabel",
 ] as const;
 
 export type TokenStatusFeature = (typeof tokenStatusFeatures)[number];
+
+export const REMOTE_SYNC_TYPES = ["read-only", "read-write"] as const;
+export type RemoteSyncType = (typeof REMOTE_SYNC_TYPES)[number];
+
+interface TokenStatusStoreUsers {
+  email: string;
+}
 
 export interface TokenStatus {
   status: TokenStatusStatus;
@@ -214,6 +322,7 @@ export interface TokenStatus {
   "error-details"?: string;
   trial?: boolean;
   features?: TokenStatusFeature[];
+  "store-users"?: TokenStatusStoreUsers[];
 }
 
 export type DayOfWeekId =
@@ -231,20 +340,30 @@ export const tokenFeatures = [
   "audit_app",
   "cache_granular_controls",
   "cloud_custom_smtp",
+  "content_diagnostics",
   "content_translation",
   "content_verification",
+  "custom-viz",
+  "custom-viz-available",
+  "data-complexity-score",
   "disable_password_login",
   "embedding",
   "embedding_sdk",
   "embedding_simple",
   "hosting",
+  "offer-metabase-ai-managed",
+  "metabase-ai-managed",
+  "metabot-v3",
+  "multi-factor-auth",
   "official_collections",
   "sandboxes",
   "scim",
   "sso_google",
   "sso_jwt",
   "sso_ldap",
+  "sso_oidc",
   "sso_saml",
+  "sso_slack",
   "session_timeout_config",
   "whitelabel",
   "serialization",
@@ -255,14 +374,27 @@ export const tokenFeatures = [
   "upload_management",
   "collection_cleanup",
   "cache_preemptive",
-  "metabot_v3",
-  "ai_sql_fixer",
-  "ai_sql_generation",
-  "ai_entity_analysis",
   "database_routing",
   "development_mode",
   "etl_connections",
   "etl_connections_pg",
+  "table_data_editing",
+  "remote_sync",
+  "data-apps",
+  "dependencies",
+  "schema-viewer",
+  "semantic_search",
+  "transforms-python",
+  "transforms-basic",
+  "transforms-testing",
+  "library",
+  "library_retrieval",
+  "support-users",
+  "session-management",
+  "tenants",
+  "writable_connection",
+  "admin_security_center",
+  "ai_controls",
 ] as const;
 
 export type TokenFeature = (typeof tokenFeatures)[number];
@@ -271,9 +403,14 @@ export type TokenFeatures = Record<TokenFeature, boolean>;
 export type PasswordComplexity = {
   total?: number;
   digit?: number;
+  upper?: number;
+  lower?: number;
+  special?: number;
 };
 
 export type SessionCookieSameSite = "lax" | "strict" | "none";
+
+export type MfaEnforcement = "off" | "optional" | "required";
 
 export interface SettingDefinition<
   Key extends EnterpriseSettingKey = EnterpriseSettingKey,
@@ -336,10 +473,10 @@ interface InstanceSettings {
   "email-smtp-username": string | null;
   "email-smtp-password": string | null;
   "enable-embedding": boolean;
-  "enable-embedding-static": boolean;
+  "enable-embedding-modular": boolean;
   "enable-embedding-sdk": boolean;
-  "enable-embedding-simple": boolean;
   "enable-embedding-interactive": boolean;
+  "enable-embedding-sidecar": boolean;
   "enable-nested-queries": boolean;
   "enable-public-sharing": boolean;
   "enable-xrays": boolean;
@@ -371,8 +508,12 @@ export type EmbeddingHomepageStatus =
 
 interface AdminSettings {
   "active-users-count"?: number;
+  "analytics-pii-retention-enabled"?: boolean;
   "custom-geojson-enabled": boolean;
+  "encryption-enabled": boolean;
+  "metabot-query-execution-enabled?": boolean;
   "deprecation-notice-version"?: string;
+  "disable-cors-on-localhost": boolean;
   "embedding-secret-key"?: string;
   "redirect-all-requests-to-https": boolean;
   "query-caching-min-ttl": number;
@@ -380,23 +521,54 @@ interface AdminSettings {
   "google-auth-auto-create-accounts-domain": string | null;
   "google-auth-configured": boolean;
   "premium-embedding-token": string | null;
+  "oidc-login-providers"?: OidcAuthProvider[];
   "other-sso-enabled?"?: boolean; // yes the question mark is in the variable name
   "show-database-syncing-modal": boolean;
   "token-status": TokenStatus | null;
   "version-info"?: VersionInfo | null;
   "last-acknowledged-version": string | null;
   "show-static-embed-terms": boolean | null;
-  "show-sdk-embed-terms": boolean | null;
-  "show-simple-embed-terms": boolean | null;
+  "show-modular-embed-terms": boolean | null;
+  "system-timezone"?: string;
   "embedding-homepage": EmbeddingHomepageStatus;
   "setup-license-active-at-setup": boolean;
+  "setup-embedding-autoenabled": boolean;
+  "embedding-hub-test-embed-snippet-created": boolean;
+  "embedding-hub-production-embed-snippet-created": boolean;
+  "embedding-hub-sso-auth-manual-tested": boolean;
+  "default-embedding-themes-seeded": boolean;
+  "security-center-email-recipients": NotificationRecipient[] | null;
+  "security-center-slack-channel": string | null;
   "store-url": string;
   gsheets: Partial<GdrivePayload>;
   "license-token-missing-banner-dismissal-timestamp"?: Array<string>;
 }
 interface SettingsManagerSettings {
   "bcc-enabled?": boolean;
-  "ee-openai-api-key"?: string;
+  "llm-openai-api-key"?: string;
+  "llm-anthropic-api-key"?: string | null;
+  "llm-anthropic-api-base-url"?: string | null;
+  "llm-openrouter-api-key"?: string | null;
+  "llm-zai-api-key"?: string | null;
+  "llm-mistral-api-key"?: string | null;
+  "llm-moonshot-api-key"?: string | null;
+  "llm-deepseek-api-key"?: string | null;
+  "llm-xai-api-key"?: string | null;
+  "llm-azure-api-key"?: string | null;
+  "llm-azure-api-base-url"?: string | null;
+  "llm-google-service-account-key"?: string | null;
+  "llm-google-oauth-access-token"?: string | null;
+  "llm-google-project-id"?: string | null;
+  "llm-google-location"?: string | null;
+  "llm-bedrock-access-key-id"?: string | null;
+  "llm-bedrock-secret-access-key"?: string | null;
+  "llm-bedrock-region"?: string | null;
+  "llm-bedrock-session-token"?: string | null;
+  "llm-vllm-api-base-url"?: string | null;
+  "llm-vllm-api-key"?: string | null;
+  "llm-ollama-api-base-url"?: string | null;
+  "llm-ollama-api-key"?: string | null;
+  "llm-ollama-request-timeout-ms"?: number | null;
   "openai-api-key": string | null;
   "openai-available-models"?: OpenAiModel[];
   "openai-model": string | null;
@@ -404,7 +576,6 @@ interface SettingsManagerSettings {
   "session-cookie-samesite": SessionCookieSameSite;
   "slack-app-token": string | null;
   "slack-bug-report-channel": string | null;
-  "slack-token": string | null;
   "slack-token-valid?": boolean;
 }
 
@@ -412,14 +583,22 @@ type PrivilegedSettings = AdminSettings & SettingsManagerSettings;
 
 interface PublicSettings {
   "allowed-iframe-hosts": string;
+  "csp-img-allowed-hosts": string;
+  "csp-img-enabled": boolean;
+  "ai-features-enabled?": boolean;
+  "agent-api-enabled?": boolean;
+  "analytics-uuid": string;
   "anon-tracking-enabled": boolean;
+  "metaplow-tracking-enabled": boolean;
+  "metaplow-url": string | null;
   "application-font": string;
   "application-font-files": FontFile[] | null;
   "application-name": string;
   "application-favicon-url": string;
   "available-fonts": string[];
-  "available-locales": LocaleData[] | null;
-  "available-timezones": string[] | null;
+  // Non-null: :public visibility and a total getter (computed from the jar's
+  // bundled translation resources), so every viewer always receives a list.
+  "available-locales": LocaleData[];
   "bug-reporting-enabled": boolean;
   "check-for-updates": boolean;
   "cloud-gateway-ips": string[] | null;
@@ -428,15 +607,17 @@ interface PublicSettings {
   "custom-homepage": boolean;
   "custom-homepage-dashboard": DashboardId | null;
   "development-mode?": boolean;
-  "ee-ai-features-enabled"?: boolean;
+  "llm-metabot-configured?"?: boolean | null;
+  "llm-metabot-supports-reasoning?"?: boolean | null;
   "email-configured?": boolean;
   "embedding-app-origin": string | null;
+  "mfa-enforcement": MfaEnforcement;
+  "mfa-requirement-deadline": string | null;
   "embedding-app-origins-sdk": string | null;
   "embedding-app-origins-interactive": string | null;
   "enable-password-login": boolean;
   "enable-pivoted-exports": boolean;
   "enable-sandboxes?": boolean;
-  engines: Record<string, Engine>;
   "google-auth-client-id": string | null;
   "google-auth-enabled": boolean;
   "has-user-setup": boolean;
@@ -460,10 +641,12 @@ interface PublicSettings {
   "ldap-attribute-lastname": string | null;
   "ldap-group-sync": boolean;
   "ldap-group-base": string | null;
-  "ldap-group-mappings": Record<string /*ldap group name */, GroupId[]> | null;
-  "ldap-group-membership-filter"?: string;
+  "ldap-group-mappings": GroupMappings | null;
+  "ldap-group-membership-filter"?: string | null;
   "ldap-user-provisioning-enabled?": boolean;
+  "oidc-user-provisioning-enabled?": boolean;
   "loading-message": LoadingMessage;
+  "mcp-enabled?": boolean;
   "map-tile-server-url": string;
   "native-query-autocomplete-match-style": AutocompleteMatchStyle;
   "other-sso-enabled?": boolean | null; // TODO: FIXME! This is an enterprise-only setting!
@@ -473,8 +656,20 @@ interface PublicSettings {
   "report-timezone": string | null;
   "report-timezone-long": string;
   "report-timezone-short": string;
-  "session-cookies": boolean | null;
+  "session-cookies": boolean;
   "setup-token": string | null;
+  "metabot-enabled?": boolean;
+  "metabot-name": string;
+  "metabot-icon": string | null;
+  "metabot-show-illustrations": boolean;
+  "metabot-limit-unit": MetabotLimitType;
+  "metabot-limit-reset-rate": MetabotLimitPeriod;
+  "metabot-quota-reached-message": string | null;
+  "ai-usage-max-retention-days": number | null;
+  "metabot-chat-system-prompt": string | null;
+  "metabot-nlq-system-prompt": string | null;
+  "metabot-sql-system-prompt": string | null;
+  "embedded-metabot-enabled?": boolean;
   "show-metabase-links": boolean;
   "show-metabot": boolean;
   "show-google-sheets-integration": boolean;
@@ -484,28 +679,42 @@ interface PublicSettings {
   "snowplow-url": string;
   "start-of-week": DayOfWeekId;
   "token-features": TokenFeatures;
+  "tracing-enabled": boolean;
+  "transforms-enabled": boolean;
+  "transforms-setup-complete": boolean;
   version: Version;
   "version-info-last-checked": string | null;
   "airgap-enabled": boolean;
+  "custom-viz-enabled": boolean;
+  "custom-viz-plugin-dev-mode-enabled": boolean;
   "non-table-chart-generated": boolean;
+  "use-tenants": boolean;
 }
 
 export type UserSettings = {
   "dismissed-excel-pivot-exports-banner"?: boolean;
   "dismissed-collection-cleanup-banner"?: boolean;
   "dismissed-browse-models-banner"?: boolean;
+  "dismissed-research-mode-banner"?: boolean;
   "dismissed-custom-dashboard-toast"?: boolean;
   "last-used-native-database-id"?: number | null;
-  "notebook-native-preview-shown"?: boolean;
   "notebook-native-preview-sidebar-width"?: number | null;
   "expand-browse-in-nav"?: boolean;
   "expand-bookmarks-in-nav"?: boolean;
+  "expand-collections-in-nav"?: boolean;
+  "expand-library-in-nav"?: boolean;
   "browse-filter-only-verified-models"?: boolean;
   "browse-filter-only-verified-metrics"?: boolean;
   "show-updated-permission-modal": boolean;
   "show-updated-permission-banner": boolean;
   "trial-banner-dismissal-timestamp"?: string | null;
-  "sdk-iframe-embed-setup-settings"?: SdkIframeEmbedSetupSettings | null;
+  // The persisted subset of the embed setup wizard's
+  // `SdkIframeEmbedSetupSettings` state.
+  "sdk-iframe-embed-setup-settings"?: {
+    theme?: SdkIframeEmbedSetupTheme;
+    useExistingUserSession?: boolean;
+  } | null;
+  "color-scheme"?: string;
 };
 
 /**
@@ -532,10 +741,8 @@ export type UserSettings = {
  * Each new scope is more strict than the previous one.
  *
  * To further complicate things, there are two endpoints for fetching settings:
- *  - `GET /api/setting` that _can only be used by admins!_
- *  - `GET /api/session/properties` that can be used by any user, but some settings might be omitted (unavailable).
- *
- * SettingsApi will return `403` for non-admins, while SessionApi will return `200`!
+ *  - `GET /api/setting` that _can only be used by admins!_ — returns `403` for non-admins.
+ *  - `GET /api/session/properties` that can be used by any user (returns `200`), but some settings might be omitted.
  */
 export type Settings = InstanceSettings &
   PublicSettings &
@@ -546,19 +753,59 @@ export type SettingKey = keyof Settings;
 
 export type SettingValue<Key extends SettingKey = SettingKey> = Settings[Key];
 
-export type ColorSettings = Record<string, string>;
+type ColorSettingsAccentIndex = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7;
+
+export type ColorSettingsAccentKey =
+  | `accent${ColorSettingsAccentIndex}`
+  | `accent${ColorSettingsAccentIndex}-light`
+  | `accent${ColorSettingsAccentIndex}-dark`;
+
+/** Keys that the `application-colors` setting stores. */
+export type ColorSettingsKey =
+  | "brand"
+  | "filter"
+  | "summarize"
+  | ColorSettingsAccentKey;
+
+/**
+ * The raw `application-colors` setting. Its keys are not color token names:
+ * translate it with `mapWhitelabelColorsToTokens` before you use it as a `ColorPalette`.
+ */
+export type ColorSettings = Partial<Record<ColorSettingsKey, string>> & {
+  "core-brand"?: never;
+  "core-filter"?: never;
+  "core-summarize"?: never;
+};
 
 export type IllustrationSettingValue = "default" | "none" | "custom";
 export type TimeoutValue = { amount: number; unit: string };
+
+export type SearchEngineSettingValue = "semantic" | "appdb" | "in-place";
 
 export type DatabaseReplicationConnections = Record<
   DatabaseId,
   { connection_id: string }
 >;
 
+export type SyncableEntity =
+  | "transform"
+  | "snippet"
+  | "dataset"
+  | "metric"
+  | "segment"
+  | "dashboard"
+  | "question";
+
 export interface EnterpriseSettings extends Settings {
   "application-colors"?: ColorSettings | null;
   "application-logo-url"?: string;
+  "remote-sync-enabled"?: boolean | null;
+  "remote-sync-token"?: string | null;
+  "remote-sync-url"?: string | null;
+  "remote-sync-branch"?: string | null;
+  "remote-sync-type"?: RemoteSyncType | null;
+  "remote-sync-auto-import"?: boolean | null;
+  "remote-sync-transforms"?: boolean | null;
   "login-page-illustration"?: IllustrationSettingValue;
   "login-page-illustration-custom"?: string;
   "landing-page-illustration"?: IllustrationSettingValue;
@@ -568,15 +815,25 @@ export interface EnterpriseSettings extends Settings {
   "no-object-illustration"?: IllustrationSettingValue;
   "no-object-illustration-custom"?: string;
   "landing-page"?: string;
-  "ee-ai-features-enabled"?: boolean;
-  "ee-openai-api-key"?: string;
-  "ee-openai-model"?: string;
+  "llm-openai-api-key"?: string;
+  "llm-openai-model"?: string;
+  "llm-metabot-configured?"?: boolean | null;
+  "llm-metabot-supports-reasoning?"?: boolean | null;
+  "llm-metabot-supports-fast-mode?"?: boolean | null;
+  "llm-openrouter-api-key"?: string | null;
+  "llm-zai-api-key"?: string | null;
+  "llm-mistral-api-key"?: string | null;
+  "llm-moonshot-api-key"?: string | null;
+  "llm-deepseek-api-key"?: string | null;
+  "llm-xai-api-key"?: string | null;
   "session-timeout": TimeoutValue | null;
+  "search-engine": SearchEngineSettingValue | null;
   "scim-enabled"?: boolean | null;
   "scim-base-url"?: string;
   "send-new-sso-user-admin-email?"?: boolean;
   "jwt-configured"?: boolean;
   "jwt-enabled"?: boolean;
+  "jwt-enabled-and-configured"?: boolean;
   "jwt-user-provisioning-enabled?": boolean;
   "jwt-identity-provider-uri": string | null;
   "jwt-shared-secret": string | null;
@@ -584,7 +841,12 @@ export interface EnterpriseSettings extends Settings {
   "jwt-attribute-firstname": string | null;
   "jwt-attribute-lastname": string | null;
   "jwt-attribute-groups": string | null;
+  "jwt-attribute-tenant": string | null;
   "jwt-group-sync": boolean | null;
+  "oidc-enabled": boolean;
+  "oidc-configured": boolean;
+  // sensitive, so only the admin settings list carries it; pages use /api/ee/sso/oidc
+  "oidc-providers"?: string | null;
   "saml-enabled": boolean;
   "saml-configured": boolean;
   "saml-user-provisioning-enabled?": boolean;
@@ -598,11 +860,42 @@ export interface EnterpriseSettings extends Settings {
   "saml-attribute-email": string | null;
   "saml-attribute-firstname": string | null;
   "saml-attribute-lastname": string | null;
+  "saml-attribute-tenant": string | null;
   "saml-attribute-group": string | null;
   "saml-group-sync": boolean | null;
-  "saml-group-mappings": Record<string, GroupId[]> | null;
+  "saml-group-mappings": GroupMappings | null;
+  "jwt-group-mappings": GroupMappings | null;
   "database-replication-enabled": boolean | null;
   "database-replication-connections"?: DatabaseReplicationConnections | null;
+  "embedding-hub-test-embed-snippet-created": boolean;
+  "embedding-hub-production-embed-snippet-created": boolean;
+  "embedding-hub-sso-auth-manual-tested": boolean;
+  "default-embedding-themes-seeded": boolean;
+  "python-runner-url"?: string | null;
+  "python-runner-api-token"?: string | null;
+  "python-storage-s-3-endpoint"?: string | null;
+  "python-storage-s-3-region"?: string | null;
+  "python-storage-s-3-bucket"?: string | null;
+  "python-storage-s-3-prefix"?: string | null;
+  "python-storage-s-3-access-key"?: string | null;
+  "python-storage-s-3-secret-key"?: string | null;
+  "python-storage-s-3-container-endpoint"?: string | null;
+  "python-storage-s-3-path-style-access"?: boolean | null;
+  "python-runner-timeout-seconds"?: number | null;
+  "python-runner-test-run-timeout-seconds"?: number | null;
+  "llm-metabot-provider"?: string | null;
+  "llm-mini-model"?: string | null;
+  "ee-embedding-provider"?: string | null;
+  "llm-fast-mode"?: boolean | null;
+  "llm-anthropic-api-key"?: string | null;
+  "llm-proxy-configured?"?: boolean | null;
+  "metabot-slack-signing-secret"?: string | null;
+  "slack-connect-enabled"?: boolean | null;
+  "slack-connect-client-id"?: string | null;
+  "slack-connect-client-secret"?: string | null;
+  "mcp-apps-cors-enabled-clients": string[] | null;
+  "mcp-apps-cors-custom-origins": string | null;
+  "transforms-meter-locked": boolean | null;
   /**
    * @deprecated
    */

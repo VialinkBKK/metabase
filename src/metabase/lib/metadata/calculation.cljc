@@ -1,9 +1,11 @@
 (ns metabase.lib.metadata.calculation
+  (:refer-clojure :exclude [select-keys mapv empty? #?(:clj for)])
   (:require
    #?(:clj  [metabase.config.core :as config]
       :cljs [metabase.lib.cache :as lib.cache])
    [clojure.string :as str]
    [medley.core :as m]
+   [metabase.lib.computed :as lib.computed]
    [metabase.lib.dispatch :as lib.dispatch]
    [metabase.lib.field.util :as lib.field.util]
    [metabase.lib.hierarchy :as lib.hierarchy]
@@ -12,9 +14,14 @@
    [metabase.lib.options :as lib.options]
    [metabase.lib.ref :as lib.ref]
    [metabase.lib.schema :as lib.schema]
+   [metabase.lib.schema.binning :as lib.schema.binning]
    [metabase.lib.schema.common :as lib.schema.common]
-   [metabase.lib.schema.expression :as lib.schema.expresssion]
+   [metabase.lib.schema.drill-thru :as lib.schema.drill-thru]
+   [metabase.lib.schema.expression :as lib.schema.expression]
+   [metabase.lib.schema.extraction :as lib.schema.extraction]
+   [metabase.lib.schema.join :as lib.schema.join]
    [metabase.lib.schema.metadata :as lib.schema.metadata]
+   [metabase.lib.schema.order-by :as lib.schema.order-by]
    [metabase.lib.schema.temporal-bucketing :as lib.schema.temporal-bucketing]
    [metabase.lib.types.isa :as lib.types.isa]
    [metabase.lib.util :as lib.util]
@@ -22,7 +29,8 @@
    [metabase.util.i18n :as i18n]
    [metabase.util.log :as log]
    [metabase.util.malli :as mu]
-   [metabase.util.malli.registry :as mr]))
+   [metabase.util.malli.registry :as mr]
+   [metabase.util.performance :refer [select-keys mapv empty? #?(:clj for)]]))
 
 (mr/def ::display-name-style
   "Schema for valid values of `display-name-style` as passed to [[display-name-method]].
@@ -34,6 +42,7 @@
     name generation. For a joined column, this might look like \"Venues → Price\"."
   [:enum :default :long])
 
+#_{:clj-kondo/ignore [:metabase/discourage-dynamic-vars]}
 (def ^:dynamic *display-name-style*
   "Display name style to use when not explicitly passed in to [[display-name]]."
   :default)
@@ -52,51 +61,119 @@
     (lib.dispatch/dispatch-value x))
   :hierarchy lib.hierarchy/hierarchy)
 
+(mr/def ::card-metadata
+  "Card metadata, plus the `:display-name` [[metadata]] adds to it."
+  [:merge
+   ::lib.schema.metadata/card
+   [:map
+    [:display-name {:optional true} [:maybe :string]]]])
+
+(mr/def ::metric-metadata
+  "Metric metadata, plus the `:display-name` [[metadata]] adds and the `:aggregation-position`
+  [[metabase.lib.metric/available-metrics]] adds."
+  [:merge
+   ::lib.schema.metadata/metric
+   [:map
+    [:display-name         {:optional true} [:maybe :string]]
+    [:aggregation-position {:optional true} [:maybe :int]]]])
+
+(mr/def ::column-nameable
+  "Something [[column-name]] can calculate a database-friendly name for: an MBQL expression clause or literal, or
+  column, metric, or measure metadata."
+  [:or
+   ::lib.schema.expression/expression
+   ::lib.schema.metadata/column
+   ::metric-metadata
+   ::lib.schema.metadata/measure
+   ::lib.schema.metadata/segment])
+
+(mr/def ::displayable
+  "Something [[display-name]] can calculate a human-friendly display name for: an MBQL clause or literal, an order-by
+  clause, a query, a stage, a join, a join strategy, temporal bucketing, or binning option, resolved binning, an
+  aggregation operator, a drill, an extraction, a column group, or column, table, card, metric, measure, or segment
+  metadata."
+  [:multi {:dispatch (fn [x]
+                       (cond
+                         (map? x)                                     (:lib/type x)
+                         (and (vector? x) (#{:asc :desc} (first x))) ::order-by
+                         :else                                        ::expression))}
+   [:metadata/column                    ::lib.schema.metadata/column]
+   [:metadata/table                     ::lib.schema.metadata/table]
+   [:metadata/card                      ::card-metadata]
+   [:metadata/metric                    ::metric-metadata]
+   [:metadata/measure                   ::lib.schema.metadata/measure]
+   [:metadata/segment                   ::lib.schema.metadata/segment]
+   [:metadata/column-group              :metabase.lib.column-group/column-group]
+   [:mbql/query                         ::lib.schema/query]
+   [:mbql.stage/mbql                    ::lib.schema/stage]
+   [:mbql.stage/native                  ::lib.schema/stage]
+   [:mbql/join                          [:ref :metabase.lib.join.util/join-with-optional-alias]]
+   [:option/join.strategy               ::lib.schema.join/strategy.option]
+   [:option/temporal-bucketing          ::lib.schema.temporal-bucketing/option]
+   [:option/binning                     ::lib.schema.binning/binning-option]
+   [:metabase.lib.binning/binning       ::lib.schema.binning/binning.resolved]
+   [:operator/aggregation               :metabase.lib.aggregation/selected-operator-with-columns]
+   [:metabase.lib.drill-thru/drill-thru ::lib.schema.drill-thru/drill-thru]
+   [:metabase.lib.extraction/extraction ::lib.schema.extraction/extraction]
+   [::order-by                          ::lib.schema.order-by/order-by]
+   [::expression                        ::lib.schema.expression/expression]])
+
+(defn- clause-options
+  "The Lib options of `x` when it is an MBQL clause or a column, the only displayables that carry options."
+  [x]
+  (when (or (vector? x)
+            (= (:lib/type x) :metadata/column))
+    (lib.options/options x)))
+
 (mu/defn ^:export display-name :- :string
   "Calculate a nice human-friendly display name for something. See [[::display-name-style]] for a the difference between
   different `style`s."
-  ([query]
+  ([query :- ::lib.schema/query]
    (display-name query query))
 
-  ([query x]
+  ([query :- ::lib.schema/query
+    x     :- ::displayable]
    (display-name query -1 x))
 
-  ([query stage-number x]
+  ([query        :- ::lib.schema/query
+    stage-number :- :int
+    x            :- ::displayable]
    (display-name query stage-number x *display-name-style*))
 
   ([query        :- ::lib.schema/query
     stage-number :- :int
-    x
+    x            :- ::displayable
     style        :- ::display-name-style]
    (or
     ;; if this is an MBQL clause with `:display-name` in the options map, then use that rather than calculating a name.
-    ((some-fn :display-name :lib/expression-name) (lib.options/options x))
-    (try
-      (display-name-method query stage-number x style)
-      (catch #?(:clj Throwable :cljs js/Error) e
-        (throw (ex-info (i18n/tru "Error calculating display name for {0}: {1}" (pr-str x) (ex-message e))
-                        {:query query, :x x}
-                        e)))))))
+    ((some-fn :display-name :lib/expression-name) (clause-options x))
+    (lib.util/recover
+     (fn [] (display-name-method query stage-number x style))
+     (fn [e]
+       (throw (ex-info (i18n/tru "Error calculating display name for {0}: {1}" (pr-str x) (ex-message e))
+                       {:query query, :x x}
+                       e)))))))
 
 (mu/defn column-name :- ::lib.schema.common/non-blank-string
   "Calculate a database-friendly name to use for an expression."
-  ([query x]
+  ([query        :- ::lib.schema/query
+    x            :- ::column-nameable]
    (column-name query -1 x))
 
   ([query        :- ::lib.schema/query
     stage-number :- :int
-    x]
+    x            :- ::column-nameable]
    (or
     ;; if this is an MBQL clause with `:name` in the options map, then use that rather than calculating a name.
-    (:name (lib.options/options x))
-    (try
-      (column-name-method query stage-number x)
-      (catch #?(:clj Throwable :cljs js/Error) e
-        (throw (ex-info (i18n/tru "Error calculating column name for {0}: {1}" (pr-str x) (ex-message e))
-                        {:x            x
-                         :query        query
-                         :stage-number stage-number}
-                        e)))))))
+    (:name (clause-options x))
+    (lib.util/recover
+     (fn [] (column-name-method query stage-number x))
+     (fn [e]
+       (throw (ex-info (i18n/tru "Error calculating column name for {0}: {1}" (pr-str x) (ex-message e))
+                       {:x            x
+                        :query        query
+                        :stage-number stage-number}
+                       e)))))))
 
 (defmethod display-name-method :default
   [_query _stage-number x _stage]
@@ -105,8 +182,7 @@
            :cljs         true ;; the linter complains when :cljs is not here(?)
            :cljs-dev     true
            :cljs-release false)
-    (log/warnf "Don't know how to calculate display name for %s. Add an impl for %s for %s"
-               (pr-str x)
+    (log/warnf "Don't know how to calculate display name. Add an impl for %s for %s"
                `display-name-method
                (lib.dispatch/dispatch-value x)))
   (if (and (vector? x)
@@ -116,6 +192,7 @@
     ;; anything else: use `pr-str` representation.
     (pr-str x)))
 
+#_{:clj-kondo/ignore [:metabase/discourage-dynamic-vars]}
 (def ^:dynamic *propagate-binning-and-bucketing*
   "Enable propagation of ref's `:temporal-unit` into `:inherited-temporal-unit` of a column or setting of
   the `:lib/original-binning` option.
@@ -166,7 +243,8 @@
 (mu/defn describe-top-level-key :- [:maybe ::lib.schema.common/non-blank-string]
   "'top-level' here means the top level of an individual stage. Generate a human-friendly string describing a specific
   part of an MBQL stage, or `nil` if that part doesn't exist."
-  ([query top-level-key]
+  ([query         :- ::lib.schema/query
+    top-level-key :- TopLevelKey]
    (describe-top-level-key query -1 top-level-key))
   ([query         :- ::lib.schema/query
     stage-number  :- :int
@@ -176,22 +254,33 @@
 (defmulti type-of-method
   "Calculate the effective type of something. This differs from [[metabase.lib.schema.expression/type-of]] in that it is
   called with a query/MetadataProvider and a stage number, allowing us to fully resolve information and return
-  complete, unambigous type information. Default implementation calls [[metabase.lib.schema.expression/type-of]]."
+  complete, unambiguous type information. Default implementation calls [[metabase.lib.schema.expression/type-of]]."
   {:arglists '([query stage-number expr])}
   (fn [_query _stage-number expr]
     (lib.dispatch/dispatch-value expr))
   :hierarchy lib.hierarchy/hierarchy)
 
+(mr/def ::type-of-arg
+  "Something [[type-of]] can calculate the effective type of: an MBQL expression clause or literal, or column,
+  segment, metric, or measure metadata."
+  [:or
+   ::lib.schema.expression/expression
+   ::lib.schema.metadata/column
+   ::lib.schema.metadata/segment
+   ::lib.schema.metadata/metric
+   ::lib.schema.metadata/measure])
+
 (mu/defn type-of :- ::lib.schema.common/base-type
   "Get the effective type of an MBQL expression."
-  ([query x]
+  ([query        :- ::lib.schema/query
+    x            :- ::type-of-arg]
    (type-of query -1 x))
   ([query        :- ::lib.schema/query
     stage-number :- :int
-    x]
+    x            :- ::type-of-arg]
    ;; this logic happens here so we don't need to code up every single individual method to handle these special
    ;; cases.
-   (let [{:keys [temporal-unit], :as options} (lib.options/options x)]
+   (let [{:keys [temporal-unit], :as options} (clause-options x)]
      (or
       ;; If the options map includes `:effective-type` we can assume you know what you are doing and that it is
       ;; correct and just return it directly.
@@ -200,21 +289,19 @@
       ;; `:type/Integer` if its an extraction operation, e.g. `:month-of-year` always returns an integer; otherwise we
       ;; can return `:base-type`.
       (when (and temporal-unit
-                 (contains? lib.schema.temporal-bucketing/datetime-extraction-units temporal-unit))
+                 (contains? lib.schema.temporal-bucketing/datetime-integer-extraction-units temporal-unit))
         :type/Integer)
       ;; otherwise if `:base-type` is specified, we can return that.
       (:base-type options)
       ;; if none of the special cases are true, fall back to [[type-of-method]].
-      (let [calculated-type (type-of-method query stage-number x)]
-        ;; if calculated type is not a true type but a placeholder like `:metabase.lib.schema.expression/type.unknown`
-        ;; or a union of types then fall back to `:type/*`, an actual type.
-        (if (isa? calculated-type :type/*)
-          calculated-type
-          :type/*))))))
+      (lib.computed/with-cache-ephemeral* query [:expression-types/by-clause stage-number x]
+        (fn []
+          (let [calculated-type (type-of-method query stage-number x)]
+            (lib.schema.expression/resolve-type calculated-type))))))))
 
 (defmethod type-of-method :default
   [_query _stage-number expr]
-  (lib.schema.expresssion/type-of expr))
+  (lib.schema.expression/type-of expr))
 
 ;;; for MBQL clauses whose type is the same as the type of the first arg. Also used
 ;;; for [[metabase.lib.schema.expression/type-of]].
@@ -226,20 +313,24 @@
   [query stage-number [_tag _opts expr :as clause]]
   (if (string? expr)
     ;; If a string, get the type filtered by this expression (eg. `:datetime-add`).
-    (lib.schema.expresssion/type-of clause)
+    (lib.schema.expression/type-of clause)
     ;; Otherwise, just get the type of this first arg.
     (type-of query stage-number expr)))
 
-(defn- cache-key
+(defn cacheable-options
+  "Includes some dynamic variables etc. in the `options` so the `[[returned-columns]]` can be safely cached."
+  [options]
+  (assoc options
+         ::display-name-style              *display-name-style*
+         ::propagate-binning-and-bucketing (boolean *propagate-binning-and-bucketing*)
+         ::ref-style                       lib.ref/*ref-style*))
+
+(defn cache-key
   "Create a cache key to use with [[lib.metadata.cache]]. This includes a few extra keys for the three dynamic variables
   that can affect metadata calculation."
   [unique-key query stage-number x options]
   (lib.metadata.cache/cache-key
-   unique-key query stage-number x
-   (assoc options
-          ::display-name-style              *display-name-style*
-          ::propagate-binning-and-bucketing (boolean *propagate-binning-and-bucketing*)
-          ::ref-style                       lib.ref/*ref-style*)))
+   unique-key query stage-number x (cacheable-options options)))
 
 (defmulti metadata-method
   "Impl for [[metadata]]. Implementations that call [[display-name]] should use the `:default` display name style."
@@ -250,20 +341,20 @@
 
 (defmethod metadata-method :default
   [query stage-number x]
-  (try
-    {:lib/type     :metadata/column
-     ;; TODO -- effective-type
-     :base-type    (type-of query stage-number x)
-     :name         (column-name query stage-number x)
-     :display-name (display-name query stage-number x)}
-    ;; if you see this error it's usually because you're calling [[metadata]] on something that you shouldn't be, for
-    ;; example a query
-    (catch #?(:clj Throwable :cljs js/Error) e
-      (throw (ex-info (i18n/tru "Error calculating metadata for {0}: {1}"
-                                (pr-str (lib.dispatch/dispatch-value x))
-                                (ex-message e))
-                      {:query query, :stage-number stage-number, :x x}
-                      e)))))
+  (lib.util/recover
+   (fn []
+     {:lib/type     :metadata/column
+      ;; TODO -- effective-type
+      :base-type    (type-of query stage-number x)
+      :name         (column-name query stage-number x)
+      :display-name (display-name query stage-number x)})
+   ;; This usually means [[metadata]] was called on something it shouldn't be, e.g. a query.
+   (fn [e]
+     (throw (ex-info (i18n/tru "Error calculating metadata for {0}: {1}"
+                               (pr-str (lib.dispatch/dispatch-value x))
+                               (ex-message e))
+                     {:query query, :stage-number stage-number, :x x}
+                     e)))))
 
 (mr/def ::metadata-map
   [:map [:lib/type [:and
@@ -276,31 +367,35 @@
   "Calculate an appropriate `:metadata/*` object for something. What this looks like depends on what we're calculating
   metadata for. If it's a reference or expression of some sort, this should return a single `:metadata/column`
   map (i.e., something satisfying the `::lib.schema.metadata/column` schema."
-  ([query]
+  ([query :- ::lib.schema/query]
    (metadata query -1 query))
-  ([query x]
+  ([query :- ::lib.schema/query
+    x     :- ::displayable]
    (metadata query -1 x))
   ([query        :- ::lib.schema/query
     stage-number :- :int
-    x]
+    x            :- ::displayable]
    (lib.metadata.cache/with-cached-value query (cache-key ::metadata query stage-number x {})
      (metadata-method query stage-number x))))
 
 (mu/defn describe-query :- ::lib.schema.common/non-blank-string
   "Convenience for calling [[display-name]] on a query to describe the results of its final stage."
-  [query]
+  [query :- ::lib.schema/query]
   (display-name query query))
 
 (mu/defn suggested-name :- [:maybe ::lib.schema.common/non-blank-string]
   "Name you might want to use for a query when saving an previously-unsaved query. This is the same
   as [[describe-query]] except for native queries, where we don't describe anything."
-  [query]
+  [query :- ::lib.schema/query]
   (when-not (= (:lib/type (lib.util/query-stage query -1)) :mbql.stage/native)
-    (try
-      (describe-query query)
-      (catch #?(:clj Throwable :cljs js/Error) e
-        (log/errorf e "Error calculating display name for query: %s" (ex-message e))
-        nil))))
+    (lib.util/recover
+     (fn [] (describe-query query))
+     (fn [e]
+       ;; Throttled: a bulk caller such as a search reindex can hit this for many failing metric Cards,
+       ;; so don't log every one.
+       (log/throttle (* 10 1000)
+                     (log/errorf "Error calculating display name for query: %s" (ex-message e)))
+       nil))))
 
 (defmulti display-info-method
   "Implementation for [[display-info]]. Implementations that call [[display-name]] should use the `:default` display
@@ -364,21 +459,22 @@
   "Given some sort of Cljs object, return a map with the info you'd need to implement UI for it. This is mostly meant to
   power the Frontend JavaScript UI; in JS, results will be converted to plain JavaScript objects, so avoid returning
   things that should remain opaque."
-  ([query x]
+  ([query :- ::lib.schema/query
+    x     :- ::displayable]
    (display-info query -1 x))
 
   ([query        :- ::lib.schema/query
     stage-number :- :int
-    x]
+    x            :- ::displayable]
    (letfn [(display-info* [x]
-             (try
-               (display-info-method query stage-number x)
-               (catch #?(:clj Throwable :cljs js/Error) e
-                 (throw (ex-info (i18n/tru "Error calculating display info for {0}: {1}"
-                                           (lib.dispatch/dispatch-value x)
-                                           (ex-message e))
-                                 {:query query, :stage-number stage-number, :x x}
-                                 e)))))]
+             (lib.util/recover
+              (fn [] (display-info-method query stage-number x))
+              (fn [e]
+                (throw (ex-info (i18n/tru "Error calculating display info for {0}: {1}"
+                                          (lib.dispatch/dispatch-value x)
+                                          (ex-message e))
+                                {:query query, :stage-number stage-number, :x x}
+                                e)))))]
      #?(:clj
         (display-info* x)
         :cljs
@@ -394,7 +490,7 @@
   implementation and add additional information to it."
   [query        :- ::lib.schema/query
    stage-number :- :int
-   x]
+   x            :- ::displayable]
   (let [x-metadata (metadata query stage-number x)]
     (merge
      ;; TODO -- not 100% convinced the FE should actually have access to `:name`, can't it use `:display-name`
@@ -427,10 +523,9 @@
         :is-breakout            (boolean (:lib/breakout? x-metadata))})
      (when-some [selected (:selected? x-metadata)]
        {:selected selected})
-     (when-let [temporal-unit ((some-fn :metabase.lib.field/temporal-unit :temporal-unit) x-metadata)]
+     (when-let [temporal-unit ((some-fn :lib/temporal-unit :temporal-unit) x-metadata)]
        {:is-temporal-extraction
-        (and (contains? lib.schema.temporal-bucketing/datetime-extraction-units temporal-unit)
-             (not (contains? lib.schema.temporal-bucketing/datetime-truncation-units temporal-unit)))})
+        (contains? lib.schema.temporal-bucketing/datetime-integer-extraction-units temporal-unit)})
      (select-keys x-metadata [:breakout-positions :order-by-position :filter-positions]))))
 
 (defmethod display-info-method :default
@@ -445,16 +540,17 @@
           :visibility-type (:visibility-type table)}))
 
 (mr/def ::column-metadata-with-source
-  "Schema for the column metadata that should be returned by [[metadata]]."
+  "Schema for the column metadata that should be returned by [[metadata]]. A column metadata that is also required to
+  have `:lib/source`."
   [:merge
    [:ref ::lib.schema.metadata/column]
    [:map
     [:lib/source ::lib.schema.metadata/column.source]]])
 
 (mr/def ::returned-column
+  "Schema for a returned column as returned by [[returned-columns]]; includes all the normal metadata but is also
+  guaranteed to have `:lib/source`, `:lib/source-column-alias`, and `:lib/desired-column-alias`."
   [:merge
-   ;; visible column is just the normal column metadata schema but also requires `:lib/source` and
-   ;; `:lib/source-column-alias`
    [:ref ::visible-column]
    [:map
     [:lib/desired-column-alias ::lib.schema.metadata/desired-column-alias]]])
@@ -478,11 +574,22 @@
 (mr/def ::returned-columns.options
   "Schema for options passed to [[returned-columns]] and [[returned-columns-method]]."
   [:and
-   [:map
-    [:include-remaps? {:optional true, :default false} :boolean]]
+   [:map {:closed true}
+    [:include-remaps?           {:optional true, :default false} :boolean]
+    [:include-sensitive-fields? {:optional true, :default false} :boolean]]
    [:fn
     {:error/message "unique-name-fn is no longer allowed as an option."}
-    (complement :unique-name-fn)]])
+    (complement :unique-name-fn)]
+   ;; historically the third arg to [[visible-columns]] was something like a stage; catch code that has not been
+   ;; updated yet.
+   [:fn
+    {:error/message "Expected an options map, got something with :lib/type"
+     :error/fn      (fn [{:keys [value]} _]
+                      (str "Expected an options map, got a " (pr-str (:lib/type value))))}
+    (complement :lib/type)]])
+
+(def ^:private returned-columns-options-keys
+  (mu/map-schema-keys ::returned-columns.options))
 
 (defmulti returned-columns-method
   "Impl for [[returned-columns]]."
@@ -500,79 +607,103 @@
   [query _stage-number stage-number options]
   (returned-columns-method query stage-number (lib.util/query-stage query stage-number) options))
 
+(mr/def ::returned-columns-arg
+  "Something [[returned-columns]] can calculate returned columns for: an integer stage number of `query`, the query
+  itself, one of its stages, a join, a card, or a table."
+  [:or
+   :int
+   ::lib.schema/query
+   ::lib.schema/stage
+   ::lib.schema.join/join
+   ::lib.schema.metadata/card
+   ::lib.schema.metadata/table])
+
 (mu/defn returned-columns :- [:maybe ::returned-columns]
   "Return a sequence of metadata maps for all the columns expected to be 'returned' at a query, stage of the query, or
   join, and include the `:lib/source` of where they came from. This should only include columns that will be present
-  in the results; DOES NOT include 'expected' columns that are not 'exported' to subsequent stages.
+  in the results; DOES NOT include 'visible' columns that are not 'exported' to subsequent stages.
 
-  See [[::returned-columns.options]] for allowed options."
-  ([query]
-   (returned-columns query (lib.util/query-stage query -1)))
+  See [[::returned-columns.options]] for allowed options.
 
-  ([query x]
+  `returned-columns` always returns metadata relative to the source `x`, not subsequent stages or parent stages (for
+  joins)!!!! Take a moment and make sure you understand this concept clearly, it's SUPER IMPORTANT <3
+
+ Examples:
+
+ * `returned-columns` for a join is the same as `returned-columns` for the last stage of the join -- the columns have
+   source and desired aliases appropriate for the join's `:stages` if they were an entirely independent query, and do
+   not include join aliases!
+
+ * `returned-columns` for a stage have source and desired aliases relative to that stage!
+
+ * `returned-columns` for a Card has the same source and desired aliases you'd see in that Card's `:result-metadata`!!"
+  ([query :- ::lib.schema/query]
+   (returned-columns query -1 query))
+
+  ([query :- ::lib.schema/query
+    x     :- ::returned-columns-arg]
    (returned-columns query -1 x))
 
-  ([query stage-number x]
+  ([query        :- ::lib.schema/query
+    stage-number :- :int
+    x            :- ::returned-columns-arg]
    (returned-columns query stage-number x nil))
 
   ([query          :- ::lib.schema/query
     stage-number   :- :int
-    x
-    options        :- [:maybe ::returned-columns.options]]
+    x              :- ::returned-columns-arg
+    options        :- [:maybe [:ref ::visible-columns.options]]]
    (binding [*propagate-binning-and-bucketing* true]
-     (lib.metadata.cache/with-cached-value query (cache-key ::returned-columns query stage-number x options)
+     ;; minor optimization for caching purposes: only keep the options keys that are actually relevant for
+     ;; `returned-columns` purposes. As a bonus, this means undocumented options keys that aren't part of the schema
+     ;; will effectively be ignored, which sorta forces people to actually go document them.
+     (let [options (select-keys options returned-columns-options-keys)]
        (returned-columns-method query stage-number x options)))))
 
 (mr/def ::visible-column
+  "Schema for a column that should be returned by [[visible-columns]]. A visible column is a column metadata that is
+  required to also have `:lib/source` and `:lib/source-column-alias`.
+
+  `:lib/desired-column-alias` should not be returned by [[visible-columns]] since it needs to be calculated in the
+  context of the columns RETURNED by the stage! Do not expect it to be present. You should probably be using
+  `:lib/source-column-alias` for whatever purpose you think you need `:lib/desired-column-alias` for (field refs,
+  etc.)"
   [:merge
    [:ref ::column-metadata-with-source]
    [:map
     [:lib/source-column-alias ::lib.schema.metadata/source-column-alias]]])
 
 (mr/def ::visible-columns
-  "Schema for column metadata that should be returned by [[visible-columns]] and implementations
-  of [[visible-columns-method]]."
+  "Schema for column metadata that should be returned by [[visible-columns]]."
   [:sequential ::visible-column])
 
 (mr/def ::visible-columns.options
-  "Schema for options passed to [[visible-columns]] and [[visible-columns-method]]."
+  "Schema for options passed to [[visible-columns]]."
   [:merge
    [:ref ::returned-columns.options]
    [:map
-    ;; these all default to true
-    [:include-joined?                              {:optional true} :boolean]
-    [:include-expressions?                         {:optional true} :boolean]
-    [:include-implicitly-joinable?                 {:optional true} :boolean]
-    [:include-implicitly-joinable-for-source-card? {:optional true} :boolean]]])
+    [:include-joined?                              {:optional true, :default true} :boolean]
+    [:include-expressions?                         {:optional true, :default true} :boolean]
+    [:include-implicitly-joinable?                 {:optional true, :default true} :boolean]
+    [:include-implicitly-joinable-for-source-card? {:optional true, :default true} :boolean]]])
+
+(def ^:private visible-columns-options-keys
+  (mu/map-schema-keys ::visible-columns.options))
 
 (mu/defn- default-visible-columns-options :- ::visible-columns.options
   []
   {:include-joined?                              true
    :include-expressions?                         true
    :include-implicitly-joinable?                 true
-   :include-implicitly-joinable-for-source-card? true})
+   :include-implicitly-joinable-for-source-card? true
+   :include-sensitive-fields?                    false})
 
-(defmulti visible-columns-method
-  "Impl for [[visible-columns]]."
-  {:arglists '([query stage-number x options])}
-  (fn [_query _stage-number x _options]
-    (lib.dispatch/dispatch-value x))
-  :hierarchy lib.hierarchy/hierarchy)
-
-(defmethod visible-columns-method :dispatch-type/nil
-  [_query _stage-number _x _options]
-  [])
-
-;;; default impl is just the impl for [[returned-columns-method]]
-(defmethod visible-columns-method :default
-  [query stage-number x options]
-  (returned-columns-method query stage-number x options))
-
-;;; if you pass in an integer assume it's a stage number; use the method for the query stage itself.
-(defmethod visible-columns-method :dispatch-type/integer
-  [query _stage-number stage-number options]
-  (visible-columns-method query stage-number (lib.util/query-stage query stage-number) options))
-
+;;; TODO (Cam 8/7/25) -- historically `visible-columns` worked on a bunch of stuff besides just a stage, but Braden
+;;; pointed out that it really only makes any sense at all for a stage here
+;;; https://metaboat.slack.com/archives/C0645JP1W81/p1754587431585559 . For historic reasons the main entrypoint to
+;;; the function still lives here, but it's now just a shim that calls [[metabase.lib.stage/-visible-columns]] -- we
+;;; should combine these so there's no more indirection. It should probably live in [[metabase.lib.stage]] going
+;;; forward, but we'd need to update a lot of code that calls this version of [[visible-columns]].
 (mu/defn visible-columns :- ::visible-columns
   "Return a sequence of columns that should be visible *within* a given stage of something, e.g. a query stage or a
   join query. This includes not just the columns that get returned (ones present in [[metadata]], but other columns
@@ -586,40 +717,59 @@
   and would thus be returned by this function.
 
   Columns from joins, expressions, and implicitly joinable columns are included automatically by default;
-  see [[VisibleColumnsOptions]] for the options for disabling these columns."
-  ([query]
-   (visible-columns query (lib.util/query-stage query -1)))
+  see `::visible-columns.options` for the options for disabling these columns."
+  ([query :- [:maybe ::lib.schema/query]]
+   (visible-columns query -1))
 
-  ([query x]
-   (visible-columns query -1 x))
+  ([query        :- [:maybe ::lib.schema/query]
+    stage-number :- [:maybe :int]]
+   ;; apparently the FE sometimes accidentally calls this with a `nil` stage number -- see #31366 -- in that case just
+   ;; return an empty vector. The FE only has access to this arity, so we don't need to do the check below.
+   ;; See [[metabase.lib.metadata.calculation-test/visible-columns-test-2]]
+   (if (and query stage-number)
+     (visible-columns query stage-number nil)
+     []))
 
-  ([query stage-number x]
-   (visible-columns query stage-number x nil))
-
-  ([query          :- ::lib.schema/query
+  ([query          :- [:maybe ::lib.schema/query]
     stage-number   :- :int
-    x
     options        :- [:maybe ::visible-columns.options]]
-   (let [options (merge (default-visible-columns-options) options)]
-     (lib.metadata.cache/with-cached-value query (cache-key ::visible-columns query stage-number x options)
-       (visible-columns-method query stage-number x options)))))
+   (let [options (-> (merge (default-visible-columns-options) options)
+                     ;; minor caching optimization: only keep the keys that are relevant to `visible-columns` --
+                     ;; ignore any other ones. As a bonus, this means undocumented options keys that aren't part of
+                     ;; the schema will effectively be ignored.
+                     (select-keys visible-columns-options-keys))]
+     (lib.metadata.cache/with-cached-value query (cache-key ::visible-columns query stage-number nil options)
+       ((#?(:clj requiring-resolve :cljs resolve) 'metabase.lib.stage/-visible-columns)
+        query
+        stage-number
+        options)))))
 
 (mu/defn remapped-columns :- [:maybe ::visible-columns]
   "Given a seq of columns, return metadata for any remapped columns, if the `:include-remaps?` option is set."
   [query                                  :- ::lib.schema/query
    stage-number                           :- :int
    source-cols                            :- [:maybe [:sequential ::lib.schema.metadata/column]]
-   {:keys [include-remaps?] :as _options} :- [:maybe ::returned-columns.options]]
+   {:keys [include-remaps?] :as _options} :- [:maybe [:ref ::visible-columns.options]]]
   (when (and include-remaps?
              (lib.util/first-stage? query stage-number))
     (let [existing-ids (into #{} (keep :id) source-cols)]
       (for [column source-cols
+            :let   [fk-id (:fk-target-field-id column)]
+            :when  fk-id
+            :let   [fk-field (lib.metadata/field query fk-id)]
+            :when  (not (contains? #{:sensitive :retired} (:visibility-type fk-field)))
             :let   [remapped (lib.metadata/remapped-field query column)]
             :when  (and remapped
+                        (not (false? (:active remapped)))
+                        (not (contains? #{:sensitive :retired} (:visibility-type remapped)))
                         (not (existing-ids (:id remapped))))]
-        (assoc remapped
-               :lib/source              (:lib/source column) ; TODO: What's the right source for a remap?
-               :lib/source-column-alias ((some-fn :lib/source-column-alias :name) remapped))))))
+        (merge
+         remapped
+         {:lib/source              (:lib/source column) ; TODO: What's the right source for a remap?
+          :lib/source-column-alias ((some-fn :lib/source-column-alias :name) remapped)}
+         ;; if a remap is of a joined column then we should do the remap in the join itself; columns with
+         ;; `:lib/source` `:source/joins` need to have a join alias.
+         (select-keys column [:lib/join-alias]))))))
 
 (mu/defn primary-keys :- [:sequential ::lib.schema.metadata/column]
   "Returns a list of primary keys for the source table of this query."
@@ -629,7 +779,7 @@
           (lib.metadata/fields query table-id)
           (returned-columns query))))
 
-(defn implicitly-joinable-columns
+(mu/defn implicitly-joinable-columns :- ::visible-columns
   "Columns that are implicitly joinable from some other columns in `column-metadatas`. To be joinable, the column has to
   have (1) appropriate FK metadata, i.e. have an `:fk-target-field-id` pointing to another Field, and (2) have a numeric
   `:id`, i.e. be a real database column that can be used in a JOIN condition. (I think we only include this information
@@ -638,37 +788,34 @@
   Does not include columns from any Tables that are already explicitly joined.
 
   Does not include columns that would be implicitly joinable via multiple hops."
-  [query stage-number column-metadatas]
-  (let [remap-target-ids (into #{} (keep (comp :field-id :lib/external-remap)) column-metadatas)
+  [query        :- ::lib.schema/query
+   stage-number :- :int
+   cols         :- [:sequential ::lib.schema.metadata/column]]
+  (let [remap-target-ids (into #{} (keep (comp :field-id :lib/external-remap)) cols)
         existing-table-ids (into #{} (comp (remove (comp remap-target-ids :id))
                                            (map :table-id))
-                                 column-metadatas)
-        fk-fields (into [] (filter (every-pred :fk-target-field-id (comp number? :id))) column-metadatas)
+                                 cols)
+        fk-fields (into [] (filter (every-pred :fk-target-field-id (comp number? :id))) cols)
         id->target-fields (m/index-by :id (lib.metadata/bulk-metadata
                                            query :metadata/column (into #{} (map :fk-target-field-id) fk-fields)))
         target-fields (into []
-                            (comp (map (fn [{source-field-id :id
-                                             :keys [fk-target-field-id]
-                                             :as   source}]
-                                         (-> (id->target-fields fk-target-field-id)
-                                             (assoc ::fk-field-id   source-field-id
-                                                    ::fk-field-name (lib.field.util/inherited-column-name source)
-                                                    ::fk-join-alias (:metabase.lib.join/join-alias source)))))
+                            (comp (keep (fn [{source-field-id :id
+                                              :keys [fk-target-field-id]
+                                              :as   source}]
+                                          ;; the target field might not exist
+                                          (when-let [target (id->target-fields fk-target-field-id)]
+                                            (assoc target
+                                                   ::fk-field-id   source-field-id
+                                                   ::fk-field-name (lib.field.util/inherited-column-name source)
+                                                   ::fk-join-alias (:lib/join-alias source)))))
                                   (remove #(contains? existing-table-ids (:table-id %))))
                             fk-fields)
         id->table (m/index-by :id (lib.metadata/bulk-metadata
                                    query :metadata/table (into #{} (map :table-id) target-fields)))]
     (into []
           (mapcat (fn [{:keys [table-id], ::keys [fk-field-id fk-field-name fk-join-alias]}]
-                    (let [table-metadata (id->table table-id)
-                          ;; Shouldn't we be forwarding the rest of the `options` as well? -- Cam
-                          ;;
-                          ;; I wouldn't say so. This is deliberately minimal, including only the core/default columns
-                          ;; for an implicit join. In practice since implicit joins are only to tables (or cards, in
-                          ;; the future) the other options (including joins, expressions, etc.) are not relevant. It's
-                          ;; always the table's columns, or the returned-columns of the card. -- Braden
-                          options        {:include-implicitly-joinable? false}]
-                      (for [field (visible-columns-method query stage-number table-metadata options)]
+                    (let [table (id->table table-id)]
+                      (for [field (returned-columns query stage-number table)]
                         (m/assoc-some field
                                       :fk-field-id              fk-field-id
                                       :fk-field-name            fk-field-name
@@ -689,4 +836,27 @@
   (let [no-fields (lib.util/update-query-stage query stage-number dissoc :fields)]
     (into [] (remove (comp #{:source/joins :source/implicitly-joinable}
                            :lib/source))
-          (returned-columns no-fields stage-number (lib.util/query-stage no-fields stage-number)))))
+          (returned-columns no-fields stage-number))))
+
+(mu/defn primary-source-table :- [:maybe ::lib.schema.metadata/table]
+  "If this query has an MBQL first stage with a `:source-table` ID, return the `:metadata/table` for it.
+
+  Returns nil if the query is native or has a `:source-card`."
+  [query :- ::lib.schema/query]
+  (some->> query lib.util/source-table-id (lib.metadata/table query)))
+
+(mu/defn primary-source-card :- [:maybe ::lib.schema.metadata/card]
+  "If this query has an MBQL first stage with a `:source-card` ID, return the `:metadata/card` for it.
+
+  Returns nil if the query is native or has a `:source-table`."
+  [query :- ::lib.schema/query]
+  (some->> query lib.util/source-card-id (lib.metadata/card query)))
+
+(mu/defn primary-source :- [:maybe [:or ::lib.schema.metadata/card ::lib.schema.metadata/table]]
+  "If this query has an MBQL first stage with a `:source-table` or `:source-card`, return the corresponding
+  `:metadata/table` or `:metadata/card`.
+
+  Returns nil if the query is native."
+  [query :- ::lib.schema/query]
+  (or (primary-source-table query)
+      (primary-source-card  query)))

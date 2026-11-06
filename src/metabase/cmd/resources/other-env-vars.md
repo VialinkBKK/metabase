@@ -15,6 +15,26 @@ Use [MB_SESSION_COOKIES](#mb_session_cookies) to also expire sessions, when brow
 
 Also see the [Changing session expiration](../people-and-groups/changing-session-expiration.md) documentation page.
 
+### `MB_APPLICATION_DB_IDLE_CONNECTION_TEST_PERIOD_SECONDS`
+
+Type: integer<br>
+Default: `60`<br>
+Since: v62.0
+
+How often, in seconds, to test idle connections in the application database pool. Set to `0` to disable idle connection testing.
+
+### `MB_APPLICATION_DB_MAX_CONNECTION_AGE_SECONDS`
+
+Type: integer<br>
+Default: `3600`<br>
+Since: v62.0
+
+Maximum lifetime, in seconds, of a connection in the application database pool. After this duration the connection is closed and a new one is opened. Set to `0` to keep connections until the database closes them.
+
+The default of one hour is set primarily to limit memory growth (especially on PostgreSQL).
+
+If you are connecting with a short-lived credential (e.g. an AWS RDS IAM auth token) baked into the URL or password at startup, setting this to `0` is a partial workaround — eventual reconnects from the database or the network will still fail. Prefer [MB_DB_AWS_IAM](#mb_db_aws_iam) (AWS RDS / Aurora) or [MB_DB_AZURE_MANAGED_IDENTITY_CLIENT_ID](#mb_db_azure_managed_identity_client_id) (Azure).
+
 ### `MB_APPLICATION_DB_MAX_CONNECTION_POOL_SIZE`
 
 Type: integer<br>
@@ -29,6 +49,30 @@ To see how many connections are being used, check the Metabase logs and look for
 
 See [MB_JDBC_DATA_WAREHOUSE_MAX_CONNECTION_POOL_SIZE](#mb_jdbc_data_warehouse_max_connection_pool_size) for setting maximum connections to the databases connected to Metabase.
 
+### `MB_APPLICATION_DB_MAX_IDLE_TIME_EXCESS_CONNECTIONS_SECONDS`
+
+Type: integer<br>
+Default: `600`<br>
+Since: v62.0
+
+How long, in seconds, an idle connection beyond the minimum pool size may stay open before being culled. Set to `0` to never cull excess idle connections.
+
+### `MB_APPLICATION_DB_TEST_CONNECTION_ON_CHECKOUT`
+
+Type: boolean<br>
+Default: `false`<br>
+Since: v62.0
+
+When `true`, each connection is validated when checked out of the pool. Adds latency to every checkout. Useful when credentials may invalidate connections behind the pool's back.
+
+### `MB_APPLICATION_DB_UNRETURNED_CONNECTION_TIMEOUT_SECONDS`
+
+Type: integer<br>
+Default: `3600`<br>
+Since: v62.0
+
+How long, in seconds, before a checked-out but unreturned connection is forcibly reclaimed. The legacy name `MB_APPLICATION_DB_UNRETURNED_CONNECTION_TIMEOUT` continues to work; the suffixed form is preferred.
+
 ### `MB_ASYNC_QUERY_THREAD_POOL_SIZE`
 
 Type: integer<br>
@@ -36,29 +80,6 @@ Default: `50`<br>
 Since: v35.0
 
 Maximum number of async Jetty threads. If not set, then [MB_JETTY_MAXTHREADS](#mb_jetty_maxthreads) will be used, otherwise it will use the default.
-
-### `MB_ATTACHMENT_TABLE_ROW_LIMIT`
-
-Type: integer<br>
-Default: `20`<br>
-
-Limits the number of rows Metabase will display in tables sent with dashboard subscriptions and alerts. Range: 1-100. To limit the total number of rows included in the file attachment for an email dashboard subscription, use [MB_UNAGGREGATED_QUERY_ROW_LIMIT](#mb_unaggregated_query_row_limit).
-
-### `MB_AUDIT_MAX_RETENTION_DAYS`
-
-Only available on Metabase [Pro](https://www.metabase.com/product/pro) and [Enterprise](https://www.metabase.com/product/enterprise) plans.<br>
-Type: integer<br>
-Default: 720 (Metabase keeps all rows)<br>
-
-Sets the maximum number of days Metabase preserves rows for the following application database tables:
-
-- `query_execution`
-- `audit_log`
-- `view_log`
-
-Twice a day, Metabase will delete rows older than this threshold.
-
-The minimum value is `30` days (Metabase will treat entered values of `1` to `29` the same as `30`). If set to `0`, Metabase will keep all rows.
 
 ### `MB_COLORIZE_LOGS`
 
@@ -81,12 +102,36 @@ Default: `true`
 
 When set to `false`, Metabase will print migrations needed to be done in the application database and exit. Those migrations need to be applied manually. When `true`, Metabase will automatically make changes to the application database. This is not related to migrating away from H2.
 
+### `MB_DB_AWS_IAM`
+
+Type: boolean<br>
+Default: `false`<br>
+Since: v0.58.0
+
+When `true`, authenticate to the application database (PostgreSQL or MySQL/MariaDB on AWS RDS or Aurora) using AWS IAM instead of a password. Omit [MB_DB_PASS](#mb_db_pass). Auth tokens are refreshed automatically.
+
+Requires that AWS credentials are available via the standard credential chain (e.g. EKS IRSA, EC2 instance profile, ECS task role, or `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`), that the credentials hold the `rds-db:connect` permission for your database user, and that the DB user is set up for IAM authentication.
+
+For MySQL/MariaDB, also set [MB_DB_SSL_CERT](#mb_db_ssl_cert), or pass the SSL parameters in [MB_DB_CONNECTION_URI](#mb_db_connection_uri).
+
+### `MB_DB_AZURE_MANAGED_IDENTITY_CLIENT_ID`
+
+Type: string<br>
+Default: `null`<br>
+Since: v0.51.0
+
+Authenticate to a PostgreSQL or MySQL application database using an Azure Managed Identity instead of a password. Set this to the client ID of a user-assigned Managed Identity attached to your compute resource. Omit [MB_DB_PASS](#mb_db_pass). Access tokens are refreshed automatically.
+
+Requires the Database authentication providers Pro/Enterprise feature.
+
 ### `MB_DB_CONNECTION_URI`
 
 Type: string<br>
 Default: `null`
 
 A JDBC-style connection URI that can be used instead of most of `MB_DB_*` like [MB_DB_HOST](#mb_db_host). Also used when certain Connection String parameters are required for the connection. The connection type requirement is the same as [MB_DB_TYPE](#mb_db_type).
+
+Note that the `currentSchema` JDBC parameter has no effect. [The schema used for PostgreSQL application databases must be `public`](https://github.com/metabase/metabase/issues/37836).
 
 Examples:
 
@@ -142,6 +187,17 @@ Default: `null`
 
 The port for [MB_DB_HOST](#mb_db_host).
 
+### `MB_DB_SSL_CERT`
+
+Type: string<br>
+Default: `null`<br>
+Since: v0.58.0
+
+SSL configuration for the application database. Used with [MB_DB_AWS_IAM](#mb_db_aws_iam) on MySQL/MariaDB, where SSL is required.
+
+- `"trust"` — trust the server certificate without validation.
+- A filesystem path to a PEM file — validate against the supplied CA certificate.
+
 ### `MB_DB_TYPE`
 
 Type: string (`"h2"`, `"postgres"`, `"mysql"`)<br>
@@ -162,6 +218,13 @@ Type: string<br>
 Default: `null`
 
 Used during development of third-party drivers. Set the value to have that plugin manifest get loaded during startup. Specify multiple plugin manifests by comma-separating them.
+
+### `MB_DISABLE_LEGACY_STARTUP_ENCRYPTION`
+
+Type: boolean<br>
+Default: `false`
+
+By default, when [MB_ENCRYPTION_SECRET_KEY](#mb_encryption_secret_key) is set, Metabase encrypts on startup any values that an older version of Metabase stored unencrypted, and logs a warning for each column it had to encrypt. When `true`, Metabase will refuse to start instead of encrypting such values, including settings saved by an older version.
 
 ### `MB_DISABLE_SCHEDULER`
 
@@ -212,7 +275,7 @@ Since: v51.3
 
 If `true`, log a stack trace for any connections killed due to exceeding the timeout specified in [MB_DB_QUERY_TIMEOUT_MINUTES](#mb_db_query_timeout_minutes).
 
-In order to see the stack traces in the logs, you'll also need to update the com.mchange log level to "INFO" or higher via a custom log4j configuration. For configuring log levels, see [Metabase log configuration](./log-configuration.md).
+In order to see the stack traces in the logs, you'll also need to update the com.mchange log level to "INFO" or higher via a custom log4j configuration. For configuring log levels, see [Application logs](../monitor/application-logs.md).
 
 ### `MB_JETTY_ASYNC_RESPONSE_TIMEOUT`
 
@@ -220,7 +283,7 @@ Type: integer<br>
 Default: `600000`<br>
 Since: v35.0
 
-Timeout of Jetty async threads, defined in milliseconds. The default is 10 minutes. Very few things might reach that timeout, since they return some type of data before, but things like CSV downloads might.
+Timeout of Jetty async threads, defined in milliseconds. The default is 10 minutes. Very few things might reach that timeout, since they return some type of data before, but things like CSV downloads might. Metabot chat responses aren't bound by this timeout.
 
 ### `MB_JETTY_DAEMON`
 
@@ -336,27 +399,39 @@ Default: `null`
 
 Password for Java TrustStore file.
 
-### `MB_LANDING_PAGE`
-
-Only available on Metabase [Pro](https://www.metabase.com/product/pro) and [Enterprise](https://www.metabase.com/product/enterprise) plans.<br>
-Type: string<br>
-Default: `""`
-
-Default page to show people when they log in.
-
-### `MB_LOAD_ANALYTICS_CONTENT`
-
-Type: Boolean<br>
-Default: True
-
-If you want to exclude the [Metabase analytics](../usage-and-performance-tools/usage-analytics.md) collection, you can set `MB_LOAD_ANALYTICS_CONTENT=false`. Setting this environment variable to false can also come in handy when migrating environments, as it can simplify the migration process.
-
 ### `MB_LOAD_SAMPLE_CONTENT`
 
 Type: Boolean<br>
 Default: True
 
 Whether to include the Sample Database in your Metabase. To exclude the Sample Database, set `MB_LOAD_SAMPLE_CONTENT=false`.
+
+### `MB_MONITOR_PERFORMANCE`
+
+Type: string<br>
+Default: `""`
+
+When set, starts a Java Flight Recorder (JFR) recording at startup that can be analyzed with JDK Mission Control or other JFR tools.
+
+- `"true"` generates a timestamped output file like `metabase-20260115_143000.jfr`
+- A value ending in `.jfr` is used as the output filename
+- Any other non-empty value is treated as a directory path. A new timestamped JFR file is written to that directory every 30 minutes (e.g., `metabase-20260115_143000.jfr`). Data is only written at the end of each 30-minute interval.
+- `""` or `"false"` disables monitoring (the default)
+
+The performance recording stores only method signature calls and other code execution metrics.
+It does not store any sensitive information such as environment variables, system properties, or other machine information.
+
+### `MB_MONITOR_PERFORMANCE_SAVE_RATE`
+
+Type: integer<br>
+Default: mode-specific (5 minutes for single-file mode, 30 minutes for rolling mode)
+
+Override the interval (in minutes) at which JFR recording data is saved to disk. Only applies when [MB_MONITOR_PERFORMANCE](#mb_monitor_performance) is enabled.
+
+- In single-file mode, the default is `5` minutes.
+- In rolling directory mode, the default is `30` minutes.
+
+Setting this value overrides the default for whichever mode is active.
 
 ### `MB_NO_SURVEYS`
 
@@ -384,7 +459,7 @@ Comma-separated namespaces to trace. **WARNING:** Could log sensitive informatio
 
 ### `MB_PASSWORD_COMPLEXITY`
 
-Type: string (`"weak"`, `"normal"`, `"strong"`)<br>
+Type: string (`"weak"`, `"normal"`, `"strong"`, `"strong-enough"`)<br>
 Default: `"normal"`
 
 Enforce a password complexity rule to increase security for regular logins. This only applies to new users or users that are changing their password. Related [MB_PASSWORD_LENGTH](#mb_password_length)
@@ -392,6 +467,7 @@ Enforce a password complexity rule to increase security for regular logins. This
 - `weak` no character constraints
 - `normal` at least 1 digit
 - `strong` minimum 8 characters w/ 2 lowercase, 2 uppercase, 1 digit, and 1 special character
+- `strong-enough` minimum 15 characters
 
 ### `MB_PASSWORD_LENGTH`
 
@@ -409,12 +485,14 @@ Path of the "plugins" directory, which is used to store the Metabase database dr
 
 The location is where custom third-party drivers should be added. Then Metabase will load the driver on startup, which can be verified in the log.
 
-### `MB_PREMIUM_EMBEDDING_TOKEN`
+### `MB_PROMETHEUS_SERVER_PORT`
 
-Type: string<br>
+Type: integer<br>
 Default: `null`
 
-The license token used for Pro and Enterprise to enable premium features on the Enterprise edition. It is also used for the deprecated "Premium Embedding" functionality on the OSS edition.
+Port to serve Prometheus metrics from. If set, Prometheus collectors are registered and served from `localhost:<port>/metrics`.
+
+See [Observability with Prometheus](../installation-and-operation/observability-with-prometheus.md).
 
 ### `MB_QP_CACHE_BACKEND`
 
@@ -423,31 +501,22 @@ Default: `"db"`
 
 Current cache backend. Dynamically rebindable primarily for test purposes.
 
-### `MB_SEARCH_TYPEAHEAD_ENABLED`
+### `MB_QUARTZ_MAX_CONNECTION_POOL_SIZE`
 
-Type: boolean<br>
-Default: `true`<br>
-Since: v39.0
+Type: integer<br>
+Default: `5`<br>
+Since: v64.0
 
-Show auto-suggestions when using the global search in the top navigation bar.
+Maximum number of connections in the dedicated pool that Metabase's internal task scheduler (Quartz) uses to talk to the application database. This pool is separate from the main application database pool (see [MB_APPLICATION_DB_MAX_CONNECTION_POOL_SIZE](#mb_application_db_max_connection_pool_size)), so scheduled tasks can always reach the application database even when the main pool is fully in use.
 
-### `MB_SEND_EMAIL_ON_FIRST_LOGIN_FROM_NEW_DEVICE`
+Scheduler operations are short, so the default is enough for most deployments. Consider raising it only if you run a very large number of scheduled items (subscriptions, alerts, syncs) and see tasks firing late.
 
-Type: boolean<br>
-Default: `true`<br>
-Since: v39.0
+### `MB_SESSION_SECRET_KEY`
 
-Send email notification to user, when they login from a new device. Set to `false` to stop sending "We've noticed a new login on your Metabase account" emails for all users.
+Type: string<br>
+Default: `null`
 
-Also, this variable controls the geocoding service that Metabase uses to know the location from where your users logged in. Setting this variable to false also disables this reverse geocoding functionality.
-
-### `MB_SEND_NEW_SSO_USER_ADMIN_EMAIL`
-
-Only available on Metabase [Pro](https://www.metabase.com/product/pro) and [Enterprise](https://www.metabase.com/product/enterprise) plans.<br>
-Type: boolean<br>
-Default: `true`
-
-Send email notifications to users in Admin group, when a new SSO users is created on Metabase.
+When set, session keys are stored in the application database signed with this secret, so a valid session cannot be created or used with database access alone. Requirement: minimum 16 characters. Setting or changing this value logs out all active sessions.
 
 ### `MB_SETUP_TOKEN`
 
@@ -473,16 +542,9 @@ Since: v48.4
 
 Setting `MB_JETTY_SKIP_SNI=true` (the default setting) turns off the Server Name Indication (SNI) checks in the Jetty web server. Normally you would leave this enabled. If, however, you're terminating the Transport Layer Security (TLS) connection on Metabase itself, and you're getting an error like `HTTP ERROR 400 Invalid SNI`, consider either setting `MB_JETTY_SKIP_SNI=false`, or use another SSL certificate that exactly matches the domain name of the server.
 
-### `MB_SOURCE_ADDRESS_HEADER`
-
-Type: string<br>
-Default: `X-Forwarded-For`
-
-Identify the source of HTTP requests by this header's value, instead of its remote address. Related to [MB_DISABLE_SESSION_THROTTLE](#mb_disable_session_throttle).
-
 ### `MB_SSL_CERTIFICATE_PUBLIC_KEY`
 
 Type: string<br>
 Default: `null`
 
-Base-64 encoded public key for this sites SSL certificate. Specify this to enable HTTP Public Key Pinning. Using HPKP is no longer recommended. See http://mzl.la/1EnfqBf for more information.
+Base-64 encoded public key for this sites SSL certificate. Specify this to enable HTTP Public Key Pinning. Using HPKP is no longer recommended. See https://developer.mozilla.org/en-US/docs/Web/Security/Defenses/Certificate_Transparency for more information.

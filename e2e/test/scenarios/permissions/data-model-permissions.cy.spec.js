@@ -14,7 +14,6 @@ describe("scenarios > admin > permissions", () => {
     H.activateToken("pro-self-hosted");
 
     cy.intercept("PUT", "/api/table/*").as("tableUpdate");
-    cy.intercept("PUT", "/api/field/*").as("fieldUpdate");
     cy.intercept(
       "GET",
       "/api/table/*/query_metadata?include_sensitive_fields=true&include_editable_data_model=true",
@@ -37,12 +36,10 @@ describe("scenarios > admin > permissions", () => {
     cy.visit("/");
 
     // Go to the admin settings
-    cy.icon("gear").click();
-    // eslint-disable-next-line no-unscoped-text-selectors -- deprecated usage
-    cy.findByText("Admin settings").click();
+    H.goToAdmin();
 
     // Assert the Data Model page state
-    // eslint-disable-next-line no-unscoped-text-selectors -- deprecated usage
+    // eslint-disable-next-line metabase/no-unscoped-text-selectors -- deprecated usage
     cy.findByText("Table Metadata");
     H.DataModel.TablePicker.getTable("Orders").click();
     cy.wait("@tableMetadataFetch");
@@ -63,6 +60,7 @@ describe("scenarios > admin > permissions", () => {
     H.DataModel.TablePicker.getTable("Changed Name")
       .button("Hide table")
       .click();
+    cy.wait("@tableUpdate");
     H.DataModel.TablePicker.getTable("Changed Name")
       .button("Hide table")
       .should("not.exist");
@@ -86,12 +84,10 @@ describe("scenarios > admin > permissions", () => {
     cy.visit("/");
 
     // Go to the admin settings
-    cy.icon("gear").click();
-    // eslint-disable-next-line no-unscoped-text-selectors -- deprecated usage
-    cy.findByText("Admin settings").click();
+    H.goToAdmin();
 
     // Assert the Data Model page state
-    // eslint-disable-next-line no-unscoped-text-selectors -- deprecated usage
+    // eslint-disable-next-line metabase/no-unscoped-text-selectors -- deprecated usage
     cy.findByText("Table Metadata");
     H.DataModel.TablePicker.getTables().should("have.length", 8);
     H.DataModel.TablePicker.getTable("Accounts").should("be.visible");

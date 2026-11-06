@@ -1,15 +1,10 @@
-import type { ReactNode } from "react";
+import type { JSX, ReactNode } from "react";
 
-import LogoIcon from "metabase/common/components/LogoIcon";
-import { useSelector } from "metabase/lib/redux";
+import { LighthouseIllustration } from "metabase/common/components/LighthouseIllustration";
+import { LogoIcon } from "metabase/common/components/LogoIcon";
+import { useSelector } from "metabase/redux";
 import { getLoginPageIllustration } from "metabase/selectors/whitelabel";
-
-import {
-  LayoutBody,
-  LayoutCard,
-  LayoutIllustration,
-  LayoutRoot,
-} from "./AuthLayout.styled";
+import { Box, Card, Stack } from "metabase/ui";
 
 interface AuthLayoutProps {
   children?: ReactNode;
@@ -19,18 +14,42 @@ export const AuthLayout = ({ children }: AuthLayoutProps): JSX.Element => {
   const loginPageIllustration = useSelector(getLoginPageIllustration);
 
   return (
-    <LayoutRoot data-testid="login-page">
-      {loginPageIllustration && (
-        <LayoutIllustration
-          data-testid="login-page-illustration"
-          backgroundImageSrc={loginPageIllustration.src}
-          isDefault={loginPageIllustration.isDefault}
-        />
-      )}
-      <LayoutBody>
+    <Box data-testid="login-page" pos="relative" bg="background_page-secondary">
+      {loginPageIllustration &&
+        (loginPageIllustration.isDefault ? (
+          <LighthouseIllustration />
+        ) : (
+          <Box
+            data-testid="login-page-illustration"
+            pos="absolute"
+            inset={0}
+            bgsz="100% auto"
+            bgr="no-repeat"
+            bgp="right bottom"
+            style={{ backgroundImage: `url("${loginPageIllustration.src}")` }}
+          />
+        ))}
+      <Stack
+        gap="xl"
+        justify="center"
+        align="center"
+        pos="relative"
+        pt="xl"
+        px="lg"
+        pb="3rem"
+        mih="100vh"
+      >
         <LogoIcon height={65} />
-        <LayoutCard>{children}</LayoutCard>
-      </LayoutBody>
-    </LayoutRoot>
+        <Card
+          w={{ base: "100%", sm: "30.875rem" }}
+          py="xxxl"
+          px={{ base: "xl", sm: "3.5rem" }}
+          radius="xs"
+          shadow="sm"
+        >
+          {children}
+        </Card>
+      </Stack>
+    </Box>
   );
 };

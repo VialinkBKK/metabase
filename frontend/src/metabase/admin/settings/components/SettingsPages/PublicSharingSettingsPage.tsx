@@ -1,15 +1,16 @@
 import { t } from "ttag";
 
+import { useSetting } from "metabase/settings";
 import {
+  AdminSettingInput,
   SettingsPageWrapper,
   SettingsSection,
-} from "metabase/admin/components/SettingsSection";
-import { useSetting } from "metabase/common/hooks";
+} from "metabase/settings-components";
 
-import { AdminSettingInput } from "../widgets/AdminSettingInput";
 import {
   PublicLinksActionListing,
   PublicLinksDashboardListing,
+  PublicLinksDocumentListing,
   PublicLinksQuestionListing,
 } from "../widgets/PublicLinksListing";
 
@@ -31,6 +32,9 @@ export function PublicSharingSettingsPage() {
           </SettingsSection>
           <SettingsSection title={t`Shared questions`}>
             <PublicLinksQuestionListing />
+          </SettingsSection>
+          <SettingsSection title={t`Shared documents`}>
+            <PublicLinksDocumentListing />
           </SettingsSection>
           <SettingsSection title={t`Shared action forms`}>
             <PublicLinksActionListing />

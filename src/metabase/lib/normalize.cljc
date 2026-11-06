@@ -1,4 +1,5 @@
 (ns metabase.lib.normalize
+  (:refer-clojure :exclude [some])
   (:require
    [malli.core :as mc]
    [malli.error :as me]
@@ -6,10 +7,12 @@
    [metabase.lib.schema :as lib.schema]
    [metabase.lib.schema.mbql-clause :as lib.schema.mbql-clause]
    [metabase.lib.schema.metadata :as lib.schema.metadata]
-   [metabase.util :as u]
+   [metabase.lib.util :as lib.util]
    [metabase.util.i18n :as i18n]
    [metabase.util.log :as log]
-   [metabase.util.malli.registry :as mr]))
+   [metabase.util.malli :as mu]
+   [metabase.util.malli.registry :as mr]
+   [metabase.util.performance :refer [some]]))
 
 (defn- lib-type [x]
   (when (map? x)
@@ -24,6 +27,7 @@
    :metadata/table    ::lib.schema.metadata/table
    :metadata/column   ::lib.schema.metadata/column
    :metadata/card     ::lib.schema.metadata/card
+   :metadata/measure  ::lib.schema.metadata/measure
    :metadata/segment  ::lib.schema.metadata/segment
    :metadata/metric   ::lib.schema.metadata/metric})
 
@@ -33,7 +37,7 @@
     (or (-> x lib-type lib-type->schema)
         :map)
 
-    (and (vector? x)
+    (and (sequential? x)
          ((some-fn simple-keyword? string?) (first x)))
     (lib.schema.mbql-clause/tag->registered-schema-name (first x))
 
@@ -44,26 +48,33 @@
   "If normalization errors somewhere, just log the error and return the partially-normalized result. Easier to debug
   this way."
   [error]
-  (log/warnf "Error normalizing pMBQL: %s\n%s"
-             (pr-str (me/humanize (:explain error)))
-             (u/pprint-to-str (dissoc error :explain)))
+  (log/debugf "Error normalizing MBQL 5: %s"
+              (pr-str (me/humanize (:explain error))))
   (:value error))
 
+#_{:clj-kondo/ignore [:metabase/discourage-dynamic-vars]}
 (def ^:private ^:dynamic *error-fn*
   default-error-fn)
 
-(defn- coercer [schema]
-  (mr/cached ::coercer
+(defn- coercer [schema legacy-int-field-ids?]
+  (mr/cached (if legacy-int-field-ids? ::coercer ::coercer.no-legacy-int-field-ids)
              schema
              (fn []
-               (let [respond identity
-                     raise   #'*error-fn*] ; capture var rather than the bound value at the time this is eval'ed
-                 (mc/coercer schema (mtx/transformer mtx/default-value-transformer {:name :normalize}) respond raise)))))
+               (let [respond     identity
+                     raise       #'*error-fn* ; capture var rather than the bound value at the time this is eval'ed
+                     transformer (if legacy-int-field-ids?
+                                   (mtx/transformer mtx/default-value-transformer
+                                                    {:name :normalize}
+                                                    {:name :legacy-int-field-ids})
+                                   (mtx/transformer mtx/default-value-transformer
+                                                    {:name :normalize}))]
+                 (log/debugf "Building :normalize coercer for schema %s" (pr-str schema))
+                 (mc/coercer schema transformer respond raise)))))
 
 (defn normalize
   "Ensure some part of an MBQL query `x`, e.g. a clause or map, is in the right shape after coming in from JavaScript or
   deserialized JSON (from the app DB or a REST API request). This is intended for things that are already in a
-  generally correct pMBQL; to 'normalize' things from legacy MBQL, use [[metabase.lib.convert]].
+  generally correct MBQL 5; to 'normalize' things from legacy MBQL, use [[metabase.lib.convert]].
 
   Normalization logic is defined in various schemas; grep for `:decode/normalize` in the `metabase.lib.schema*`
   namespaces.
@@ -75,20 +86,37 @@
   Pass in a `nil` schema to automatically attempt to infer the schema based on `x` itself.
 
   By default, does not throw Exceptions -- just logs them and returns what it was able to normalize, but you can pass
-  in the option `{:throw? true}` to have it throw exceptions when normalization fails."
+  in the option `{:throw? true}` to have it throw exceptions when normalization fails.
+
+  Legacy MBQL schemas treat a raw positive integer in a comparison's first argument as an MBQL 2 Field ID, e.g.
+  `[:= 1 1]` => `[:= [:field 1 nil] 1]`. Pass `{:legacy-int-field-ids? false}` to keep it as a literal."
   ([x]
    (normalize nil x))
 
   ([schema x]
    (normalize schema x nil))
 
-  ([schema x {:keys [throw?], :or {throw? false}, :as _options}]
+  ([schema x {:keys [throw? legacy-int-field-ids?], :or {throw? false, legacy-int-field-ids? true}, :as _options}]
    (let [schema (or schema (infer-schema x))
          thunk  (^:once fn* []
-                  ((coercer schema) x))]
+                  ((coercer schema legacy-int-field-ids?) x))]
      (if throw?
        (binding [*error-fn* (fn [error]
                               (throw (ex-info (i18n/tru "Normalization error")
                                               {:schema schema, :x x, :error error})))]
          (thunk))
-       (thunk)))))
+       (lib.util/recover
+        thunk
+        (fn [e]
+          (throw (ex-info (str "Uncaught normalization error: " (ex-message e))
+                          {:schema schema}
+                          e))))))))
+
+(mu/defn ->normalized-stage-metadata :- ::lib.schema.metadata/stage
+  "Take a sequence of legacy or Lib metadata maps, convert to Lib-style if needed, then normalize them.
+
+  Note that this returns a map with `:columns` rather than a sequence of columns like the input."
+  [cols :- [:sequential ::lib.schema.metadata/lib-or-legacy-column]]
+  (->> cols
+       lib.util/->stage-metadata
+       (normalize ::lib.schema.metadata/stage)))

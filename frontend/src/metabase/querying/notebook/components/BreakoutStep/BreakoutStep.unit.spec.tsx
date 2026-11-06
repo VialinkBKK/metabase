@@ -5,18 +5,31 @@ import {
   fireEvent,
   getIcon,
   queryIcon,
-  render,
+  renderWithProviders,
   screen,
   within,
 } from "__support__/ui";
 import * as Lib from "metabase-lib";
-import { createQueryWithClauses } from "metabase-lib/test-helpers";
-import Question from "metabase-lib/v1/Question";
-import { createMockCard } from "metabase-types/api/mocks";
 import {
+  SAMPLE_PROVIDER,
+  createMetadataProvider,
+} from "metabase-lib/test-helpers";
+import Question from "metabase-lib/v1/Question";
+import type { FieldReference, TemporalUnit } from "metabase-types/api";
+import {
+  createMockCard,
+  createMockField,
+  createMockNativeDatasetQuery,
+  createMockNativeQuery,
+  createMockStructuredDatasetQuery,
+} from "metabase-types/api/mocks";
+import {
+  ORDERS_ID,
+  SAMPLE_DB_ID,
   createOrdersIdField,
   createOrdersTable,
   createSampleDatabase,
+  createSavedNativeCard,
 } from "metabase-types/api/mocks/presets";
 
 import { DEFAULT_QUESTION, createMockNotebookStep } from "../../test-utils";
@@ -25,68 +38,136 @@ import type { NotebookStep } from "../../types";
 import { BreakoutStep } from "./BreakoutStep";
 
 function createQueryWithBreakout() {
-  return createQueryWithClauses({
-    breakouts: [{ tableName: "ORDERS", columnName: "TAX" }],
+  return Lib.createTestQuery(SAMPLE_PROVIDER, {
+    stages: [
+      {
+        source: {
+          type: "table",
+          id: ORDERS_ID,
+        },
+        breakouts: [
+          {
+            type: "column",
+            name: "TAX",
+          },
+        ],
+      },
+    ],
   });
 }
 
-function createQueryWithBreakoutAndBinningStrategy(
-  binningStrategyName = "10 bins",
+function createQueryWithBreakoutAndBinningCount(
+  binningCount: number | undefined,
 ) {
-  return createQueryWithClauses({
-    breakouts: [
+  return Lib.createTestQuery(SAMPLE_PROVIDER, {
+    stages: [
       {
-        tableName: "ORDERS",
-        columnName: "TAX",
-        binningStrategyName,
+        source: {
+          type: "table",
+          id: ORDERS_ID,
+        },
+        breakouts: [
+          {
+            type: "column",
+            name: "TAX",
+            binning:
+              binningCount != null
+                ? { strategy: "num-bins", numBins: binningCount }
+                : undefined,
+          },
+        ],
       },
     ],
   });
 }
 
 function createQueryWithMultipleBreakoutsAndBinningStrategy() {
-  return createQueryWithClauses({
-    breakouts: [
+  return Lib.createTestQuery(SAMPLE_PROVIDER, {
+    stages: [
       {
-        tableName: "ORDERS",
-        columnName: "TAX",
-        binningStrategyName: "10 bins",
-      },
-      {
-        tableName: "ORDERS",
-        columnName: "TAX",
-        binningStrategyName: "50 bins",
+        source: {
+          type: "table",
+          id: ORDERS_ID,
+        },
+        breakouts: [
+          {
+            type: "column",
+            name: "TAX",
+            binning: { strategy: "num-bins", numBins: 10 },
+          },
+          {
+            type: "column",
+            name: "TAX",
+            binning: { strategy: "num-bins", numBins: 50 },
+          },
+        ],
       },
     ],
   });
 }
 
-function createQueryWithBreakoutAndTemporalBucket(temporalBucketName: string) {
-  return createQueryWithClauses({
-    breakouts: [
+function createQueryWithBreakoutAndTemporalBucket(
+  temporalBucketName: TemporalUnit | undefined,
+) {
+  return Lib.createTestQuery(SAMPLE_PROVIDER, {
+    stages: [
       {
-        tableName: "ORDERS",
-        columnName: "CREATED_AT",
-        temporalBucketName,
+        source: {
+          type: "table",
+          id: ORDERS_ID,
+        },
+        breakouts: [
+          {
+            type: "column",
+            name: "CREATED_AT",
+            unit: temporalBucketName,
+          },
+        ],
       },
     ],
   });
 }
 
 function createQueryWithMultipleBreakoutsAndTemporalBucket() {
-  return createQueryWithClauses({
-    breakouts: [
+  return Lib.createTestQuery(SAMPLE_PROVIDER, {
+    stages: [
       {
-        tableName: "ORDERS",
-        columnName: "CREATED_AT",
-        temporalBucketName: "Year",
-      },
-      {
-        tableName: "ORDERS",
-        columnName: "CREATED_AT",
-        temporalBucketName: "Month",
+        source: {
+          type: "table",
+          id: ORDERS_ID,
+        },
+        breakouts: [
+          {
+            type: "column",
+            name: "CREATED_AT",
+            unit: "year",
+          },
+          {
+            type: "column",
+            name: "CREATED_AT",
+            unit: "month",
+          },
+        ],
       },
     ],
+  });
+}
+
+type NativeCardFieldOpts = {
+  name: string;
+  baseType: string;
+};
+
+function createNativeCardField({ name, baseType }: NativeCardFieldOpts) {
+  const fieldRef: FieldReference = ["field", name, { "base-type": baseType }];
+  // Native result columns have no field id; the column ref stands in for it.
+  return createMockField({
+    id: fieldRef,
+    field_ref: fieldRef,
+    name,
+    display_name: name,
+    base_type: baseType,
+    effective_type: baseType,
   });
 }
 
@@ -98,12 +179,12 @@ interface SetupOpts {
 function setup({ step = createMockNotebookStep(), readOnly }: SetupOpts = {}) {
   const updateQuery = jest.fn();
 
-  render(
+  renderWithProviders(
     <BreakoutStep
       step={step}
       stageIndex={step.stageIndex}
       query={step.query}
-      color="summarize"
+      color="core-summarize"
       readOnly={readOnly}
       isLastOpened={false}
       reportTimezone="UTC"
@@ -209,7 +290,7 @@ describe("BreakoutStep", () => {
     });
 
     it("should highlight selected binning strategy", async () => {
-      const query = createQueryWithBreakoutAndBinningStrategy();
+      const query = createQueryWithBreakoutAndBinningCount(10);
       setup({ step: createMockNotebookStep({ query }) });
 
       await userEvent.click(screen.getByText("Tax: 10 bins"));
@@ -222,7 +303,7 @@ describe("BreakoutStep", () => {
     });
 
     it("shouldn't update a query when clicking a selected binned column", async () => {
-      const query = createQueryWithBreakoutAndBinningStrategy();
+      const query = createQueryWithBreakoutAndBinningCount(10);
       const { updateQuery } = setup({
         step: createMockNotebookStep({ query }),
       });
@@ -234,7 +315,7 @@ describe("BreakoutStep", () => {
     });
 
     it("should highlight the `Don't bin` option when a column is not binned", async () => {
-      const query = createQueryWithBreakoutAndBinningStrategy("Don't bin");
+      const query = createQueryWithBreakoutAndBinningCount(undefined);
       setup({ step: createMockNotebookStep({ query }) });
 
       await userEvent.click(screen.getByText("Tax"));
@@ -276,7 +357,7 @@ describe("BreakoutStep", () => {
     });
 
     it("should highlight selected temporal bucket", async () => {
-      const query = createQueryWithBreakoutAndTemporalBucket("Quarter");
+      const query = createQueryWithBreakoutAndTemporalBucket("quarter");
       setup({ step: createMockNotebookStep({ query }) });
 
       await userEvent.click(screen.getByText("Created At: Quarter"));
@@ -289,7 +370,7 @@ describe("BreakoutStep", () => {
     });
 
     it("should handle `Don't bin` option for temporal bucket (metabase#19684)", async () => {
-      const query = createQueryWithBreakoutAndTemporalBucket("Don't bin");
+      const query = createQueryWithBreakoutAndTemporalBucket(undefined);
       setup({ step: createMockNotebookStep({ query }) });
 
       await userEvent.click(screen.getByText("Created At"));
@@ -311,7 +392,7 @@ describe("BreakoutStep", () => {
     });
 
     it("shouldn't update a query when clicking a selected column with temporal bucketing", async () => {
-      const query = createQueryWithBreakoutAndTemporalBucket("Quarter");
+      const query = createQueryWithBreakoutAndTemporalBucket("quarter");
       const { updateQuery } = setup({
         step: createMockNotebookStep({ query }),
       });
@@ -323,7 +404,7 @@ describe("BreakoutStep", () => {
     });
 
     it("should allow to add a breakout for a column with an existing breakout but with a different binning strategy", async () => {
-      const query = createQueryWithBreakoutAndBinningStrategy("10 bins");
+      const query = createQueryWithBreakoutAndBinningCount(10);
       const { getNextBreakouts } = setup({
         step: createMockNotebookStep({ query }),
       });
@@ -340,7 +421,7 @@ describe("BreakoutStep", () => {
     });
 
     it("should ignore attempts to add a breakout for a column with the same binning strategy", async () => {
-      const query = createQueryWithBreakoutAndBinningStrategy("10 bins");
+      const query = createQueryWithBreakoutAndBinningCount(10);
       const { getNextBreakouts } = setup({
         step: createMockNotebookStep({ query }),
       });
@@ -404,7 +485,7 @@ describe("BreakoutStep", () => {
     });
 
     it("should allow to add a breakout for a column with an existing breakout but with a different temporal bucket", async () => {
-      const query = createQueryWithBreakoutAndTemporalBucket("Year");
+      const query = createQueryWithBreakoutAndTemporalBucket("year");
       const { getNextBreakouts } = setup({
         step: createMockNotebookStep({ query }),
       });
@@ -421,7 +502,7 @@ describe("BreakoutStep", () => {
     });
 
     it("should ignore attempts to add a breakout for a column with the same temporal bucket", async () => {
-      const query = createQueryWithBreakoutAndTemporalBucket("Year");
+      const query = createQueryWithBreakoutAndTemporalBucket("year");
       const { getNextBreakouts } = setup({
         step: createMockNotebookStep({ query }),
       });
@@ -485,8 +566,136 @@ describe("BreakoutStep", () => {
     });
   });
 
+  describe("saved native question source", () => {
+    const NATIVE_CARD = createSavedNativeCard({
+      id: 2,
+      name: "Native products",
+      dataset_query: createMockNativeDatasetQuery({
+        database: SAMPLE_DB_ID,
+        native: createMockNativeQuery({ query: "select * from products" }),
+      }),
+      result_metadata: [
+        createNativeCardField({ name: "ID", baseType: "type/BigInteger" }),
+        createNativeCardField({
+          name: "CREATED_AT",
+          baseType: "type/DateTimeWithLocalTZ",
+        }),
+      ],
+    });
+
+    const NATIVE_CARD_PROVIDER = createMetadataProvider({
+      metadata: createMockMetadata({
+        databases: [createSampleDatabase()],
+        questions: [NATIVE_CARD],
+      }),
+    });
+
+    it("should not render duplicate temporal buckets (metabase#16327)", async () => {
+      const query = Lib.createTestQuery(NATIVE_CARD_PROVIDER, {
+        stages: [{ source: { type: "card", id: NATIVE_CARD.id } }],
+      });
+      setup({ step: createMockNotebookStep({ query }) });
+
+      await userEvent.click(screen.getByText("Pick a column to group by"));
+      const option = await screen.findByRole("option", { name: "CREATED_AT" });
+      await userEvent.click(within(option).getByLabelText("Temporal bucket"));
+
+      // userEvent.click closes the popover
+      fireEvent.click(await screen.findByText("More…"));
+
+      const itemNames = screen
+        .getAllByRole("menuitem")
+        .map((item) => item.textContent);
+      expect(itemNames).toContain("Day");
+      expect(itemNames).toContain("Hour of day");
+      expect(new Set(itemNames).size).toBe(itemNames.length);
+    });
+
+    it("should keep the sort in sync when changing the temporal bucket of a breakout (metabase#17975)", async () => {
+      const query = Lib.createTestQuery(NATIVE_CARD_PROVIDER, {
+        stages: [
+          {
+            source: { type: "card", id: NATIVE_CARD.id },
+            aggregations: [{ type: "operator", operator: "count", args: [] }],
+            breakouts: [{ type: "column", name: "CREATED_AT", unit: "month" }],
+            orderBys: [{ type: "column", name: "CREATED_AT", unit: "month" }],
+          },
+        ],
+      });
+      const { getNextQuery } = setup({
+        step: createMockNotebookStep({ query }),
+      });
+
+      await userEvent.click(screen.getByText("CREATED_AT: Month"));
+      const option = await screen.findByRole("option", { name: "CREATED_AT" });
+      await userEvent.click(within(option).getByLabelText("Temporal bucket"));
+      fireEvent.click(await screen.findByRole("menuitem", { name: "Quarter" }));
+
+      const nextQuery = getNextQuery();
+      const orderBys = Lib.orderBys(nextQuery, 0).map(
+        (orderBy) => Lib.displayInfo(nextQuery, 0, orderBy).displayName,
+      );
+      expect(orderBys).toEqual(["CREATED_AT: Quarter"]);
+    });
+
+    it("should apply the default temporal bucket to a column of a joined native question (metabase#10441, metabase#18646)", async () => {
+      const query = Lib.createTestQuery(NATIVE_CARD_PROVIDER, {
+        stages: [
+          {
+            source: { type: "table", id: ORDERS_ID },
+            joins: [
+              {
+                source: { type: "card", id: NATIVE_CARD.id },
+                strategy: "left-join",
+                conditions: [
+                  {
+                    operator: "=",
+                    left: { type: "column", name: "PRODUCT_ID" },
+                    right: { type: "column", name: "ID" },
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      });
+      const { getNextQuery, getNextBreakouts } = setup({
+        step: createMockNotebookStep({ query }),
+      });
+
+      await userEvent.click(screen.getByText("Pick a column to group by"));
+      await userEvent.click(await screen.findByText("Native products"));
+      const option = await screen.findByRole("option", {
+        name: "Native products - Product → CREATED_AT",
+      });
+      expect(within(option).getByText("by month")).toBeInTheDocument();
+
+      await userEvent.click(
+        within(option).getByText("Native products - Product → CREATED_AT"),
+      );
+      expect(getNextBreakouts()).toMatchObject([
+        { longDisplayName: "Native products - Product → CREATED_AT: Month" },
+      ]);
+      expect(Lib.toLegacyQuery(getNextQuery())).toMatchObject({
+        query: {
+          breakout: [
+            [
+              "field",
+              "CREATED_AT",
+              {
+                "base-type": "type/DateTimeWithLocalTZ",
+                "join-alias": "Native products - Product",
+                "temporal-unit": "month",
+              },
+            ],
+          ],
+        },
+      });
+    });
+  });
+
   describe("metrics", () => {
-    it("should allow to select date and datetime columns only", async () => {
+    it("should allow selecting breakoutable columns", async () => {
       const question = DEFAULT_QUESTION.setType("metric");
       const step = createMockNotebookStep({ question });
       const { getNextBreakouts } = setup({ step });
@@ -494,12 +703,12 @@ describe("BreakoutStep", () => {
       await userEvent.click(screen.getByText("Pick a column to group by"));
       expect(await screen.findByText("Orders")).toBeInTheDocument();
       expect(await screen.findByText("Created At")).toBeInTheDocument();
-      expect(screen.queryByText("Tax")).not.toBeInTheDocument();
+      expect(await screen.findByText("Tax")).toBeInTheDocument();
 
       await userEvent.click(screen.getByText("User"));
       expect(await screen.findByText("Created At")).toBeInTheDocument();
       expect(await screen.findByText("Birth Date")).toBeInTheDocument();
-      expect(screen.queryByText("Email")).not.toBeInTheDocument();
+      expect(await screen.findByText("Email")).toBeInTheDocument();
 
       await userEvent.click(await screen.findByText("Created At"));
       expect(getNextBreakouts()).toMatchObject([
@@ -516,11 +725,11 @@ describe("BreakoutStep", () => {
         screen.queryByText("Pick a column to group by"),
       ).not.toBeInTheDocument();
       expect(
-        screen.queryByText("No datetime columns available"),
+        screen.queryByText("No columns available"),
       ).not.toBeInTheDocument();
     });
 
-    it("should not allow to select when there are no date or datetime columns", () => {
+    it("should allow selecting a numeric column when there are no temporal columns", async () => {
       const metadata = createMockMetadata({
         databases: [
           createSampleDatabase({
@@ -529,26 +738,38 @@ describe("BreakoutStep", () => {
         ],
       });
       const question = new Question(
-        createMockCard({ type: "metric" }),
+        createMockCard({
+          type: "metric",
+          dataset_query: createMockStructuredDatasetQuery({
+            database: SAMPLE_DB_ID,
+            query: { "source-table": ORDERS_ID },
+          }),
+        }),
         metadata,
       );
       const step = createMockNotebookStep({
         question,
         query: question.query(),
       });
-      setup({ step });
+      const { getNextBreakouts } = setup({ step });
 
-      expect(
-        screen.getByText("No datetime columns available"),
-      ).toBeInTheDocument();
-      expect(
-        screen.queryByText("Pick a column to group by"),
-      ).not.toBeInTheDocument();
+      await userEvent.click(screen.getByText("Pick a column to group by"));
+      await userEvent.click(await screen.findByText("ID"));
+
+      expect(getNextBreakouts()).toMatchObject([{ displayName: "ID" }]);
     });
 
     it("should not allow to add more than 1 breakout", async () => {
-      const query = createQueryWithClauses({
-        breakouts: [{ tableName: "ORDERS", columnName: "CREATED_AT" }],
+      const query = Lib.createTestQuery(SAMPLE_PROVIDER, {
+        stages: [
+          {
+            source: {
+              type: "table",
+              id: ORDERS_ID,
+            },
+            breakouts: [{ type: "column", name: "CREATED_AT" }],
+          },
+        ],
       });
       const question = DEFAULT_QUESTION.setType("metric").setQuery(query);
       const step = createMockNotebookStep({ question });

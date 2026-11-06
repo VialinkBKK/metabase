@@ -90,15 +90,23 @@
   admin-writable-site-wide-settings
   can-read-setting?
   current-user-readable-visibilities
+  custom-disabled-reasons!
+  db-stored-value
+  default-value
   defsetting
+  disabled-for-db-reasons
+  env-var-name
+  env-var-source
   env-var-value
   export?
   get
   get-raw-value
+  get-raw-value-source
+  log-deprecated-env-var-usage!
   get-value-of-type
   has-advanced-setting-access?
-  migrate-encrypted-settings!
   obfuscate-value
+  obfuscated-value?
   read-setting
   registered-settings
   registered?
@@ -108,13 +116,18 @@
   set-value-of-type!
   setting-env-map-name
   string->boolean
+  unreadable-user-settings-key
+  user-facing-value
   user-readable-values-map
   uuid-nonce-base
   validate-settings-formatting!
+  validate-settable-for-db!
   writable-settings]
  [metabase.settings.models.setting.cache
   cache-update-check-interval-ms
-  restore-cache!]
+  cache-last-updated-at
+  restore-cache!
+  restore-cache-if-needed!]
  [metabase.settings.models.setting.multi-setting
   define-multi-setting
   define-multi-setting-impl]
@@ -130,10 +143,11 @@
   []
   metabase.settings.models.setting/*database-local-values*)
 
-(defmacro with-database-local-values
+(defmacro with-database
   "Execute `body` with Database-local Setting values bound to `new-values`."
-  [new-values & body]
-  `(binding [metabase.settings.models.setting/*database-local-values* ~new-values]
+  [new-db & body]
+  `(binding [metabase.settings.models.setting/*database*              (:metabase/toucan-instance (meta ~new-db))
+             metabase.settings.models.setting/*database-local-values* (or (:settings ~new-db) {})]
      ~@body))
 
 (defn user-local-values
@@ -158,4 +172,10 @@
   (I think we are using an atom to facilitate updating the values??)"
   [new-values & body]
   `(binding [metabase.settings.models.setting/*user-local-values* ~new-values]
+     ~@body))
+
+(defmacro with-enforced-setting-access-checks
+  "Enable checks on Setting access."
+  [& body]
+  `(binding [metabase.settings.models.setting/*enforce-setting-access-checks* true]
      ~@body))

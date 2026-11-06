@@ -1,12 +1,15 @@
 import userEvent from "@testing-library/user-event";
 
 import {
+  setupCollectionByIdEndpoint,
   setupDatabasesEndpoints,
   setupRecentViewsAndSelectionsEndpoints,
   setupSearchEndpoints,
 } from "__support__/server-mocks";
 import { renderWithProviders, screen } from "__support__/ui";
+import { ROOT_COLLECTION } from "metabase/common/collections/constants";
 import type Question from "metabase-lib/v1/Question";
+import { createMockCollection } from "metabase-types/api/mocks";
 import { createSampleDatabase } from "metabase-types/api/mocks/presets";
 
 import { createMockNotebookStep } from "../../test-utils";
@@ -30,6 +33,9 @@ function setup({ step = createMockNotebookStep() }: SetupOpts = {}) {
   setupDatabasesEndpoints([createSampleDatabase()]);
   setupSearchEndpoints([]);
   setupRecentViewsAndSelectionsEndpoints([], ["selections"]);
+  setupCollectionByIdEndpoint({
+    collections: [createMockCollection(ROOT_COLLECTION)],
+  });
 
   renderWithProviders(
     <NotebookProvider>
@@ -63,12 +69,12 @@ const STEP_TYPES: NotebookStepType[] = [
 ];
 
 describe("NotebookStep", () => {
-  test.each(STEP_TYPES)(`renders a %s step correctly`, (type) => {
+  test.each(STEP_TYPES)(`renders a %s step correctly`, async (type) => {
     const step = createMockNotebookStep({ type });
     const testId = `step-${type}-${step.stageIndex}-${step.itemIndex}`;
     setup({ step });
 
-    expect(screen.getByTestId(testId)).toBeInTheDocument();
+    expect(await screen.findByTestId(testId)).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Remove step" }),
     ).toBeInTheDocument();

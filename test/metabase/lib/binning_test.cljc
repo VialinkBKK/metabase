@@ -5,8 +5,11 @@
    [medley.core :as m]
    [metabase.lib.binning :as lib.binning]
    [metabase.lib.core :as lib]
+   [metabase.lib.metadata :as lib.metadata]
    [metabase.lib.stage :as lib.stage]
-   [metabase.lib.test-metadata :as meta]))
+   [metabase.lib.test-metadata :as meta]
+   [metabase.lib.test-util :as lib.tu]
+   [metabase.lib.test-util.macros :as lib.tu.macros]))
 
 #?(:cljs (comment metabase.test-runner.assert-exprs.approximately-equal/keep-me))
 
@@ -32,6 +35,48 @@
     (is (= {:bin-width 12.5, :min-value 15, :max-value 27.5}
            (lib.binning/resolve-bin-width query col-quantity 15)))))
 
+(deftest ^:parallel default-bin-width-test
+  (let [query    (-> (lib/query meta/metadata-provider (meta/table-metadata :orders))
+                     (lib/aggregate (lib/count)))
+        quantity (meta/field-metadata :orders :quantity)]
+    (testing "no filters → width resolved from the fingerprint's global range (0–100 over 8 bins)"
+      (is (= 12.5
+             (lib.binning/default-bin-width query -1 quantity))))
+    (testing "the query's own range filters on the column narrow the binned domain (80–100 over 8 bins)"
+      (is (= 2.5
+             (-> query
+                 (lib/filter (lib/>= quantity 80))
+                 (lib.binning/default-bin-width -1 quantity)))))
+    (testing "filters on other columns leave the width untouched"
+      (is (= 12.5
+             (-> query
+                 (lib/filter (lib/>= (meta/field-metadata :orders :total) 50))
+                 (lib.binning/default-bin-width -1 quantity)))))
+    (testing "missing fingerprint → nil"
+      (is (nil? (lib.binning/default-bin-width query -1 (dissoc quantity :fingerprint)))))
+    (testing "coordinate columns resolve to the fixed bin-width setting"
+      (let [people-query (lib/query meta/metadata-provider (meta/table-metadata :people))]
+        (is (= 10.0
+               (lib.binning/default-bin-width people-query -1 (meta/field-metadata :people :latitude))))))))
+
+(deftest ^:parallel default-bin-width-card-source-column-test
+  (testing "filters on a card/model-sourced column still narrow the width — their refs carry the column
+            *name* even though the metadata has an `:id`, so the lookup must key on the ref (#78060)"
+    (let [mp       (lib.tu/metadata-provider-with-card-from-query
+                    1 (lib/query meta/metadata-provider (meta/table-metadata :orders)))
+          query    (-> (lib/query mp (lib.metadata/card mp 1))
+                       (lib/aggregate (lib/count)))
+          quantity (m/find-first #(= (:name %) "QUANTITY") (lib/filterable-columns query))]
+      (is (some? quantity))
+      (testing "unfiltered → width from the fingerprint's global range"
+        (is (= 12.5
+               (lib.binning/default-bin-width query -1 quantity))))
+      (testing "a range filter on the card-sourced column narrows the domain"
+        (is (= 2.5
+               (-> query
+                   (lib/filter (lib/>= quantity 80))
+                   (lib.binning/default-bin-width -1 quantity))))))))
+
 (deftest ^:parallel binning-and-bucketing-only-show-up-for-returned-and-breakout-columns
   (testing "Within the stage, binning and bucketing at breakout should be invisible, outside the stage it should be visible"
     (let [query (-> (lib/query meta/metadata-provider (meta/table-metadata :orders))
@@ -43,28 +88,28 @@
           bucket-created (lib/with-temporal-bucket created-col (first (lib/available-temporal-buckets query created-col)))
           query (lib/breakout query bucket-created)]
       (is (=?
-           (complement :metabase.lib.field/binning)
+           (complement :lib/binning)
            (m/find-first (comp #{"TOTAL"} :name) (lib/visible-columns query))))
       (is (=?
-           (complement :metabase.lib.field/binning)
+           (complement :lib/binning)
            (m/find-first (comp #{"TOTAL"} :name) (lib/breakoutable-columns query))))
       (is (=?
-           {:metabase.lib.field/binning {:strategy :default}}
+           {:lib/binning {:strategy :default}}
            (lib/breakout-column query -1 (first (lib/breakouts query)))))
       (is (=?
-           {:metabase.lib.field/binning {:strategy :default}}
+           {:lib/binning {:strategy :default}}
            (m/find-first (comp #{"TOTAL"} :name) (lib/returned-columns query))))
       (is (=?
-           (complement :metabase.lib.field/temporal-unit)
+           (complement :lib/temporal-unit)
            (m/find-first (comp #{"CREATED_AT"} :name) (lib/visible-columns query))))
       (is (=?
-           (complement :metabase.lib.field/temporal-unit)
+           (complement :lib/temporal-unit)
            (m/find-first (comp #{"CREATED_AT"} :name) (lib/breakoutable-columns query))))
       (is (=?
-           {:metabase.lib.field/temporal-unit :minute}
+           {:lib/temporal-unit :minute}
            (lib/breakout-column query -1 (second (lib/breakouts query)))))
       (is (=?
-           {:metabase.lib.field/temporal-unit :minute}
+           {:lib/temporal-unit :minute}
            (m/find-first (comp #{"CREATED_AT"} :name) (lib/returned-columns query)))))))
 
 (deftest ^:parallel binning-equality-test
@@ -118,3 +163,27 @@
                                                        (m/find-first (comp #{binning-name} :display-name)
                                                                      (lib/available-binning-strategies
                                                                       $ first-stage-binned-column))))))))))))))
+
+(deftest ^:parallel match-named-field-ref-filter
+  (testing "fields referencing source expressions can still properly update binning strategies (#26202)"
+    (let [card-query (lib.tu.macros/mbql-query orders
+                       {:fields      [$total
+                                      [:expression "foo"]]
+                        :expressions {"foo" [:+ $total 0]}})
+          card-cols  (-> (lib/returned-columns (lib/query meta/metadata-provider card-query))
+                         (update 1 assoc
+                                 :semantic-type :type/Quantity
+                                 :fingerprint   (:fingerprint (meta/field-metadata :orders :total))))
+          mp         (lib.tu/mock-metadata-provider
+                      meta/metadata-provider
+                      {:cards [{:id              1
+                                :dataset-query   card-query
+                                :result-metadata card-cols}]})
+          query      (lib/query mp (lib.metadata/card mp 1))
+          expr-col   (m/find-first #(= (:name %) "foo") (lib/breakoutable-columns query))]
+      (is (some? expr-col))
+      (is (=? [{:display-name "Auto bin"}
+               {:display-name "10 bins"}
+               {:display-name "50 bins"}
+               {:display-name "100 bins"}]
+              (lib/available-binning-strategies query expr-col))))))

@@ -1,68 +1,46 @@
-import { isEmail } from "metabase/lib/email";
+import cx from "classnames";
 
-import type { AvatarProps } from "./UserAvatar.styled";
-import { Avatar as StyledAvatar } from "./UserAvatar.styled";
+import {
+  type PartialGroup,
+  type PartialTenant,
+  type PartialUser,
+  prepareInitials,
+} from "metabase/common/utils/user";
+import { Center } from "metabase/ui";
+
+import S from "./UserAvatar.module.css";
+
+interface AvatarProps {
+  bg?: string;
+  className?: string;
+}
 
 interface UserAvatarProps extends AvatarProps {
-  user: User;
+  user: PartialUser;
 }
 
-interface GroupProps {
-  user: Group;
+interface GroupProps extends AvatarProps {
+  user: PartialGroup;
 }
 
-interface User {
-  first_name: string | null;
-  last_name: string | null;
-  common_name: string;
-  email?: string;
+interface TenantProps extends AvatarProps {
+  user: PartialTenant;
 }
 
-interface Group {
-  first_name: string;
-}
-
-// eslint-disable-next-line import/no-default-export -- deprecated usage
-export default function UserAvatar({
+export function UserAvatar({
   user,
-  ...props
-}: UserAvatarProps | GroupProps) {
-  return <StyledAvatar {...props}>{userInitials(user) || "?"}</StyledAvatar>;
-}
-
-export function Avatar({ children, ...props }: { children: string }) {
-  return <StyledAvatar {...props}>{initial(children) ?? "?"}</StyledAvatar>;
-}
-
-function initial(name?: string | null) {
-  return name ? name.charAt(0).toUpperCase() : "";
-}
-
-function userInitials(user: User | Group) {
-  if (user) {
-    return nameInitials(user) || emailInitials(user as User);
-  }
-
-  return null;
-}
-
-function nameInitials(user: User | Group) {
-  if ("common_name" in user) {
-    return initial(user.first_name) + initial(user.last_name);
-  }
-
-  // render group
-  return initial(user.first_name);
-}
-
-function emailInitials(user: User) {
-  const email = [user.email, user.common_name].find((maybeEmail) =>
-    isEmail(maybeEmail),
+  bg,
+  className,
+}: UserAvatarProps | GroupProps | TenantProps) {
+  return (
+    <Center
+      className={cx(S.avatar, className)}
+      c="text-primary-inverse"
+      fw={900}
+      lh={1}
+      style={bg ? { backgroundColor: bg } : undefined}
+    >
+      {prepareInitials(user) || "?"}
+    </Center>
   );
-  if (email) {
-    const emailUsername = email.split("@")[0];
-    return emailUsername.slice(0, 2).toUpperCase();
-  }
-
-  return null;
 }

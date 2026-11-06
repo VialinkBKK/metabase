@@ -1,8 +1,8 @@
 import type React from "react";
 import { t } from "ttag";
 
-import type { QueryModalType } from "metabase/query_builder/constants";
-import { MODAL_TYPES } from "metabase/query_builder/constants";
+import { MODAL_TYPES } from "metabase/querying/constants";
+import type { QueryModalType } from "metabase/redux/store";
 import { Box, Flex } from "metabase/ui";
 import * as Lib from "metabase-lib";
 import type Question from "metabase-lib/v1/Question";
@@ -48,7 +48,7 @@ export function AdHocQuestionLeftSide(
       <Flex align="center" wrap="nowrap">
         <ViewHeading
           className={ViewTitleHeaderS.AdHocViewHeading}
-          color="medium"
+          c="text-secondary"
         >
           {isNative ? (
             t`New question`

@@ -5,13 +5,10 @@ import {
   setupPropertiesEndpoints,
   setupSettingsEndpoints,
 } from "__support__/server-mocks";
+import { createMockSetupState, createMockState } from "__support__/state";
 import { renderWithProviders, screen, waitFor } from "__support__/ui";
-import type { SetupStep } from "metabase/setup/types";
+import type { SetupStep } from "metabase/redux/store";
 import { createMockSettings } from "metabase-types/api/mocks";
-import {
-  createMockSetupState,
-  createMockState,
-} from "metabase-types/store/mocks";
 
 import { DataUsageStep } from "./DataUsageStep";
 
@@ -52,7 +49,9 @@ describe("DataUsageStep", () => {
     await userEvent.click(toggle);
 
     await waitFor(() => {
-      expect(fetchMock.called(TRACKING_PATH, { method: "PUT" })).toBeTruthy();
+      expect(
+        fetchMock.callHistory.called(TRACKING_PATH, { method: "PUT" }),
+      ).toBeTruthy();
     });
 
     expect(toggle).not.toBeChecked();
@@ -67,7 +66,9 @@ describe("DataUsageStep", () => {
     await userEvent.click(toggle);
 
     await waitFor(() => {
-      expect(fetchMock.called(TRACKING_PATH, { method: "PUT" })).toBeTruthy();
+      expect(
+        fetchMock.callHistory.called(TRACKING_PATH, { method: "PUT" }),
+      ).toBeTruthy();
     });
 
     expect(await screen.findByText("An error occurred")).toBeInTheDocument();

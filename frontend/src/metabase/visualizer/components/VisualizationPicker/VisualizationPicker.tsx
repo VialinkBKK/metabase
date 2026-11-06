@@ -1,13 +1,11 @@
 import { useMemo } from "react";
 
-import { trackSimpleEvent } from "metabase/lib/analytics";
-import { useSelector } from "metabase/lib/redux";
-import { Center, Icon, SegmentedControl } from "metabase/ui";
-import visualizations from "metabase/visualizations";
-import { getVisualizerRawSeries } from "metabase/visualizer/selectors";
+import { EntityIcon } from "metabase/common/components/EntityIcon";
+import { SegmentedControl } from "metabase/ui";
+import { visualizations } from "metabase/viz-core";
 import type { VisualizationDisplay } from "metabase-types/api";
 
-import S from "./VisualizationPicker.module.css";
+import { trackVisualizerDataChanged } from "../analytics";
 
 interface VisualizationPickerProps {
   value: VisualizationDisplay | null;
@@ -17,11 +15,7 @@ export function VisualizationPicker({
   value,
   onChange,
 }: VisualizationPickerProps) {
-  const series = useSelector(getVisualizerRawSeries);
-
   const options = useMemo(() => {
-    const [mainSeries] = series ?? [];
-    const { data } = mainSeries ?? {};
     return Array.from(visualizations)
       .filter(([, viz]) => !viz.hidden && viz.supportsVisualizer)
       .map(([vizType, viz]) => {
@@ -29,43 +23,30 @@ export function VisualizationPicker({
           label: viz.getUiName(),
           value: vizType,
           icon: viz.iconName,
-          isSensible: Boolean(data && viz.isSensible?.(data)),
+          iconUrl: viz.iconUrl,
         };
       });
-  }, [series]);
-
-  const selectedOption = useMemo(
-    () => options.find((option) => option.value === value),
-    [value, options],
-  );
+  }, []);
 
   return (
     <>
       <SegmentedControl
-        classNames={{
-          label: S.SegmentedControlLabel,
-        }}
-        value={selectedOption?.value}
-        data={options.map((o, i) => ({
+        value={value ?? undefined}
+        data={options.map((o) => ({
           value: o.value,
-          label: (
-            <Center
-              key={i}
-              onClick={() => {
-                trackSimpleEvent({
-                  event: "visualizer_data_changed",
-                  event_detail: "visualizer_viz_type_changed",
-                  triggered_from: "visualizer-modal",
-                });
-
-                onChange(o.value);
-              }}
-              p="sm"
-            >
-              <Icon data-testid={o.value} name={o.icon} />
-            </Center>
+          ariaLabel: o.label,
+          icon: (
+            <EntityIcon
+              data-testid={o.value}
+              name={o.icon}
+              iconUrl={o.iconUrl}
+            />
           ),
         }))}
+        onChange={(vizType) => {
+          trackVisualizerDataChanged("visualizer_viz_type_changed");
+          onChange(vizType);
+        }}
         data-testid="viz-picker-main"
       />
     </>

@@ -1,8 +1,7 @@
 .root {
-  color: var(--mb-color-brand);
+  color: var(--mb-color-text-brand-strong);
 
-  &:active {
-    color: var(--mb-text-text-dark);
-    text-decoration: underline;
+  &:hover {
+    color: var(--mb-color-text-brand-strong-hover);
   }
 }

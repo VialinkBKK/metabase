@@ -5,7 +5,7 @@ import { setup as baseSetup } from "./setup";
 
 function setup(opts: SetupOpts) {
   baseSetup({
-    hasEnterprisePlugins: true,
+    enterprisePlugins: ["whitelabel"],
     tokenFeatures: { whitelabel: true },
     ...opts,
   });
@@ -19,7 +19,7 @@ describe("ImpossibleToCreateModelModal (EE with token)", () => {
     expect(sqlSnippetLink).toBeInTheDocument();
     expect(sqlSnippetLink).toHaveProperty(
       "href",
-      "https://www.metabase.com/docs/latest/questions/native-editor/sql-snippets.html",
+      "https://www.metabase.com/docs/latest/questions/native-editor/snippets.html",
     );
 
     const referenceLink = screen.getByRole("link", {

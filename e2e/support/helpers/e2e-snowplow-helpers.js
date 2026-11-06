@@ -1,14 +1,16 @@
 import { updateSetting } from "e2e/support/helpers";
 
-const { IS_ENTERPRISE } = Cypress.env();
-const HAS_SNOWPLOW = Cypress.env("HAS_SNOWPLOW_MICRO");
-const SNOWPLOW_URL = Cypress.env("SNOWPLOW_MICRO_URL");
-const SNOWPLOW_INTERVAL = 100;
-const SNOWPLOW_TIMEOUT = 1000;
+import { isDeepMatch } from "./e2e-deep-match";
 
-export const describeWithSnowplow = HAS_SNOWPLOW ? describe : describe.skip;
-export const describeWithSnowplowEE =
-  HAS_SNOWPLOW && IS_ENTERPRISE ? describe : describe.skip;
+export { isDeepMatch };
+
+const SNOWPLOW_URL = "http://localhost:9090";
+const SNOWPLOW_INTERVAL = 100;
+// Snowplow events are POSTed asynchronously and then ingested by snowplow-micro, so a
+// matching event can take a moment to become queryable via `micro/good` — especially on
+// loaded CI runners or with network throttling. A short budget flakes the poll before the
+// event lands; this only affects how long a *failing* assertion waits (matches return early).
+const SNOWPLOW_TIMEOUT = 5000;
 
 export const enableTracking = () => {
   updateSetting("anon-tracking-enabled", true);
@@ -56,58 +58,12 @@ export const expectUnstructuredSnowplowEvent = (eventData, count = 1) => {
   );
 };
 
-export function isDeepMatch(objectOrValue, partialObjectOrValue) {
-  if (isMatcher(partialObjectOrValue)) {
-    return partialObjectOrValue(objectOrValue);
-  }
-
-  const bothAreNotObjects =
-    // Check null because typeof null === "object"
-    objectOrValue == null ||
-    partialObjectOrValue == null ||
-    typeof objectOrValue !== "object" ||
-    typeof partialObjectOrValue !== "object";
-
-  // Exit condition when calling recursively
-  if (bothAreNotObjects) {
-    return objectOrValue === partialObjectOrValue;
-  }
-
-  for (const [key, value] of Object.entries(partialObjectOrValue)) {
-    if (Array.isArray(value)) {
-      if (
-        !Array.isArray(objectOrValue[key]) ||
-        !isArrayDeepMatch(objectOrValue[key], value)
-      ) {
-        return false;
-      }
-    } else if (!isDeepMatch(objectOrValue[key], value)) {
-      return false;
-    }
-  }
-
-  return true;
-}
-
-function isMatcher(value) {
-  return typeof value === "function";
-}
-
-function isArrayDeepMatch(array, partialArray) {
-  for (const index in partialArray) {
-    if (!isDeepMatch(array[index], partialArray[index])) {
-      return false;
-    }
-  }
-
-  return true;
-}
-
 export const expectNoBadSnowplowEvents = () => {
   sendSnowplowRequest("micro/bad").its("body").should("deep.equal", []);
 };
 
 const sendSnowplowRequest = (url) => {
+  cy.log("Send a Snowplow micro request");
   return cy.request({
     url: `${SNOWPLOW_URL}/${url}`,
     json: true,
@@ -132,11 +88,18 @@ const retrySnowplowRequest = (
         timeout - SNOWPLOW_INTERVAL,
       );
     } else {
-      const message =
+      let message =
         typeof messageOrMessageFn === "function"
           ? messageOrMessageFn(response)
           : messageOrMessageFn;
-      throw new Error("Snowplow retry timeout " + message);
+
+      if (!message) {
+        message =
+          "Response body (trimmed): " +
+          JSON.stringify(response.body)?.slice(0, 512);
+      }
+
+      throw new Error("Snowplow retry timeout: " + message);
     }
   });
 };

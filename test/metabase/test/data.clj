@@ -43,10 +43,12 @@
    [metabase.driver :as driver]
    [metabase.driver.ddl.interface :as ddl.i]
    [metabase.driver.util :as driver.u]
-   [metabase.lib-be.metadata.jvm :as lib.metadata.jvm]
+   [metabase.legacy-mbql.normalize :as mbql.normalize]
+   [metabase.legacy-mbql.schema :as mbql.s]
+   [metabase.lib-be.core :as lib-be]
    [metabase.lib.schema.id :as lib.schema.id]
    [metabase.permissions.models.permissions-group :as perms-group]
-   [metabase.query-processor :as qp]
+   [metabase.query-processor.core :as qp]
    [metabase.test.data.env :as tx.env]
    [metabase.test.data.impl :as data.impl]
    [metabase.test.data.interface :as tx]
@@ -132,7 +134,9 @@
    (mbql-query-impl/parse-tokens table-name `(do ~@body))))
 
 (defmacro mbql-query
-  "Macro for easily building MBQL queries for test purposes.
+  "DEPRECATED: Use Lib to generate MBQL queries instead of hand-rolling legacy MBQL queries in new tests.
+
+  Macro for easily building MBQL queries for test purposes.
 
   *  `$`  = `:field` clause wrapping Field ID
   *  `$$` = table ID
@@ -148,22 +152,25 @@
      complete details.
   *  Wraps 'inner' query with the standard `{:database (data/id), :type :query, :query {...}}` boilerplate
   *  Adds `:source-table` clause if `:source-table` or `:source-query` is not already present"
-  {:style/indent :defn}
+  {:style/indent :defn, :deprecated "0.61.0"}
   ([table-name]
    `(mbql-query ~table-name {}))
 
   ([table-name inner-query]
    {:pre [(map? inner-query)]}
+   (assert (not (:type inner-query)) "Should be an inner-query, not an outer query")
    (as-> inner-query <>
      (mbql-query-impl/parse-tokens table-name <>)
      (mbql-query-impl/maybe-add-source-table <> table-name)
      (mbql-query-impl/wrap-inner-query <>))))
 
 (defmacro query
-  "Like `mbql-query`, but operates on an entire 'outer' query rather than the 'inner' MBQL query. Like `mbql-query`,
+  "DEPRECATED: Use Lib to generate MBQL queries instead of hand-rolling legacy MBQL queries in new tests.
+
+  Like `mbql-query`, but operates on an entire 'outer' query rather than the 'inner' MBQL query. Like `mbql-query`,
   automatically adds `:database` and `:type` to the top-level 'outer' query, and `:source-table` to the 'inner' MBQL
   query if not present."
-  {:style/indent 1}
+  {:style/indent 1, :deprecated "0.61.0"}
   ([table-name]
    `(query ~table-name {}))
 
@@ -177,12 +184,15 @@
 
 (declare id)
 
-(defn native-query
-  "Like `mbql-query`, but for native queries."
-  [inner-native-query]
+(mu/defn native-query :- ::mbql.s/Query
+  "DEPRECATED: Use Lib to generate MBQL queries instead of hand-rolling legacy MBQL queries in new tests.
+
+  Like `mbql-query`, but for native queries."
+  [inner-native-query :- :metabase.lib.util/query-like]
+  {:deprecated "0.61.0"}
   {:database (id)
    :type     :native
-   :native   inner-native-query})
+   :native   (mbql.normalize/normalize ::mbql.s/TopLevelNativeInnerQuery inner-native-query)})
 
 (defn run-mbql-query* [query]
   ;; catch the Exception and rethrow with the query itself so we can have a little extra info for debugging if it fails.
@@ -194,9 +204,14 @@
                       e)))))
 
 (defmacro run-mbql-query
-  "Like `mbql-query`, but runs the query as well."
-  {:style/indent :defn}
+  "DEPRECATED: Use Lib to generate MBQL queries and [[metabase.query-processor/process-query]] instead of hand-rolling
+  legacy MBQL queries in new tests.
+
+  Like `mbql-query`, but runs the query as well."
+  {:style/indent :defn, :deprecated "0.61.0"}
   [table-name & [query]]
+  ;; deprecated shim expands to the equally-deprecated mbql-query; they'll be removed together
+  #_{:clj-kondo/ignore [:deprecated-var]}
   `(run-mbql-query* (mbql-query ~table-name ~(or query {}))))
 
 (def ^:private FormattableName
@@ -233,7 +248,7 @@
 (defn metadata-provider
   "Get a metadata-provider for the current database."
   []
-  (lib.metadata.jvm/application-database-metadata-provider (id)))
+  (lib-be/application-database-metadata-provider (id)))
 
 (defmacro dataset
   "Create a database and load it with the data defined by `dataset`, then do a quick metadata-only sync; make it the
@@ -260,7 +275,8 @@
      (data/dataset (get-dataset-definition) ...)"
   {:style/indent :defn}
   [dataset & body]
-  `(t/testing (colorize/magenta ~(str (if (symbol? dataset)
+  `(t/testing (colorize/magenta ~(str \newline
+                                      (if (symbol? dataset)
                                         (format "using %s dataset" dataset)
                                         "using inline dataset")
                                       \newline))
@@ -277,37 +293,59 @@
   [& body]
   `(data.impl/do-with-temp-copy-of-db (^:once fn* [] ~@body)))
 
-(def h2-app-db-script
+(defn- create-h2-db-script! [create-sample-content?]
+  (schema-migrations-test.impl/with-temp-empty-app-db [conn :h2]
+    ;; since the actual group defs are not dynamic, we need with-redefs to change them here
+    (with-redefs [perms-group/all-users (#'perms-group/magic-group perms-group/all-users-magic-group-type)
+                  perms-group/admin     (#'perms-group/magic-group perms-group/admin-magic-group-type)]
+      (mdb/setup-db! :create-sample-content? create-sample-content?)
+      ;; setup-db! writes through the encrypting transforms, so with MB_ENCRYPTION_SECRET_KEY set the dump would
+      ;; carry rows only that key can read. A test that binds a key of its own then sees rows it cannot decrypt.
+      (mdb/decrypt-db :h2 (mdb/data-source))
+      (let [f (java.io.File/createTempFile "db-export" ".sql")]
+        (next.jdbc/execute! conn ["SCRIPT TO ?" (str f)])
+        f))))
+
+(def h2-app-db-script-empty
   "To save time during tests, instead of running all migrations for each new empty H2 app db, we perform the
   migrations once and dump the schema into a script. Subsequently, this script can be used to instantiate new copies
-  of H2 app db. The result is a dereffable temp file."
-  (delay
-    (schema-migrations-test.impl/with-temp-empty-app-db [conn :h2]
-      ;; since the actual group defs are not dynamic, we need with-redefs to change them here
-      (with-redefs [perms-group/all-users (#'perms-group/magic-group perms-group/all-users-magic-group-type)
-                    perms-group/admin     (#'perms-group/magic-group perms-group/admin-magic-group-type)]
-        (mdb/setup-db! :create-sample-content? false)
-        (let [f (java.io.File/createTempFile "db-export" ".sql")]
-          (next.jdbc/execute! conn ["SCRIPT TO ?" (str f)])
-          f)))))
+  of H2 app db. The result is a dereffable temp file.
+  This script saves the *empty* H2 database (without sample content)."
+  (delay (create-h2-db-script! false)))
+
+(def h2-app-db-script-with-sample-content
+  "Same [[h2-app-db-script-empty]], but also includes generated sample content."
+  (delay (create-h2-db-script! true)))
 
 (defmacro with-empty-h2-app-db!
   "Runs `body` under a new, blank, H2 application database (randomly named), in which all model tables have been
-  created from `h2-app-db-script`. After `body` is finished, the original app DB bindings are restored.
+  created from `h2-app-db-script-empty`. After `body` is finished, the original app DB bindings are restored.
 
   Makes use of functionality in the [[metabase.app-db.schema-migrations-test.impl]] namespace since that already does what
   we need."
   {:style/indent 0}
   [& body]
   `(schema-migrations-test.impl/with-temp-empty-app-db [conn# :h2]
-     (next.jdbc/execute! conn# ["RUNSCRIPT FROM ?" (str @h2-app-db-script)])
+     (next.jdbc/execute! conn# ["RUNSCRIPT FROM ?" (str @h2-app-db-script-empty)])
      (mdb/finish-db-setup!)
+     ;; This app DB must remain empty, so `with-temp` must not materialize the test-data Database in it.
+     (binding [data.impl/*skip-dataset-prewarm?* true]
+       ~@body)))
+
+(defmacro with-sample-h2-app-db!
+  "Same as `with-empty-h2-app-db!`, but creates a H2 application database prepopulated with sample data."
+  {:style/indent 0}
+  [& body]
+  `(schema-migrations-test.impl/with-temp-empty-app-db [conn# :h2]
+     (next.jdbc/execute! conn# ["RUNSCRIPT FROM ?" (str @h2-app-db-script-with-sample-content)])
+     (mdb/finish-db-setup!)
+     ;; This app DB must remain empty, so `with-temp` must not materialize the test-data Database in it.
      ~@body))
 
-;; Non-"normal" timeseries drivers are tested in [[metabase.timeseries-query-processor-test]] and elsewhere
+;; Non-"normal" timeseries drivers are tested in [[metabase.query-processor.timeseries-test]] and elsewhere
 (def timeseries-drivers
   "Drivers that are so weird that we can't use the standard dataset loading against them."
-  #{:druid :druid-jdbc})
+  #{:druid-jdbc})
 
 (mr/def ::driver-selector
   [:map {:closed true}
@@ -316,8 +354,8 @@
    [:+conn-props {:optional true} [:sequential :string]]
    [:-conn-props {:optional true} [:sequential :string]]
    [:+parent {:optional true} :keyword]
-   [:+fns {:optional true} [:sequential [:function [:=> [:cat :keyword] :any]]]]
-   [:-fns {:optional true} [:sequential [:function [:=> [:cat :keyword] :any]]]]])
+   [:+fns {:optional true} [:sequential [:function [:=> [:cat :keyword] [:or :boolean [:maybe :keyword]]]]]]
+   [:-fns {:optional true} [:sequential [:function [:=> [:cat :keyword] [:or :boolean [:maybe :keyword]]]]]]])
 
 (mu/defn driver-select :- [:set :keyword]
   "Select drivers to be tested.
@@ -341,7 +379,10 @@
     (for [driver (tx.env/test-drivers)
           :let [driver (tx/the-driver-with-test-extensions driver)
                 conn-prop-names (when (or (seq +conn-props) (seq -conn-props))
-                                  (into #{} (map :name (driver/connection-properties driver))))]
+                                  (->> (driver/connection-properties driver)
+                                       driver.u/collect-all-props-by-name
+                                       keys
+                                       (into #{})))]
           :when (driver/with-driver driver
                   (let [the-db (delay (db))]
                     (cond-> true

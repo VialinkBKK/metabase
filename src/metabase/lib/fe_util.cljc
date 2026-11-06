@@ -1,23 +1,24 @@
 (ns metabase.lib.fe-util
+  (:refer-clojure :exclude [every? mapv select-keys some #?(:clj doseq) #?(:clj for)])
   (:require
    [inflections.core :as inflections]
    [medley.core :as m]
-   [metabase.legacy-mbql.normalize :as mbql.normalize]
    [metabase.lib.aggregation :as lib.aggregation]
    [metabase.lib.card :as lib.card]
    [metabase.lib.common :as lib.common]
-   [metabase.lib.convert :as lib.convert]
+   [metabase.lib.date-time :as lib.date-time]
    [metabase.lib.dispatch :as lib.dispatch]
    [metabase.lib.expression :as lib.expression]
-   [metabase.lib.filter :as lib.filter]
    [metabase.lib.hierarchy :as lib.hierarchy]
    [metabase.lib.metadata :as lib.metadata]
    [metabase.lib.metadata.calculation :as lib.metadata.calculation]
+   [metabase.lib.metadata.protocols :as lib.metadata.protocols]
    [metabase.lib.normalize :as lib.normalize]
    [metabase.lib.options :as lib.options]
    [metabase.lib.query :as lib.query]
    [metabase.lib.ref :as lib.ref]
    [metabase.lib.schema :as lib.schema]
+   [metabase.lib.schema.common :as lib.schema.common]
    [metabase.lib.schema.expression :as lib.schema.expression]
    [metabase.lib.schema.filter :as lib.schema.filter]
    [metabase.lib.schema.id :as lib.schema.id]
@@ -27,12 +28,13 @@
    [metabase.lib.temporal-bucket :as lib.temporal-bucket]
    [metabase.lib.types.isa :as lib.types.isa]
    [metabase.lib.util :as lib.util]
-   [metabase.lib.util.match :as lib.util.match]
    [metabase.util :as u]
    [metabase.util.formatting.date :as fmt.date]
    [metabase.util.i18n :as i18n]
    [metabase.util.malli :as mu]
+   [metabase.util.match :as match]
    [metabase.util.number :as u.number]
+   [metabase.util.performance :refer [every? mapv select-keys some #?(:clj doseq) #?(:clj for)]]
    [metabase.util.time :as u.time]))
 
 (def ^:private ExpressionArg
@@ -44,15 +46,24 @@
    :float
    ::lib.schema.metadata/column
    ::lib.schema.metadata/segment
+   ::lib.schema.metadata/measure
    ::lib.schema.metadata/metric])
+
+(def ^:private ExpressionOptions
+  "Like `:metabase.lib.schema.common/options`, but `:lib/uuid` need not be set yet;
+  see [[metabase.lib.options/ensure-uuid]]."
+  [:merge
+   ::lib.schema.common/options
+   [:map {:closed true}
+    [:lib/uuid {:optional true} ::lib.schema.common/uuid]]])
 
 (def ^:private ExpressionParts
   [:schema
    {:registry {::expression-parts
-               [:map
+               [:map {:closed true}
                 [:lib/type [:= :mbql/expression-parts]]
                 [:operator [:or :keyword :string]]
-                [:options :map]
+                [:options ExpressionOptions]
                 [:args [:sequential [:or ExpressionArg [:ref ::expression-parts]]]]]}}
    ::expression-parts])
 
@@ -72,19 +83,20 @@
                            (:temporal-unit (lib.options/options maybe-clause-arg)))
                 (u.time/timestamp-coercible? other-arg))))
 
-(defn- expand-temporal-expression
+(defn expand-temporal-expression
   "Modify expression in a way, that its resulting [[expression-parts]] are digestable by filter picker.
 
    Current filter picker implementation is unable to handle expression parts of expressions of a form
-   `[:= {...} [:field {:temporal-unit :week} 11] \"2024-05-12\"]` -- expresions that check for equality of a column
+   `[:= {...} [:field {:temporal-unit :week} 11] \"2024-05-12\"]` -- expressions that check for equality of a column
    with `:temporal-unit` set to value other than `:day` or `:minute` to some date time value.
 
    To mitigate that expressions are converted to `:between` form which is handled correctly by filter picker. For more
    info on the issue see the comment [https://github.com/metabase/metabase/issues/12496#issuecomment-1629317661].
    This functionality is backend approach to \"smaller solution\"."
-  [[_operator options column-arg dt-arg :as _expression-clause]]
+  [time-config [_operator options column-arg dt-arg :as _expression-clause]]
   (let [temporal-unit (:temporal-unit (lib.options/options column-arg))
-        interval (u.time/to-range (u.time/coerce-to-timestamp dt-arg) {:unit temporal-unit :n 1})
+        interval (u.time/to-range (u.time/coerce-to-timestamp dt-arg)
+                                  (assoc time-config :unit temporal-unit, :n 1))
         formatter (if (contains? expandable-time-units temporal-unit)
                     fmt.date/datetime->iso-string
                     fmt.date/date->iso-string)]
@@ -92,8 +104,7 @@
 
 (defn- column-metadata-from-ref
   [query stage-number a-ref]
-  (-> (lib.metadata.calculation/metadata query stage-number a-ref)
-      lib.filter/add-column-operators))
+  (lib.metadata.calculation/metadata query stage-number a-ref))
 
 (defmulti expression-parts-method
   "Builds the expression parts by dispatching on the type of the argument."
@@ -128,6 +139,7 @@
                         :dispatch-type/keyword
                         :dispatch-type/nil
                         :metadata/column
+                        :metadata/measure
                         :metadata/segment
                         :metadata/metric]]
   (defmethod expression-parts-method dispatch-value
@@ -138,12 +150,46 @@
   [query stage-number clause]
   ((get-method expression-parts-method :default)
    query stage-number (cond-> clause
-                        (expandable-temporal-expression? clause) expand-temporal-expression)))
+                        (expandable-temporal-expression? clause)
+                        (#(expand-temporal-expression (lib.date-time/config query) %)))))
+
+(defn- composite-clause-in-stages-0-to?
+  "True when any stage 0..`max-stage` contains an `:aggregation` or `:expressions` clause with
+  `:lib/uuid = target-uuid`. Searched latest-first since the originating aggregation is usually close to the
+  current stage."
+  [query max-stage target-uuid]
+  (loop [stage-number max-stage]
+    (cond
+      (neg? stage-number) false
+      (let [stage (lib.util/query-stage query stage-number)]
+        (some (fn [clause] (= (lib.options/uuid clause) target-uuid))
+              (concat (:aggregation stage) (:expressions stage)))) true
+      :else (recur (dec stage-number)))))
+
+(defn- restore-previous-stage-source-uuid
+  "Nominal `:field` refs into a previous stage lose the connection to their originating aggregation/expression
+  clause because `resolve-field-ref` overwrites `:lib/source-uuid` with the ref's own uuid. That breaks the
+  `:long` display-name traceback in [[metabase.lib.field]] (source-uuid → source clause), so two same-named
+  aggregations from different joins render identically (#76986). For expression-parts consumers we recover the
+  link: look up the previous-stage returned column by `:lib/deduplicated-name` and copy its `:lib/source-uuid`
+  onto the resolved col — but only when that uuid points at a composite (aggregation/expression) clause
+  somewhere upstream. Scoped to expression-parts; a broader display-name-level fix has a wider blast radius and
+  is deferred to the Column Heritage effort."
+  [query stage-number col]
+  (or (when-let [previous-stage-number (lib.util/previous-stage-number query stage-number)]
+        (when-let [dedup-name (:lib/deduplicated-name col)]
+          (when-let [prev-col (m/find-first #(= (:lib/deduplicated-name %) dedup-name)
+                                            (lib.metadata.calculation/returned-columns query previous-stage-number))]
+            (when-let [prev-source-uuid (:lib/source-uuid prev-col)]
+              (when (composite-clause-in-stages-0-to? query previous-stage-number prev-source-uuid)
+                (assoc col :lib/source-uuid prev-source-uuid))))))
+      col))
 
 (defmethod expression-parts-method :field
   [query stage-number field-ref]
   (let [stripped-ref (lib.options/update-options field-ref #(dissoc % :lib/expression-name))]
-    (column-metadata-from-ref query stage-number stripped-ref)))
+    (->> (column-metadata-from-ref query stage-number stripped-ref)
+         (restore-previous-stage-source-uuid query stage-number))))
 
 (defmethod expression-parts-method :segment
   [query _stage-number segment-ref]
@@ -152,6 +198,14 @@
    {:lib/type :metadata/segment
     :id (last segment-ref)
     :display-name (i18n/tru "Unknown Segment")}))
+
+(defmethod expression-parts-method :measure
+  [query _stage-number measure-ref]
+  (or
+   (lib.metadata/measure query (last measure-ref))
+   {:lib/type :metadata/measure
+    :id (last measure-ref)
+    :display-name (i18n/tru "Unknown Measure")}))
 
 (defmethod expression-parts-method :metric
   [query _stage-number metric-ref]
@@ -177,7 +231,8 @@
 
 (mu/defn expression-parts :- [:or ExpressionArg ExpressionParts]
   "Return the parts of the filter clause `arg` in query `query` at stage `stage-number`."
-  ([query value]
+  ([query :- ::lib.schema/query
+    value :- [:or ::lib.schema.expression/expression ExpressionArg ExpressionParts]]
    (expression-parts query -1 value))
 
   ([query :- ::lib.schema/query
@@ -225,6 +280,7 @@
   value)
 
 (doseq [dispatch-value [:metadata/column
+                        :metadata/measure
                         :metadata/segment
                         :metadata/metric]]
   (defmethod expression-clause-method dispatch-value
@@ -246,7 +302,7 @@
 
   ([operator :- [:or :keyword :string]
     args     :- [:sequential [:or ExpressionArg ExpressionParts ::lib.schema.expression/expression]]
-    options  :- [:maybe :map]]
+    options  :- [:maybe ExpressionOptions]]
    (expression-clause-method {:lib/type :mbql/expression-parts
                               :operator operator
                               :options  options
@@ -291,7 +347,7 @@
   (expression-clause-with-in operator (into [column] values)
                              (if (#{:is-empty :not-empty := :!=} operator)
                                {}
-                               options)))
+                               {:case-sensitive (:case-sensitive options false)})))
 
 (mu/defn string-filter-parts :- [:maybe StringFilterParts]
   "Destructures a string filter clause created by [[string-filter-clause]]. Returns `nil` if the clause does not match
@@ -304,7 +360,7 @@
         string-col? #(ref-clause-with-type? % [:type/Text :type/TextLike])
         result (fn [op col-ref args options]
                  {:operator op, :column (ref->col col-ref), :values (vec args), :options options})]
-    (lib.util.match/match-lite filter-clause
+    (match/match-one filter-clause
       ;; no arguments
       [(op :guard #{:is-empty :not-empty}) _ (col-ref :guard string-col?) & (args :len 0 :guard (every? string? args))]
       (result op col-ref [] {})
@@ -319,7 +375,10 @@
 
       ;; multiple arguments with options
       [(op :guard #{:contains :does-not-contain :starts-with :ends-with}) opts (col-ref :guard string-col?) & (args :guard (every? string? args))]
-      (result op col-ref args {:case-sensitive (:case-sensitive opts true)}))))
+      (result op col-ref args {:case-sensitive (:case-sensitive opts true)})
+
+      ;; do not match inner clauses
+      _ nil)))
 
 (def ^:private NumberFilterValue
   [:or number? [:fn u.number/bigint?]])
@@ -332,12 +391,14 @@
 
 (defn- expression-arg->number
   [arg]
-  (lib.util.match/match-lite arg
+  (match/match-one arg
     (value :guard number?)
     value
 
-    [:value (_ :guard #(= (:base-type %) :type/BigInteger)) (value :guard string?)]
-    (u.number/parse-bigint value)))
+    [:value {:base-type :type/BigInteger} (value :guard string?)]
+    (u.number/parse-bigint value)
+
+    _ nil))
 
 (def ^:private NumberFilterParts
   [:map
@@ -361,31 +422,25 @@
    filter-clause :- ::lib.schema.expression/expression]
   (let [ref->col    #(column-metadata-from-ref query stage-number %)
         number-col? #(ref-clause-with-type? % [:type/Number])
-        number-arg? #(some? (expression-arg->number %))
-        result (fn [op col-ref values]
-                 {:operator ({:in :=, :not-in :!=} op op)
-                  :column (ref->col col-ref)
-                  :values (mapv expression-arg->number values)})]
-    (lib.util.match/match-lite filter-clause
-      ;; no arguments
-      [(op :guard #{:is-null :not-null}) _ (col-ref :guard number-col?) & (args :len 0 :guard (every? number-arg? args))]
-      (result op col-ref args)
+        number-arg? #(some? (expression-arg->number %))]
+    (match/match-one filter-clause
+      (:or
+       ;; no arguments
+       [(op :guard #{:is-null :not-null}) _ (col-ref :guard number-col?) & (args :len 0 :guard (every? number-arg? args))]
+       ;; multiple arguments, `:=`
+       [(op :guard #{:= :in})             _ (col-ref :guard number-col?) & (args        :guard (every? number-arg? args))]
+       ;; multiple arguments, `:!=`
+       [(op :guard #{:!= :not-in})        _ (col-ref :guard number-col?) & (args        :guard (every? number-arg? args))]
+       ;; exactly 1 argument
+       [(op :guard #{:> :>= :< :<=})      _ (col-ref :guard number-col?) & (args :len 1 :guard (every? number-arg? args))]
+       ;; exactly 2 arguments
+       [(op :guard #{:between})           _ (col-ref :guard number-col?) & (args :len 2 :guard (every? number-arg? args))])
+      {:operator ({:in :=, :not-in :!=} op op)
+       :column   (ref->col col-ref)
+       :values   (mapv expression-arg->number args)}
 
-      ;; multiple arguments, `:=`
-      [(op :guard #{:= :in}) _ (col-ref :guard number-col?) & (args :guard (every? number-arg? args))]
-      (result op col-ref args)
-
-      ;; multiple arguments, `:!=`
-      [(op :guard #{:!= :not-in}) _ (col-ref :guard number-col?) & (args :guard (every? number-arg? args))]
-      (result op col-ref args)
-
-      ;; exactly 1 argument
-      [(op :guard #{:> :>= :< :<=}) _ (col-ref :guard number-col?) & (args :len 1 :guard (every? number-arg? args))]
-      (result op col-ref args)
-
-      ;; exactly 2 arguments
-      [(op :guard #{:between}) _ (col-ref :guard number-col?) & (args :len 2 :guard (every? number-arg? args))]
-      (result op col-ref args))))
+      ;; do not match inner clauses
+      _ nil)))
 
 (def ^:private CoordinateFilterParts
   [:map
@@ -421,31 +476,28 @@
                                    :column (ref->col col-ref)
                                    :values (mapv expression-arg->number args)}
                             lon-col-ref (assoc :longitude-column (ref->col lon-col-ref))))]
-    ;; Separated into two match calls to allow `match-lite` macro to better group things.
-    (or (lib.util.match/match-lite filter-clause
-          ;; multiple arguments, `:=`
-          [(op :guard #{:= :in}) _ (col-ref :guard coordinate-col?) & (args :guard (every? number-arg? args))]
-          (result op col-ref nil args)
+    (match/match-one filter-clause
+      (:or
+       ;; multiple arguments, `:=`
+       [(op :guard #{:= :in})        _ (col-ref :guard coordinate-col?) & (args        :guard (every? number-arg? args))]
+       ;; multiple arguments, `:!=`
+       [(op :guard #{:!= :not-in})   _ (col-ref :guard coordinate-col?) & (args        :guard (every? number-arg? args))]
+       ;; exactly 1 argument
+       [(op :guard #{:> :>= :< :<=}) _ (col-ref :guard coordinate-col?) & (args :len 1 :guard (every? number-arg? args))]
+       ;; exactly 2 arguments
+       [(op :guard #{:between})      _ (col-ref :guard coordinate-col?) & (args :len 2 :guard (every? number-arg? args))])
+      (result op col-ref nil args)
 
-          ;; multiple arguments, `:!=`
-          [(op :guard #{:!= :not-in}) _ (col-ref :guard coordinate-col?) & (args :guard (every? number-arg? args))]
-          (result op col-ref nil args)
+      ;; exactly 4 arguments
+      [(op :guard #{:inside})
+       _
+       (lat-col-ref :guard coordinate-col?)
+       (lon-col-ref :guard coordinate-col?)
+       & (args :len 4 :guard (every? number-arg? args))]
+      (result op lat-col-ref lon-col-ref args)
 
-          ;; exactly 1 argument
-          [(op :guard #{:> :>= :< :<=}) _ (col-ref :guard coordinate-col?) & (args :len 1 :guard (every? number-arg? args))]
-          (result op col-ref nil args)
-
-          ;; exactly 2 arguments
-          [(op :guard #{:between}) _ (col-ref :guard coordinate-col?) & (args :len 2 :guard (every? number-arg? args))]
-          (result op col-ref nil args))
-        (lib.util.match/match-lite filter-clause
-          ;; exactly 4 arguments
-          [(op :guard #{:inside})
-           _
-           (lat-col-ref :guard coordinate-col?)
-           (lon-col-ref :guard coordinate-col?)
-           & (args :len 4 :guard (every? number-arg? args))]
-          (result op lat-col-ref lon-col-ref args)))))
+      ;; do not match inner clauses
+      _ nil)))
 
 (def ^:private BooleanFilterParts
   [:map
@@ -469,14 +521,16 @@
    filter-clause :- ::lib.schema.expression/expression]
   (let [ref->col     #(column-metadata-from-ref query stage-number %)
         boolean-col? #(ref-clause-with-type? % [:type/Boolean])]
-    (lib.util.match/match-lite filter-clause
-      ;; no arguments
-      [(op :guard #{:is-null :not-null}) _ (col-ref :guard boolean-col?) & (args :len 0 :guard (every? boolean? args))]
+    (match/match-one filter-clause
+      (:or
+       ;; no arguments
+       [(op :guard #{:is-null :not-null}) _ (col-ref :guard boolean-col?) & (args :len 0 :guard (every? boolean? args))]
+       ;; exactly 1 argument
+       [(op :guard #{:=})                 _ (col-ref :guard boolean-col?) & (args :len 1 :guard (every? boolean? args))])
       {:operator op, :column (ref->col col-ref), :values (vec args)}
 
-      ;; exactly 1 argument
-      [(op :guard #{:=}) _ (col-ref :guard boolean-col?) & (args :len 1 :guard (every? boolean? args))]
-      {:operator op, :column (ref->col col-ref), :values (vec args)})))
+      ;; do not match inner clauses
+      _ nil)))
 
 (def ^:private SpecificDateFilterParts
   [:map
@@ -494,7 +548,7 @@
    with-time? :- [:maybe :boolean]]
   (let [column (cond-> column
                  with-time? (lib.temporal-bucket/with-temporal-bucket :minute))
-        values (mapv #(u.time/format-for-base-type % (if with-time? :type/DateTime :type/Date)) values)]
+        values (mapv #(u.time/format-date-for-filter % with-time?) values)]
     (expression-clause operator (into [column] values) {})))
 
 (mu/defn specific-date-filter-parts :- [:maybe SpecificDateFilterParts]
@@ -510,14 +564,16 @@
                           values (mapv u.time/coerce-to-timestamp args)]
                       (when (every? u.time/valid? values)
                         {:operator op, :column (ref->col col-ref), :values values, :with-time? (not date?)})))]
-    (lib.util.match/match-lite filter-clause
-      ;; exactly 1 argument
-      [(op :guard #{:= :> :<}) _ (col-ref :guard date-col?) & (args :len 1 :guard (every? string? args))]
+    (match/match-one filter-clause
+      (:or
+       ;; exactly 1 argument
+       [(op :guard #{:= :> :<}) _ (col-ref :guard date-col?) & (args :len 1 :guard (every? string? args))]
+       ;; exactly 2 arguments
+       [(op :guard #{:between}) _ (col-ref :guard date-col?) & (args :len 2 :guard (every? string? args))])
       (result op col-ref args)
 
-      ;; exactly 2 arguments
-      [(op :guard #{:between}) _ (col-ref :guard date-col?) & (args :len 2 :guard (every? string? args))]
-      (result op col-ref args))))
+      ;; do not match inner clauses
+      _ nil)))
 
 (def ^:private RelativeDateFilterParts
   [:map
@@ -550,11 +606,11 @@
    filter-clause :- ::lib.schema.expression/expression]
   (let [ref->col  #(column-metadata-from-ref query stage-number %)
         date-col? #(ref-clause-with-type? % [:type/Date :type/DateTime])]
-    (lib.util.match/match-lite filter-clause
+    (match/match-one filter-clause
       [:time-interval
        opts
        (col-ref :guard date-col?)
-       (value :guard #(or (number? %) (= :current %)))
+       (value :guard (or (number? value) (= :current value)))
        (unit :guard keyword?)]
       {:column       (ref->col col-ref)
        :value        (if (= value :current) 0 value)
@@ -573,7 +629,10 @@
        :unit         unit
        :offset-value offset-value
        :offset-unit  offset-unit
-       :options      {}})))
+       :options      {}}
+
+      ;; do not match inner clauses
+      _ nil)))
 
 (def ^:private ExcludeDateFilterParts
   [:map
@@ -611,24 +670,29 @@
 (mu/defn exclude-date-filter-parts :- [:maybe ExcludeDateFilterParts]
   "Destructures an exclude date filter clause created by [[exclude-date-filter-clause]]. Returns `nil` if the clause
   does not match the expected shape."
-  [query stage-number filter-clause]
+  [query         :- ::lib.schema/query
+   stage-number  :- :int
+   filter-clause :- ::lib.schema.expression/expression]
   (let [ref->col  #(column-metadata-from-ref query stage-number %)
         date-col? #(ref-clause-with-type? % [:type/Date :type/DateTime])
         op->unit  {:get-hour :hour-of-day
                    :get-month :month-of-year
                    :get-quarter :quarter-of-year}]
-    (lib.util.match/match-lite filter-clause
+    (match/match-one filter-clause
       ;; no arguments
-      [(op :guard #{:is-null :not-null}) _ (col-ref :guard date-col?) & (args :len 0 :guard (every? int? args))]
+      [(op :guard #{:is-null :not-null}) _ (col-ref :guard date-col?)]
       {:operator op, :column (ref->col col-ref), :values []}
 
       ;; without `mode`
-      [(_ :guard #{:!= :not-in}) _ [(op :guard #{:get-hour :get-month :get-quarter}) _ (col-ref :guard date-col?)] & (args :guard (every? int? args))]
+      [#{:!= :not-in} _ [(op :guard #{:get-hour :get-month :get-quarter}) _ (col-ref :guard date-col?)] & (args :guard (every? int? args))]
       {:operator :!=, :column (ref->col col-ref), :unit (op->unit op), :values args}
 
       ;; with `:mode`
-      [(_ :guard #{:!= :not-in}) _ [:get-day-of-week _ (col-ref :guard date-col?) :iso] & (args :guard (every? int? args))]
-      {:operator :!=, :column (ref->col col-ref), :unit :day-of-week, :values args})))
+      [#{:!= :not-in} _ [:get-day-of-week _ (col-ref :guard date-col?) :iso] & (args :guard (every? int? args))]
+      {:operator :!=, :column (ref->col col-ref), :unit :day-of-week, :values args}
+
+      ;; do not match inner clauses
+      _ nil)))
 
 (def ^:private TimeFilterParts
   [:map
@@ -652,23 +716,21 @@
    stage-number  :- :int
    filter-clause :- ::lib.schema.expression/expression]
   (let [ref->col  #(column-metadata-from-ref query stage-number %)
-        time-col? #(ref-clause-with-type? % [:type/Time])
-        result (fn [op col-ref args]
-                 (let [values (mapv u.time/coerce-to-time args)]
-                   (when (every? u.time/valid? values)
-                     {:operator op, :column (ref->col col-ref), :values values})))]
-    (lib.util.match/match-lite filter-clause
-      ;; no arguments
-      [(op :guard #{:is-null :not-null}) _ (col-ref :guard time-col?) & (args :len 0 :guard (every? string? args))]
-      (result op col-ref args)
+        time-col? #(ref-clause-with-type? % [:type/Time])]
+    (match/match-one filter-clause
+      (:or
+       ;; no arguments
+       [(op :guard #{:is-null :not-null}) _ (col-ref :guard time-col?) & (args :len 0 :guard (every? string? args))]
+       ;; exactly 1 argument
+       [(op :guard #{:> :<})              _ (col-ref :guard time-col?) & (args :len 1 :guard (every? string? args))]
+       ;; exactly 2 arguments
+       [(op :guard #{:between})           _ (col-ref :guard time-col?) & (args :len 2 :guard (every? string? args))])
+      (let [values (mapv u.time/coerce-to-time args)]
+        (when (every? u.time/valid? values)
+          {:operator op, :column (ref->col col-ref), :values values}))
 
-      ;; exactly 1 argument
-      [(op :guard #{:> :<}) _ (col-ref :guard time-col?) & (args :len 1 :guard (every? string? args))]
-      (result op col-ref args)
-
-      ;; exactly 2 arguments
-      [(op :guard #{:between}) _ (col-ref :guard time-col?) & (args :len 2 :guard (every? string? args))]
-      (result op col-ref args))))
+      ;; do not match inner clauses
+      _ nil)))
 
 (def ^:private DefaultFilterParts
   [:map
@@ -693,9 +755,11 @@
         supported-col? #(and (lib.util/ref-clause? %)
                              (not (lib.util/original-isa? % :type/Text))
                              (not (lib.util/original-isa? % :type/TextLike)))]
-    (lib.util.match/match-lite filter-clause
+    (match/match-one filter-clause
       [(op :guard #{:is-null :not-null}) _ (col-ref :guard supported-col?)]
-      {:operator op, :column (ref->col col-ref)})))
+      {:operator op, :column (ref->col col-ref)}
+
+      _ nil)))
 
 ;; ::lib.schema.expression/expression
 (def ^:private JoinConditionParts
@@ -714,65 +778,75 @@
 (mu/defn join-condition-parts :- [:maybe JoinConditionParts]
   "Destructures a join condition created by [[join-condition-clause]]."
   [join-condition :- ::lib.schema.join/condition]
-  (lib.util.match/match-one join-condition
+  (match/match-one join-condition
     [(op :guard lib.schema.join/condition-operators) _ lhs rhs]
     {:operator op, :lhs-expression lhs, :rhs-expression rhs}
 
     ;; do not match inner clauses
-    _
-    nil))
+    _ nil))
 
 (mu/defn join-condition-lhs-or-rhs-literal? :- :boolean
-  "Whether this LHS or RHS expression is a `:value` clause."
+  "Whether this LHS or RHS expression is a literal value (either a `:value` clause or a raw literal)."
   [lhs-or-rhs :- [:maybe ::lib.schema.expression/expression]]
-  (lib.util/clause-of-type? lhs-or-rhs :value))
+  (or (lib.util/clause-of-type? lhs-or-rhs :value)
+      (number? lhs-or-rhs)
+      (string? lhs-or-rhs)
+      (boolean? lhs-or-rhs)))
 
 (mu/defn join-condition-lhs-or-rhs-column? :- :boolean
-  "Whether this LHS or RHS expression is a `:field` reference."
+  "Whether this LHS or RHS expression is a `:field` or `:expression` reference."
   [lhs-or-rhs :- [:maybe ::lib.schema.expression/expression]]
-  (lib.util/field-clause? lhs-or-rhs))
+  (or (lib.util/clause-of-type? lhs-or-rhs :field)
+      (lib.util/clause-of-type? lhs-or-rhs :expression)))
+
+(defn- temporal? [t]
+  (lib.util/original-isa? t :type/Temporal))
 
 (mu/defn filter-args-display-name :- :string
   "Provides a reasonable display name for the `filter-clause` excluding the column-name.
    Can be expanded as needed but only currently defined for a narrow set of date filters.
 
    Falls back to the full filter display-name"
-  [query stage-number filter-clause]
-  (let [->temporal-name #(u.time/format-unit % nil)
-        temporal? #(lib.util/original-isa? % :type/Temporal)
+  [query         :- ::lib.schema/query
+   stage-number  :- :int
+   filter-clause :- ::lib.schema.expression/expression]
+  (let [time-config    (lib.date-time/config query)
+        ->temporal-name #(u.time/format-unit time-config % nil)
         unit= (fn [maybe-clause unit-or-units]
                 (let [units (set (u/one-or-many unit-or-units))]
                   (clojure.core/and
                    (temporal? maybe-clause)
                    (lib.util/clause? maybe-clause)
                    (clojure.core/contains? units (:temporal-unit (second maybe-clause))))))
-        ->unit {:get-hour :hour-of-day
-                :get-month :month-of-year
-                :get-quarter :quarter-of-year}]
-    (lib.util.match/match-lite filter-clause
-      [#{:= :in} _ [:get-day-of-week _ (_ :guard temporal?) :iso] (b :guard int?)]
-      (inflections/plural (u.time/format-unit b :day-of-week-iso))
+        ->unit       {:get-hour :hour-of-day
+                      :get-month :month-of-year
+                      :get-quarter :quarter-of-year}]
+    (match/match-one filter-clause
+      [#{:= :in} _ [:get-day-of-week _ #'temporal? :iso] (b :guard int?)]
+      (inflections/plural (u.time/format-unit time-config b :day-of-week-iso))
 
-      [#{:!= :not-in} _ [:get-day-of-week _ (_ :guard temporal?) :iso] (b :guard int?)]
-      (i18n/tru "Excludes {0}" (inflections/plural (u.time/format-unit b :day-of-week-iso)))
+      [#{:!= :not-in} _ [:get-day-of-week _ #'temporal? :iso] (b :guard int?)]
+      (i18n/tru "Excludes {0}" (inflections/plural (u.time/format-unit time-config b :day-of-week-iso)))
 
-      [#{:= :in} _ [(f :guard #{:get-hour :get-month :get-quarter}) _ (_ :guard temporal?)] (b :guard int?)]
-      (u.time/format-unit b (->unit f))
+      [#{:= :in} _ [(f :guard #{:get-hour :get-month :get-quarter}) _ #'temporal?] (b :guard int?)]
+      (u.time/format-unit time-config b (->unit f))
 
-      [#{:!= :not-in} _ [(f :guard #{:get-hour :get-month :get-quarter}) _ (_ :guard temporal?)] (b :guard int?)]
-      (i18n/tru "Excludes {0}" (u.time/format-unit b (->unit f)))
+      [#{:!= :not-in} _ [(f :guard #{:get-hour :get-month :get-quarter}) _ #'temporal?] (b :guard int?)]
+      (i18n/tru "Excludes {0}" (u.time/format-unit time-config b (->unit f)))
 
       [#{:= :in} _ (x :guard (unit= x lib.schema.temporal-bucketing/datetime-truncation-units)) (y :guard string?)]
-      (u.time/format-relative-date-range y 0 (:temporal-unit (second x)) nil nil {:include-current true})
+      (u.time/format-relative-date-range time-config
+                                         y 0 (:temporal-unit (second x)) nil nil
+                                         {:include-current true})
 
       [:during _ (x :guard temporal?) (y :guard string?) unit]
-      (u.time/format-relative-date-range y 1 unit -1 unit {})
+      (u.time/format-relative-date-range time-config y 1 unit -1 unit nil)
 
       [#{:= :in} _ (x :guard temporal?) (y :guard (or (int? y) (string? y)))]
-      (lib.temporal-bucket/describe-temporal-pair x y)
+      (lib.temporal-bucket/describe-temporal-pair time-config x y)
 
       [#{:!= :not-in} _ (x :guard temporal?) (y :guard (or (int? y) (string? y)))]
-      (i18n/tru "Excludes {0}" (lib.temporal-bucket/describe-temporal-pair x y))
+      (i18n/tru "Excludes {0}" (lib.temporal-bucket/describe-temporal-pair time-config x y))
 
       [:< _ (x :guard temporal?) (y :guard string?)]
       (i18n/tru "Before {0}" (->temporal-name y))
@@ -780,7 +854,7 @@
       [:> _ (x :guard temporal?) (y :guard string?)]
       (i18n/tru "After {0}" (->temporal-name y))
 
-      [:between _ (_ :guard temporal?) (y :guard string?) (z :guard string?)]
+      [:between _ #'temporal? (y :guard string?) (z :guard string?)]
       (u.time/format-diff y z)
 
       [:is-null & _]
@@ -789,14 +863,34 @@
       [:not-null & _]
       (i18n/tru "Is Not Empty")
 
-      [:time-interval opts (_ :guard temporal?) n unit]
-      (lib.temporal-bucket/describe-temporal-interval n unit opts)
+      [:time-interval opts #'temporal? n unit]
+      (lib.temporal-bucket/describe-temporal-interval n unit (select-keys opts [:include-current]))
 
-      [:relative-time-interval _ (_ :guard temporal?) n unit offset offset-unit]
+      [:relative-time-interval _ #'temporal? n unit offset offset-unit]
       (lib.temporal-bucket/describe-temporal-interval-with-offset n unit offset offset-unit)
 
       _
       (lib.metadata.calculation/display-name query stage-number filter-clause))))
+
+(defn- query-dependents-snippets
+  "Recursively extract snippet dependencies from snippet template tags.
+   Returns a sequence of dependent items including the snippet and any nested snippets."
+  [metadata-providerable snippet-id visited-ids]
+  (if-let [snippet (lib.metadata/native-query-snippet metadata-providerable snippet-id)]
+    (let [visited-ids' (conj visited-ids snippet-id)]
+      (cons {:type :native-query-snippet, :id snippet-id}
+            ;; Recursively get dependencies from the snippet's own template tags
+            (for [{nested-type       :type,
+                   nested-snippet-id :snippet-id} (vals (:template-tags snippet))
+                  :when (and (= nested-type :snippet)
+                             (integer? nested-snippet-id)
+                             (not (contains? visited-ids' nested-snippet-id)))
+                  dependency (query-dependents-snippets metadata-providerable
+                                                        nested-snippet-id
+                                                        visited-ids')]
+              dependency)))
+    ;; Return just the ID if we can't fetch the snippet:
+    [{:type :native-query-snippet, :id snippet-id}]))
 
 (defn- query-dependents-foreign-keys
   [metadata-providerable columns]
@@ -809,45 +903,60 @@
 
 (defn- query-dependents
   [metadata-providerable query-or-join]
-  (let [base-stage (first (:stages query-or-join))
+  (let [base-stage  (first (:stages query-or-join))
         database-id (or (:database query-or-join) -1)]
     (concat
      (when (pos? database-id)
        [{:type :database, :id database-id}
-        {:type :schema,   :id database-id}])
+        {:type :schema, :id database-id}])
      (when (= (:lib/type base-stage) :mbql.stage/native)
-       (for [{tag-type :type, [dim-tag _opts id] :dimension} (vals (:template-tags base-stage))
-             :when (and (= tag-type :dimension)
-                        (= dim-tag :field)
-                        (integer? id))]
-         {:type :field, :id id}))
+       (concat
+        ;; Extract field dependencies from dimension template tags
+        (for [{tag-type :type, [dim-tag _opts id] :dimension} (:template-tags base-stage)
+              :when                                           (and (= tag-type :dimension)
+                                                                   (= dim-tag :field)
+                                                                   (integer? id))]
+          {:type :field, :id id})
+        ;; Extract snippet dependencies from snippet template tags (with recursion)
+        (mapcat
+         (fn [{tag-type :type, snippet-id :snippet-id}]
+           (when (and (= tag-type :snippet)
+                      (some? snippet-id)
+                      (integer? snippet-id))
+             ;; Only try to recurse if we have a real metadata provider
+             (if (lib.metadata.protocols/metadata-providerable? metadata-providerable)
+               (query-dependents-snippets metadata-providerable snippet-id #{})
+               ;; If we don't have a real metadata provider, just return the direct dependency
+               [{:type :native-query-snippet, :id snippet-id}])))
+         (:template-tags base-stage))))
      (when-let [card-id (:source-card base-stage)]
-       (let [card (lib.metadata/card metadata-providerable card-id)
+       (let [card       (lib.metadata/card metadata-providerable card-id)
              definition (:dataset-query card)]
          (concat [{:type :table, :id (str "card__" card-id)}]
                  (when-let [card-columns (lib.card/saved-question-metadata metadata-providerable card-id)]
                    (query-dependents-foreign-keys metadata-providerable card-columns))
                  (when (and (= (:type card) :metric) definition)
                    (query-dependents metadata-providerable
-                                     (-> definition mbql.normalize/normalize lib.convert/->pMBQL))))))
+                                     definition)))))
      (when-let [table-id (:source-table base-stage)]
        (cons {:type :table, :id table-id}
              (query-dependents-foreign-keys metadata-providerable
                                             (lib.metadata/fields metadata-providerable table-id))))
-     (for [stage (:stages query-or-join)
-           join (:joins stage)
+     (for [stage     (:stages query-or-join)
+           join      (:joins stage)
            dependent (query-dependents metadata-providerable join)]
        dependent))))
 
 (def ^:private DependentItem
   [:and
    [:map
-    [:type [:enum :database :schema :table :card :field]]]
+    [:type [:enum :database :schema :table :card :field :native-query-snippet]]]
    [:multi {:dispatch :type}
     [:database [:map [:id ::lib.schema.id/database]]]
     [:schema   [:map [:id ::lib.schema.id/database]]]
     [:table    [:map [:id [:or ::lib.schema.id/table :string]]]]
-    [:field    [:map [:id ::lib.schema.id/field]]]]])
+    [:field [:map [:id ::lib.schema.id/field]]]
+    [:native-query-snippet [:map [:id ::lib.schema.id/native-query-snippet]]]]])
 
 (mu/defn dependent-metadata :- [:sequential DependentItem]
   "Return the IDs and types of entities the metadata about is required
@@ -867,9 +976,3 @@
            (cons {:type :table, :id (str "card__" card-id)}
                  (when-let [card (lib.metadata/card query card-id)]
                    (query-dependents query (lib.query/query query card))))))))
-
-(mu/defn table-or-card-dependent-metadata :- [:sequential DependentItem]
-  "Return the IDs and types of entities which are needed upfront to create a new query based on a table/card."
-  [_metadata-providerable :- ::lib.schema.metadata/metadata-providerable
-   table-id               :- [:or ::lib.schema.id/table :string]]
-  [{:type :table, :id table-id}])

@@ -3,7 +3,9 @@
   (:require
    [clojure.data.csv :as csv]
    [clojure.java.io :as io]
+   [clojure.set :as set]
    [clojure.string :as str]
+   [metabase-enterprise.content-translation.db :as content-translation.db]
    [metabase.premium-features.core :as premium-features]
    [metabase.util :as u]
    [metabase.util.i18n :as i18n :refer [tru]]
@@ -12,6 +14,7 @@
 (set! *warn-on-reflection* true)
 
 (def ^:private http-status-unprocessable 422)
+#_{:clj-kondo/ignore [:metabase/discourage-dynamic-vars]}
 (def ^:private ^:dynamic *header-adjustment* 0)
 
 (defn- translation-key
@@ -51,7 +54,12 @@
 (defn- format-row
   "Formats a row to be inserted into the content translation table. Locales are standardized, and all fields are trimmed. Extra fields are included as well."
   [headers row]
-  (let [{locale :language msgid :string msgstr :translation} (zipmap headers row)
+  (let [row-with-headers (zipmap headers row)
+        locale (or (get row-with-headers "language")
+                   (get row-with-headers "locale")
+                   (get row-with-headers "locale code"))
+        msgid (get row-with-headers "string")
+        msgstr (get row-with-headers "translation")
         normalized-locale (i18n/normalized-locale-string (str/trim locale))
         formatted-locale (if (nil? normalized-locale)
                            (str/trim locale)
@@ -72,20 +80,33 @@
        (adjust-index index)))
 
 (defn- header?
-  "Checks if a row is likely a header by seeing if it has the set of values we expect in the header"
-  [row]
-  (and (vector? row)
-       (= #{"language" "string" "translation"} (->> row
-                                                    (map u/lower-case-en)
-                                                    set))))
+  "Checks if a row is likely a header by seeing if has a subset of the values we expect the header
+  to have.
 
-(def ^:private default-headers [:language :string :translation])
+  We can only ~kinda~ guess when a row is header, but since it unlikely for two or more of these
+  values to ever appear in a translation row we can say this is a header. "
+  [row]
+  (let [normalized-values (->> row
+                               (map u/lower-case-en)
+                               set)]
+    (>= (count (set/intersection #{"language" "locale code" "locale" "string" "translation"} normalized-values))
+        2)))
+
+(def ^:private default-headers ["language" "string" "translation"])
 
 (defn- parse-header
   [header-row]
-  (->> (map u/lower-case-en header-row)
-       (map keyword)
-       vec))
+  (let [parsed (mapv u/lower-case-en header-row)
+        errors (cond-> []
+                 (not= 3 (count parsed)) (conj "Header must have only three columns")
+                 (empty? (filter #(contains? #{"language" "locale" "locale code"} %) parsed)) (conj "Header must have one of: Language, Locale, or Locale Code")
+                 (nil? (some #{"string"} parsed)) (conj "Header must have String")
+                 (nil? (some #{"translation"} parsed)) (conj "Header must have translation"))]
+    (when (seq errors)
+      (throw (ex-info "This file could not be uploaded due to the following error(s):"
+                      {:status-code http-status-unprocessable
+                       :errors errors})))
+    parsed))
 
 (defn- process-rows
   "Format, validate, and process rows from a CSV. Takes a collection of vectors and returns a map with the shape
@@ -127,28 +148,33 @@
     (let [usable-rows (filter (comp is-msgstr-usable :msgstr) translations)]
       (t2/with-transaction [_tx]
         ;; Replace all existing entries
-        (t2/delete! :model/ContentTranslation)
+        (content-translation.db/delete-all-translations!)
         ;; Insert all usable rows at once
         (when-not (empty? usable-rows)
-          (t2/insert! :model/ContentTranslation usable-rows))))))
+          (content-translation.db/insert-translations! usable-rows))))))
 
 (defn- maybe-read
   [reader]
-  (let [lines (line-seq reader)]
-    (import-translations!
-     (for [[i line] (map-indexed vector lines)]
-       (try
-         (first (csv/read-csv (java.io.StringReader. line)))
-         (catch Exception e
-           (let [error-message (.getMessage ^Exception e)
-                 ;; report line number 1 indexed
-                 line-no (inc i)
-                 error-message (tru "Error Parsing CSV at Row {0}: {1}" line-no error-message)]
-             (throw (ex-info error-message
-                             {:status-code http-status-unprocessable
-                              :errors [error-message]
-                              :line line-no}
-                             e)))))))))
+  ;; Consume the lazy seq one row at a time and count successfully-parsed rows
+  ;; so a parse error can name the failing row. Reading via `csv/read-csv`
+  ;; (rather than line-by-line) lets quoted fields span multiple physical
+  ;; lines per RFC 4180; the reported row number is the logical row, which is
+  ;; what the user authored.
+  (let [rows (volatile! [])]
+    (try
+      (doseq [row (csv/read-csv reader)]
+        (vswap! rows conj row))
+      (catch Exception e
+        (let [row-no (inc (count @rows))
+              error-message (tru "Error parsing CSV at row {0}: {1}"
+                                 row-no
+                                 (.getMessage ^Exception e))]
+          (throw (ex-info error-message
+                          {:status-code http-status-unprocessable
+                           :errors [error-message]
+                           :row row-no}
+                          e)))))
+    (import-translations! @rows)))
 
 (defn read-and-import-csv!
   "Read CSV and catch error if the CSV is invalid."

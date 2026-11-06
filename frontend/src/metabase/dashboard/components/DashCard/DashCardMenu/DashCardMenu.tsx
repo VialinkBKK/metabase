@@ -1,31 +1,27 @@
 import { useDisclosure } from "@mantine/hooks";
-import cx from "classnames";
 import { useMemo, useState } from "react";
 import { t } from "ttag";
 
-/* eslint-disable-next-line no-restricted-imports -- deprecated sdk import */
-import { transformSdkQuestion } from "embedding-sdk/lib/transform-question";
-import {
-  canDownloadResults,
-  canEditQuestion,
-} from "metabase/dashboard/components/DashCard/DashCardMenu/utils";
+import { QuestionDownloadWidget } from "metabase/common/components/QuestionDownloadWidget";
+import { useDownloadData } from "metabase/common/components/QuestionDownloadWidget/use-download-data";
+import { canDownloadResults } from "metabase/common/utils/dataset";
+import { canEditQuestion } from "metabase/dashboard/components/DashCard/DashCardMenu/utils";
 import {
   type DashboardContextReturned,
   useDashboardContext,
 } from "metabase/dashboard/context";
 import { getParameterValuesBySlugMap } from "metabase/dashboard/selectors";
-import { useStore } from "metabase/lib/redux";
-import { checkNotNull } from "metabase/lib/types";
-import { QuestionDownloadWidget } from "metabase/query_builder/components/QuestionDownloadWidget";
-import { useDownloadData } from "metabase/query_builder/components/QuestionDownloadWidget/use-download-data";
-import { ActionIcon, Icon, Menu, type MenuProps } from "metabase/ui";
-import { SAVING_DOM_IMAGE_HIDDEN_CLASS } from "metabase/visualizations/lib/save-chart-image";
+import { transformSdkQuestion } from "metabase/embedding-sdk/lib/transform-question";
+import { useStore } from "metabase/redux";
+import { Icon, Menu, type MenuProps } from "metabase/ui";
+import { checkNotNull } from "metabase/utils/types";
 import type Question from "metabase-lib/v1/Question";
 import { InternalQuery } from "metabase-lib/v1/queries/InternalQuery";
 import type { DashboardCard, Dataset } from "metabase-types/api";
 
 import { getDashcardTokenId, getDashcardUuid } from "../dashcard-ids";
 
+import { DashCardMenuButton } from "./DashCardMenuButton";
 import { DashCardMenuItems } from "./DashCardMenuItems";
 
 interface DashCardMenuProps {
@@ -34,7 +30,9 @@ interface DashCardMenuProps {
   dashcard: DashboardCard;
   position?: MenuProps["position"];
   onEditVisualization?: () => void;
-  openUnderlyingQuestionItems?: React.ReactNode;
+  openUnderlyingQuestionItems?: React.ReactNode[];
+  canEdit?: boolean;
+  withTimelineEvents?: boolean;
 }
 
 function isDashCardMenuEmpty(
@@ -58,6 +56,8 @@ export const DashCardMenu = ({
   position = "bottom-end",
   onEditVisualization,
   openUnderlyingQuestionItems,
+  canEdit,
+  withTimelineEvents = false,
 }: DashCardMenuProps) => {
   const store = useStore();
 
@@ -71,7 +71,8 @@ export const DashCardMenu = ({
   const [{ loading: isDownloadingData }, handleDownload] = useDownloadData({
     question,
     result,
-    dashboardId: checkNotNull(dashboardId),
+    // dashboardId can be an entityId and the download endpoint expects a numeric id
+    dashboardId: checkNotNull(dashboard?.id ?? dashboardId),
     dashcardId,
     uuid,
     token,
@@ -104,9 +105,10 @@ export const DashCardMenu = ({
         <QuestionDownloadWidget
           question={question}
           result={result}
-          onDownload={(opts) => {
+          onDownload={async (opts) => {
             close();
-            handleDownload(opts);
+
+            await handleDownload(opts);
           }}
         />
       );
@@ -121,34 +123,26 @@ export const DashCardMenu = ({
           isDownloadingData={isDownloadingData}
           onDownload={() => setMenuView("download")}
           onEditVisualization={onEditVisualization}
+          canEdit={canEdit}
+          withTimelineEvents={withTimelineEvents}
         />
-        {openUnderlyingQuestionItems && (
-          <Menu trigger="click-hover" shadow="md" position="right" width={200}>
-            <Menu.Target>
-              <Menu.Item
+        {!!openUnderlyingQuestionItems?.length && (
+          <Menu.Sub position="right" shadow="sm">
+            <Menu.Sub.Target>
+              <Menu.Sub.Item
                 fw="bold"
-                styles={{
-                  // styles needed to override the hover styles
-                  // as hovering is bugged for submenus
-                  // this'll be much better in v8
-                  item: {
-                    backgroundColor: "transparent",
-                    color: "var(--mb-color-text-primary)",
-                  },
-                  itemSection: {
-                    color: "var(--mb-color-text-primary)",
-                  },
-                }}
                 leftSection={<Icon name="external" aria-hidden />}
-                rightSection={<Icon name="chevronright" aria-hidden />}
               >
                 {t`View question(s)`}
-              </Menu.Item>
-            </Menu.Target>
-            <Menu.Dropdown data-testid="dashcard-menu-open-underlying-question">
+              </Menu.Sub.Item>
+            </Menu.Sub.Target>
+            <Menu.Sub.Dropdown
+              data-testid="dashcard-menu-open-underlying-question"
+              style={{ maxWidth: "15rem" }}
+            >
               {openUnderlyingQuestionItems}
-            </Menu.Dropdown>
-          </Menu>
+            </Menu.Sub.Dropdown>
+          </Menu.Sub>
         )}
       </>
     );
@@ -157,16 +151,7 @@ export const DashCardMenu = ({
   return (
     <Menu offset={4} position={position} opened={isOpen} onClose={close}>
       <Menu.Target>
-        <ActionIcon
-          size="xs"
-          className={cx({
-            [SAVING_DOM_IMAGE_HIDDEN_CLASS]: true,
-          })}
-          onClick={toggle}
-          data-testid="dashcard-menu"
-        >
-          <Icon name="ellipsis" />
-        </ActionIcon>
+        <DashCardMenuButton onClick={toggle} data-testid="dashcard-menu" />
       </Menu.Target>
 
       <Menu.Dropdown>{getMenuContent()}</Menu.Dropdown>
@@ -177,26 +162,34 @@ export const DashCardMenu = ({
 type ShouldRenderDashcardMenuProps = {
   question: Question | null;
   result?: Dataset;
-} & Pick<DashboardContextReturned, "dashboard" | "dashcardMenu">;
+  withTimelineEvents?: boolean;
+} & Pick<DashboardContextReturned, "dashboard" | "dashcardMenu"> &
+  Pick<DashCardMenuProps, "canEdit" | "openUnderlyingQuestionItems">;
 
 DashCardMenu.shouldRender = ({
   question,
   dashboard,
   dashcardMenu,
   result,
+  canEdit,
+  openUnderlyingQuestionItems,
+  withTimelineEvents = false,
 }: ShouldRenderDashcardMenuProps) => {
   if (!question || !dashboard || dashcardMenu === null) {
     return null;
   }
 
   // Do not remove this check until we completely remove the old code related to Audit V1!
-  // MLv2 doesn't handle `internal` queries used for Audit V1.
+  // Lib doesn't handle `internal` queries used for Audit V1.
   const isInternalQuery = InternalQuery.isDatasetQueryType(
     question.datasetQuery(),
   );
 
   return (
     !isInternalQuery &&
-    (canEditQuestion(question) || canDownloadResults(result))
+    ((canEdit && canEditQuestion(question)) ||
+      canDownloadResults(result) ||
+      !!openUnderlyingQuestionItems?.length ||
+      withTimelineEvents)
   );
 };

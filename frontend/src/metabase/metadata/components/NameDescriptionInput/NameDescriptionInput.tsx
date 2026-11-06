@@ -1,38 +1,46 @@
 import { useElementSize } from "@mantine/hooks";
+import type { ReactNode } from "react";
 
-import { Ellipsified } from "metabase/common/components/Ellipsified";
-import { Box, Group, Icon, type IconName, Text, rem } from "metabase/ui";
+import { Box, Ellipsified, Group, Icon, Text, rem } from "metabase/ui";
+import type { IconName } from "metabase-types/api";
 
 import { Input } from "./Input";
 import S from "./NameDescriptionInput.module.css";
 import { Textarea } from "./Textarea";
 
 interface Props {
-  description: string;
-  descriptionPlaceholder: string;
   name: string;
   nameIcon: IconName;
   nameMaxLength?: number;
   namePlaceholder: string;
   namePrefix?: string;
-  onDescriptionChange: (description: string) => void;
+  nameRightSection?: ReactNode;
+  description: string;
+  descriptionPlaceholder: string;
+  readOnly?: boolean;
   onNameChange: (name: string) => void;
+  onDescriptionChange: (description: string) => void;
 }
 
 export const NameDescriptionInput = ({
-  description,
-  descriptionPlaceholder,
   name,
   nameIcon,
   nameMaxLength,
   namePlaceholder,
   namePrefix,
-  onDescriptionChange,
+  nameRightSection,
+  description,
+  descriptionPlaceholder,
+  readOnly,
   onNameChange,
+  onDescriptionChange,
 }: Props) => {
   const { ref, width } = useElementSize();
   const { ref: sectionRef, width: sectionWidth } = useElementSize();
   const leftSectionWidth = Math.max(sectionWidth, 40);
+  const readOnlyStyles = readOnly
+    ? { borderColor: "var(--mb-color-border-neutral)", cursor: "default" }
+    : undefined;
 
   const handleDescriptionChange = (value: string) => {
     const newDescription = value.trim();
@@ -53,16 +61,12 @@ export const NameDescriptionInput = ({
   return (
     <Box ref={ref}>
       <Input
-        classNames={{
-          input: S.nameInput,
-          root: S.name,
-          section: S.section,
-        }}
+        classNames={{ root: S.name }}
         fw="bold"
         leftSection={
           <Group
             align="center"
-            c="text-light"
+            c="text-secondary"
             gap={10}
             flex="1"
             fs="lg"
@@ -72,7 +76,7 @@ export const NameDescriptionInput = ({
             ref={sectionRef}
             wrap="nowrap"
           >
-            <Icon c="brand" flex="0 0 auto" name={nameIcon} size={20} />
+            <Icon flex="0 0 auto" name={nameIcon} size={20} c="core-brand" />
 
             {namePrefix && (
               <Ellipsified
@@ -80,7 +84,7 @@ export const NameDescriptionInput = ({
                 lines={1}
                 tooltip={namePrefix}
               >
-                <Text c="text-light" component="span" size="lg">
+                <Text c="text-secondary" component="span" size="lg">
                   {namePrefix}
                   {":"}
                 </Text>
@@ -100,30 +104,47 @@ export const NameDescriptionInput = ({
         maxLength={nameMaxLength}
         placeholder={namePlaceholder}
         required
+        rightSection={nameRightSection}
         size="lg"
         styles={{
           section: {
+            width: "auto",
             // limit the flicker when element is being measured for the first time
             visibility: sectionWidth === 0 ? "hidden" : undefined,
           },
           input: {
             paddingLeft: leftSectionWidth,
+            borderStartStartRadius: "var(--mantine-radius-sm)",
+            borderStartEndRadius: "var(--mantine-radius-sm)",
+            borderEndStartRadius: 0,
+            borderEndEndRadius: 0,
+            ...readOnlyStyles,
           },
         }}
         value={name}
+        readOnly={readOnly}
         onChange={handleNameChange}
       />
 
       <Textarea
         autosize
-        classNames={{
-          input: S.descriptionInput,
-          root: S.description,
-        }}
         maxRows={4}
         minRows={2}
         placeholder={descriptionPlaceholder}
+        pos="relative"
+        styles={{
+          input: {
+            lineHeight: "var(--mantine-line-height-lg)",
+            borderStartStartRadius: 0,
+            borderStartEndRadius: 0,
+            borderEndStartRadius: "var(--mantine-radius-sm)",
+            borderEndEndRadius: "var(--mantine-radius-sm)",
+            ...readOnlyStyles,
+          },
+        }}
+        top={rem(-2)}
         value={description}
+        readOnly={readOnly}
         onChange={handleDescriptionChange}
       />
     </Box>

@@ -1,18 +1,25 @@
 import userEvent from "@testing-library/user-event";
+import fetchMock from "fetch-mock";
 
 import {
-  setupDatabasesEndpoints,
+  setupPropertiesEndpoints,
   setupRecentViewsEndpoints,
   setupSearchEndpoints,
+  setupSearchErrorEndpoint,
   setupSettingsEndpoints,
+  setupUpdateSettingEndpoint,
 } from "__support__/server-mocks";
-import { renderWithProviders, screen, within } from "__support__/ui";
+import { createMockSetupState } from "__support__/state";
+import { renderWithProviders, screen, waitFor, within } from "__support__/ui";
+import { Route } from "metabase/router";
+import { settingsApi } from "metabase/settings";
 import {
   createMockCollection,
-  createMockDatabase,
   createMockSearchResult,
+  createMockSettings,
+  createMockUser,
+  createMockUserPermissions,
 } from "metabase-types/api/mocks";
-import { createMockSetupState } from "metabase-types/store/mocks";
 
 import { BrowseModels } from "./BrowseModels";
 import { createMockModelResult, createMockRecentModel } from "./test-utils";
@@ -26,14 +33,15 @@ interface SetupOptions {
   modelCount: number;
   recentModelCount?: number;
   hasDataPermissions?: boolean;
+  searchError?: boolean;
 }
 
 const setup = ({
   modelCount,
   recentModelCount = 5,
   hasDataPermissions = true,
+  searchError = false,
 }: SetupOptions) => {
-  const databases = hasDataPermissions ? [createMockDatabase()] : [];
   const mockModelResults = mockModels.map((model) =>
     createMockModelResult(model),
   );
@@ -41,17 +49,36 @@ const setup = ({
     .slice(0, recentModelCount)
     .map((model) => createMockRecentModel(model));
   const models = mockModelResults.slice(0, modelCount);
-  setupDatabasesEndpoints(databases);
-  setupSearchEndpoints(models.map((model) => createMockSearchResult(model)));
+  if (searchError) {
+    setupSearchErrorEndpoint();
+  } else {
+    setupSearchEndpoints(models.map((model) => createMockSearchResult(model)));
+  }
   setupSettingsEndpoints([]);
   setupRecentViewsEndpoints(mockRecentModels);
-  return renderWithProviders(<BrowseModels />, {
-    storeInitialState: {
-      setup: createMockSetupState({
-        locale: { name: "English", code: "en" },
-      }),
+  return renderWithProviders(
+    <>
+      <Route path="/" element={<BrowseModels />} />
+      <Route
+        path="/model/:slug"
+        element={<div data-testid="model-detail-page" />}
+      />
+    </>,
+    {
+      storeInitialState: {
+        currentUser: createMockUser({
+          permissions: createMockUserPermissions({
+            can_create_queries: hasDataPermissions,
+            can_create_native_queries: hasDataPermissions,
+          }),
+        }),
+        setup: createMockSetupState({
+          locale: { name: "English", code: "en" },
+        }),
+      },
+      withRouter: true,
     },
-  });
+  );
 };
 
 const collectionAlpha = createMockCollection({ id: 99, name: "Alpha" });
@@ -310,7 +337,7 @@ describe("BrowseModels", () => {
         await within(emptyState).findByRole("link", { name: "Read the docs" }),
       ).toHaveAttribute(
         "href",
-        "https://www.metabase.com/docs/latest/data-modeling/models.html",
+        "https://www.metabase.com/docs/latest/data-modeling/models/models.html",
       );
     });
 
@@ -327,6 +354,23 @@ describe("BrowseModels", () => {
       const src = youtubeVideo.getAttribute("src");
       expect(src).toContain("youtube.com");
       expect(src).toContain("autoplay=0");
+    });
+
+    it("correctly displays models empty states (no models)", async () => {
+      setup({ modelCount: 0 });
+
+      const emptyState = await screen.findByTestId("empty-state");
+      expect(
+        within(emptyState).getByRole("heading", {
+          name: "Create models to clean up and combine tables to make your data easier to explore",
+        }),
+      ).toBeInTheDocument();
+      expect(
+        within(emptyState).getByTitle(
+          "Use Models in Metabase | Getting started with Metabase",
+        ),
+      ).toBeInTheDocument();
+      expect(screen.queryByRole("complementary")).not.toBeInTheDocument();
     });
 
     it("should display a new model button in the header along when in empty state", async () => {
@@ -361,13 +405,46 @@ describe("BrowseModels", () => {
         await within(banner).findByRole("link", { name: "Read the docs" }),
       ).toHaveAttribute(
         "href",
-        "https://www.metabase.com/docs/latest/data-modeling/models.html",
+        "https://www.metabase.com/docs/latest/data-modeling/models/models.html",
       );
 
       const dismissButton = await within(banner).findByRole("button", {
         name: "Dismiss",
       });
       expect(dismissButton).toBeInTheDocument();
+    });
+
+    it("correctly displays models empty states (dismiss the banner)", async () => {
+      setupPropertiesEndpoints(createMockSettings());
+      setupUpdateSettingEndpoint();
+      const { store } = setup({ modelCount: 1 });
+      await store.dispatch(
+        settingsApi.endpoints.getSessionProperties.initiate(),
+      );
+
+      await screen.findByRole("table", { name: /Table of models/ });
+      const banner = screen.getByRole("complementary");
+      await userEvent.click(
+        within(banner).getByRole("button", { name: "Dismiss" }),
+      );
+
+      await waitFor(() =>
+        expect(screen.queryByRole("complementary")).not.toBeInTheDocument(),
+      );
+      const settingUrl = "path:/api/setting/dismissed-browse-models-banner";
+      await waitFor(() =>
+        expect(
+          fetchMock.callHistory.called(settingUrl, { method: "PUT" }),
+        ).toBe(true),
+      );
+      const call = fetchMock.callHistory.lastCall(settingUrl, {
+        method: "PUT",
+      });
+      const body: unknown = JSON.parse(String(call?.options.body));
+      expect(body).toEqual({ value: true });
+      expect(
+        screen.getByRole("table", { name: /Table of models/ }),
+      ).toBeInTheDocument();
     });
 
     it("explanation banner can open an autoplaying embedded YouTube video in a modal", async () => {
@@ -473,5 +550,75 @@ describe("BrowseModels", () => {
       name: /Recents/,
     });
     expect(recentModelsGrid).not.toBeInTheDocument();
+  });
+
+  it("should render links that point directly to /model/{id}-{slug} (metabase#55166)", async () => {
+    const { router } = setup({ modelCount: 25 });
+    const recentModelsGrid = await screen.findByRole("grid", {
+      name: /Recents/,
+    });
+    expect(
+      within(recentModelsGrid).getByRole("link", { name: /Model 1/ }),
+    ).toHaveAttribute("href", "/model/1-model-1");
+    expect(
+      within(recentModelsGrid).getByRole("link", { name: /Model 2/ }),
+    ).toHaveAttribute("href", "/model/2-model-2");
+
+    const modelsTable = await screen.findByRole("table", {
+      name: /Table of models/,
+    });
+
+    expect(
+      within(modelsTable).getByRole("link", { name: /Model 20/ }),
+    ).toHaveAttribute("href", "/model/20-model-20");
+    expect(
+      within(modelsTable).getByRole("link", { name: /Model 21/ }),
+    ).toHaveAttribute("href", "/model/21-model-21");
+
+    expect(screen.queryByTestId("model-detail-page")).not.toBeInTheDocument();
+    await userEvent.click(within(recentModelsGrid).getByText("Model 1"));
+    expect(screen.getByTestId("model-detail-page")).toBeInTheDocument();
+    expect(router?.location.pathname).toBe("/model/1-model-1");
+  });
+
+  it("The Browse models page shows an error message if the search endpoint throws an error", async () => {
+    setup({ modelCount: 25, searchError: true });
+
+    const page = screen.getByLabelText("Models");
+    expect(await within(page).findAllByText("An error occurred")).toHaveLength(
+      2,
+    );
+    expect(screen.queryByTestId("empty-state")).not.toBeInTheDocument();
+  });
+
+  describe("modifier-click on a table row", () => {
+    afterEach(() => {
+      jest.restoreAllMocks();
+    });
+
+    it.each(["Meta", "Control"])(
+      "can browse to a model in a new tab by meta-clicking (%s key)",
+      async (modifierKey) => {
+        const openSpy = jest
+          .spyOn(window, "open")
+          .mockImplementation(() => null);
+        const { router } = setup({ modelCount: 2 });
+        const { keyboard, click } = userEvent.setup();
+        const modelsTable = await screen.findByRole("table", {
+          name: /Table of models/,
+        });
+
+        await keyboard(`{${modifierKey}>}`);
+        await click(within(modelsTable).getByText("Model 1"));
+        await keyboard(`{/${modifierKey}}`);
+
+        expect(openSpy).toHaveBeenCalledTimes(1);
+        expect(openSpy).toHaveBeenCalledWith("/model/1-model-1", "_blank");
+        expect(
+          screen.queryByTestId("model-detail-page"),
+        ).not.toBeInTheDocument();
+        expect(router?.location.pathname).toBe("/");
+      },
+    );
   });
 });

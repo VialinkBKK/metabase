@@ -1,7 +1,6 @@
 import {
   entityPickerModal,
   entityPickerModalLevel,
-  entityPickerModalTab,
   getFullName,
   navigationSidebar,
   popover,
@@ -21,6 +20,15 @@ export function getCollectionActions() {
 
 export function openCollectionMenu() {
   getCollectionActions().icon("ellipsis").click();
+}
+
+export function displaySidebarChildOf(collectionName: string) {
+  navigationSidebar()
+    .findByText(collectionName)
+    .parentsUntil("[data-testid=sidebar-collection-link-root]")
+    .find(".Icon-chevronright")
+    .eq(0) // there may be more nested icons, but we need the top level one
+    .click();
 }
 
 export function getSidebarSectionTitle(name: string | RegExp) {
@@ -44,8 +52,13 @@ export function getPersonalCollectionName(
 }
 
 export function openCollectionItemMenu(item: string, index = 0) {
-  // eslint-disable-next-line no-unsafe-element-filtering
-  cy.findAllByText(item).eq(index).closest("tr").icon("ellipsis").click();
+  // eslint-disable-next-line metabase/no-unsafe-element-filtering
+  cy.findByTestId("collection-table")
+    .findAllByText(item)
+    .eq(index)
+    .closest("tr")
+    .icon("ellipsis")
+    .click();
 }
 
 export const getPinnedSection = () => {
@@ -59,12 +72,20 @@ export const getUnpinnedSection = () => {
 export const openPinnedItemMenu = (name: string) => {
   cy.log(`open pinned item menu: ${name}`);
 
-  getPinnedSection().within(() => {
-    cy.findByText(name)
-      .closest("a")
-      .realHover()
-      .within(() => cy.findByLabelText("Actions").click());
-  });
+  // Hovering a pinned item can trigger an async re-render, which replaces the
+  // hovered node and drops its :hover state, hiding the actions button again.
+  // Hover first so the button settles, then realClick: the real pointer
+  // movement re-applies :hover to the current node, so the click cannot race
+  // the visibility toggle.
+  getPinnedSection()
+    .findByText(name)
+    .closest('[data-testid="pinned-item-card"]')
+    .realHover();
+  getPinnedSection()
+    .findByText(name)
+    .closest('[data-testid="pinned-item-card"]')
+    .findByLabelText("Actions")
+    .realClick();
 };
 
 export const openUnpinnedItemMenu = (name: string) => {
@@ -74,11 +95,12 @@ export const openUnpinnedItemMenu = (name: string) => {
 };
 
 export const moveOpenedCollectionTo = (newParent: string) => {
+  cy.intercept("GET", "/api/collection/*/items**").as("getCollectionItems");
   openCollectionMenu();
   popover().within(() => cy.findByText("Move").click());
 
+  cy.wait(["@getCollectionItems", "@getCollectionItems"]);
   entityPickerModal().within(() => {
-    cy.findByRole("tab", { name: /Collections/ }).click();
     cy.findByTestId("nested-item-picker").findByText(newParent).click();
     cy.button("Move").click();
   });
@@ -89,16 +111,10 @@ export const moveOpenedCollectionTo = (newParent: string) => {
 export function pickEntity({
   path,
   select,
-  tab,
 }: {
-  path?: string[];
+  path?: (string | RegExp)[];
   select?: boolean;
-  tab?: string;
 }) {
-  if (tab) {
-    entityPickerModalTab(tab).click();
-  }
-
   if (path) {
     cy.findByTestId("nested-item-picker").within(() => {
       for (const [index, name] of path.entries()) {

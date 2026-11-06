@@ -16,9 +16,9 @@ To set data permissions on a database, schema, or table for a group:
 
 Or
 
-1. Click on the **gear** icon in the upper right.
+1. Click the **grid** icon in the upper right.
 
-2. Select **Admin settings**.
+2. Select **Admin**.
 
 3. Click on the **Permissions** tab, which defaults to the **Data** tab.
 
@@ -33,6 +33,7 @@ You can set the following types of permissions on a database, schema, or table:
 - [Download results](#download-results-permissions)
 - [Manage table metadata](#manage-table-metadata-permissions)
 - [Manage database](#manage-database-permissions)
+- [Transform](#transform-permissions)
 
 If you need to change the target database based on who is logged in, check out [Database routing](./database-routing.md). Database routing is particularly useful when each of your customers has their own database.
 
@@ -40,7 +41,7 @@ If you need to change the target database based on who is logged in, check out [
 
 Before you apply more specific permissions, you'll want to make sure that no one can see any data. Since everyone's automatically in the All Users group, you'll want to block this group from seeing any data.
 
-In the **Admin settings** > **Permissions** > **Data**, block the All Users group's access to the database.
+In **Admin** > **Permissions** > **Data**, block the All Users group's access to the database.
 
 From there, you can selectively grant privileges to different groups.
 
@@ -54,19 +55,19 @@ Permission levels include:
 
 - [Can view](#can-view-data-permission)
 - [Granular](#granular-view-data-permission)
-- [Sandboxed](#sandboxed-view-data-permission)
+- [Row and column security](#row-and-column-security)
 - [Impersonated](#impersonated-view-data-permission)
 - [Blocked](#blocked-view-data-permission)
 
 View data permission settings apply to different levels in your database:
 
-| View data permission | Database | Schema | Table |
-| -------------------- | -------- | ------ | ----- |
-| Can view             | ✅       | ✅     | ✅    |
-| Granular\*           | ✅       | ✅     | ❌    |
-| Sandboxed            | ❌       | ❌     | ✅    |
-| Impersonated         | ✅       | ❌     | ❌    |
-| Blocked              | ✅       | ✅     | ✅    |
+| View data permission    | Database | Schema | Table |
+| ----------------------- | -------- | ------ | ----- |
+| Can view                | ✅       | ✅     | ✅    |
+| Granular\*              | ✅       | ✅     | ❌    |
+| Row and column security | ❌       | ❌     | ✅    |
+| Impersonated            | ✅       | ❌     | ❌    |
+| Blocked                 | ✅       | ✅     | ✅    |
 
 \* The "Granular" setting is not itself a type of permission; it just signals that permissions are set at a level below the current level. For example, you can select "Granular" at a schema level to set permissions per table for tables in that schema.
 
@@ -90,13 +91,13 @@ This option lets you set View data permissions for individual schemas or tables.
 
 For tables, you have the option to set either **Can view** or **Sandboxed**.
 
-### Sandboxed view data permission
+### Row and column security
 
-{% include plans-blockquote.html feature="Sandboxed view data permission" %}
+{% include plans-blockquote.html feature="Row and column security" %}
 
-Allows you to set row-level permissions based on user attributes. Can only be configured at the table level.
+Allows you to set row-level permissions based on user attributes, as well as custom views. Can only be configured at the table level.
 
-See [Data sandboxes](./data-sandboxes.md).
+See [Row and column security](./row-and-column-security.md).
 
 ### Impersonated view data permission
 
@@ -112,6 +113,8 @@ See [impersonated view data permissions](./impersonation.md)
 
 **Blocked** ensures people in a group can’t see the data from this database, schema, or table, regardless of their permissions at the collection level.
 
+Blocked applies to the data. It stops a group from seeing results, and it doesn't hide the query definitions of questions that the group can otherwise view. Query definitions follow [collection permissions](./collections.md#collection-vs-data-permissions).
+
 The Blocked view data permission can be set at the database, schema, or table level. Essentially, what Blocked does is make collections permissions _insufficient_ to view a question. For example, even if a question is in a collection that the group has access to, but that question queries a data source that is Blocked for that group, people in that group won't be able to view that question _unless_ they're in another group with the data permissions to that data source.
 
 Setting blocked access for a group ALWAYS prevents the group from viewing questions built with the native query editor that query ANY tables from the same database. So even if you only block a single table in a database, the group won't be able to view the results of SQL questions that query ANY table in that database. The reason: Metabase doesn't (yet) parse SQL queries, so it can't know for sure whether the SQL queries the table you want to block.
@@ -124,11 +127,15 @@ Specifies whether a group can create new questions based on the data source. Cre
 
 To enable Create queries permissions for a group, that group must be able to view the data source ("Can view" permission.)
 
+Create queries permissions control who can write and run queries. They don't hide the queries behind questions that already exist. A group without native query permissions can't write SQL, and won't see the **View SQL** button in the query builder, but they can still read the SQL of a saved native question in a collection they have access to. Metabase returns a question's query definition to anyone who can view that question. See [Collection vs data permissions](./collections.md#collection-vs-data-permissions).
+
 Create query levels include:
 
 ### Query builder and native create queries permission
 
 People can use Metabase's query builder or its native/SQL editor.
+
+If a group has "Blocked" or "Row and column security" View data permissions for _any_ of the tables in the database, then this group will have native queries disabled for _all_ tables in that database. That's because Metabase can't parse SQL queries, so it can't know for sure whether the SQL queries are using the tables with restricted access.
 
 ### Query builder only create queries permission
 
@@ -140,7 +147,7 @@ The granular option lets you define Create queries permissions for each schema a
 
 ## Download results permissions
 
-{% include plans-blockquote.html feature="Download permissions" %}
+{% include plans-blockquote.html feature="Download permissions" is_plural=true %}
 
 You can set permissions on whether people in a group can download results (and how many rows) from a data source. Options are:
 
@@ -149,11 +156,13 @@ You can set permissions on whether people in a group can download results (and h
 - 10 thousand rows
 - 1 million rows
 
+Downloads of native queries are only allowed if a group has download permissions for the _entire_ database. If a group only has download permissions for specific tables or schemas (using the Granular setting), they won't be able to download results from native/SQL queries, even for tables they have permissions for. This is because Metabase doesn't parse SQL queries, so it can't determine which tables are being queried.
+
 ## Manage table metadata permissions
 
-{% include plans-blockquote.html feature="Data model permissions" %}
+{% include plans-blockquote.html feature="Data model permissions" is_plural=true  %}
 
-You can define whether a group can [edit table metadata](../data-modeling/metadata-editing.md). Options are:
+You can define whether a group can [edit table metadata](../data-modeling/metadata/metadata-editing.md). Options are:
 
 - Yes (meaning, they can edit metadata for that data source).
 - No
@@ -161,9 +170,9 @@ You can define whether a group can [edit table metadata](../data-modeling/metada
 
 ## Manage database permissions
 
-{% include plans-blockquote.html feature="Database management permissions" %}
+{% include plans-blockquote.html feature="Database management permissions" is_plural=true %}
 
-The **Manage database** permission grants access to the settings page for a given database (i.e., the page at **Admin settings** > **Databases** > your database).
+The **Manage database** permission grants access to the settings page for a given database (i.e., the page at **Admin** > **Databases** > your database).
 
 On the database settings page, you can:
 
@@ -181,20 +190,23 @@ If you see this modal pop-up, Metabase is telling you that the people in the All
 
 See [Upload permissions](../databases/uploads.md#add-people-to-a-group-with-data-access-to-the-upload-schema).
 
+## Transform permissions
+
+{% include plans-blockquote.html feature="Transform permissions" is_plural=true %}
+
+Transform permissions control who can manage and run [transforms](../data-modeling/transforms/transforms-overview.md) on a database. Transform permissions can only be set on a database level, not on a table level.
+
+A group can only have transform permissions for a database if they also have "View data" and "Query builder and native" permissions for _all_ the tables in a database.
+
 ## Further reading
 
 - [Permissions introduction](./introduction.md)
 - [Impersonation](./impersonation.md)
 - [Learn permissions](https://www.metabase.com/learn/metabase-basics/administration/permissions)
 - [Troubleshooting permissions](../troubleshooting-guide/permissions.md)
-- [Data sandboxing: setting row-level permissions][sandbox-rows]
-- [Advanced data sandboxing: limiting access to columns][sandbox-columns]
 - [Users, roles, and privileges](../databases/users-roles-privileges.md)
 
 [collections]: ./collections.md
 [dashboard-subscriptions]: ../dashboards/subscriptions.md
-[data-sandboxing]: ./data-sandboxes.md
 [permissions-overview]: ./introduction.md
-[sandbox-columns]: https://www.metabase.com/learn/metabase-basics/administration/permissions/data-sandboxing-column-permissions.html
-[sandbox-rows]: https://www.metabase.com/learn/metabase-basics/administration/permissions/data-sandboxing-row-permissions.html
 [sql-snippet-folders]: ../questions/native-editor/snippets.md

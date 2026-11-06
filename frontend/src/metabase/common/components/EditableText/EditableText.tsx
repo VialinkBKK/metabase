@@ -1,26 +1,35 @@
+import cx from "classnames";
 import type {
   ChangeEvent,
   FocusEvent,
   FocusEventHandler,
   HTMLAttributes,
+  JSX,
   KeyboardEvent,
   MouseEvent,
   Ref,
 } from "react";
-import { forwardRef, useCallback, useEffect, useRef, useState } from "react";
+import {
+  createElement,
+  forwardRef,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { usePrevious } from "react-use";
 
-import Markdown from "metabase/common/components/Markdown";
-import { Box } from "metabase/ui";
+import { Markdown } from "metabase/common/components/Markdown";
+import { Box, type BoxProps } from "metabase/ui";
 
-import { EditableTextArea, EditableTextRoot } from "./EditableText.styled";
+import S from "./EditableText.module.css";
 
 export type EditableTextAttributes = Omit<
   HTMLAttributes<HTMLDivElement>,
-  "onChange" | "onFocus" | "onBlur"
+  "style" | "onChange" | "onFocus" | "onBlur"
 >;
 
-export interface EditableTextProps extends EditableTextAttributes {
+export interface EditableTextProps extends BoxProps, EditableTextAttributes {
   initialValue?: string | null;
   placeholder?: string;
   maxLength?: number;
@@ -29,13 +38,15 @@ export interface EditableTextProps extends EditableTextAttributes {
   isMultiline?: boolean;
   isDisabled?: boolean;
   isMarkdown?: boolean;
+  as?: keyof JSX.IntrinsicElements;
   onChange?: (value: string) => void;
+  onContentChange?: (value: string) => void;
   onFocus?: FocusEventHandler<HTMLTextAreaElement>;
   onBlur?: FocusEventHandler<HTMLTextAreaElement>;
   "data-testid"?: string;
 }
 
-const EditableText = forwardRef(function EditableText(
+export const EditableText = forwardRef(function EditableText(
   {
     initialValue,
     placeholder,
@@ -46,9 +57,12 @@ const EditableText = forwardRef(function EditableText(
     isDisabled = false,
     isMarkdown = false,
     onChange,
+    onContentChange,
     onFocus,
     onBlur,
     "data-testid": dataTestId,
+    as,
+    className,
     ...props
   }: EditableTextProps,
   ref: Ref<HTMLDivElement>,
@@ -95,10 +109,12 @@ const EditableText = forwardRef(function EditableText(
 
   const handleChange = useCallback(
     (event: ChangeEvent<HTMLTextAreaElement>) => {
-      setInputValue(event.currentTarget.value);
+      const nextValue = event.currentTarget.value;
+      setInputValue(nextValue);
       submitOnBlur.current = true;
+      onContentChange?.(nextValue);
     },
-    [submitOnBlur],
+    [onContentChange],
   );
 
   const handleKeyDown = useCallback(
@@ -130,23 +146,28 @@ const EditableText = forwardRef(function EditableText(
 
   return (
     <Box
-      component={EditableTextRoot}
+      // Box cannot take a union of element names as its component
+      renderRoot={(rootProps) => createElement(as ?? "div", rootProps)}
+      className={cx(S.root, S.border, className, {
+        [S.editable]: !isDisabled,
+        [S.editing]: isEditing && !isDisabled,
+        [S.mirror]: !shouldShowMarkdown,
+      })}
       onClick={isMarkdown ? handleRootElementClick : undefined}
       ref={ref}
-      isEditing={isEditing}
-      isDisabled={isDisabled}
-      isEditingMarkdown={!shouldShowMarkdown}
       data-value={`${displayValue}\u00A0`}
       data-testid="editable-text"
       tabIndex={isDisabled ? -1 : 0}
       // For a11y, allow typing to activate the textarea
       onKeyDown={(e: React.KeyboardEvent) => {
         if (shouldPassKeyToTextarea(e.key)) {
+          // Unjustified type cast. FIXME
           (e.currentTarget as HTMLTextAreaElement).click();
         }
       }}
       onKeyUp={(e: React.KeyboardEvent) => {
         if (!shouldPassKeyToTextarea(e.key)) {
+          // Unjustified type cast. FIXME
           (e.currentTarget as HTMLTextAreaElement).click();
         }
       }}
@@ -156,7 +177,8 @@ const EditableText = forwardRef(function EditableText(
       {shouldShowMarkdown ? (
         <Markdown>{inputValue}</Markdown>
       ) : (
-        <EditableTextArea
+        <textarea
+          className={S.textarea}
           ref={inputRef}
           value={inputValue}
           placeholder={placeholder}
@@ -176,6 +198,3 @@ const EditableText = forwardRef(function EditableText(
 });
 
 const shouldPassKeyToTextarea = (key: string) => key !== "Enter";
-
-// eslint-disable-next-line import/no-default-export -- deprecated usage
-export default Object.assign(EditableText, { Root: EditableTextRoot });

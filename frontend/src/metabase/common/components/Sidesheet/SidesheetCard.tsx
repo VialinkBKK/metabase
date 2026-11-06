@@ -26,14 +26,14 @@ export const SidesheetCard = ({
   const titleId = useUniqueId();
   return (
     <Paper
-      p="lg"
+      p="xl"
       withBorder
       shadow="none"
       aria-labelledby={title ? titleId : undefined}
       {...paperProps}
     >
       {title && <SidesheetCardTitle id={titleId}>{title}</SidesheetCardTitle>}
-      <Stack gap="md" className={CS.textMedium} {...stackProps}>
+      <Stack gap="lg" className={CS.textMedium} {...stackProps}>
         {children}
       </Stack>
     </Paper>
@@ -41,5 +41,5 @@ export const SidesheetCard = ({
 };
 
 export const SidesheetCardTitle = (props: TitleProps) => (
-  <Title lh={1} mb=".75rem" c="text-medium" order={4} {...props} />
+  <Title mb="sm" c="text-secondary" order={4} {...props} />
 );

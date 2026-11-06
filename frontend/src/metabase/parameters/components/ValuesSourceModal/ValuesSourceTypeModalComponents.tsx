@@ -4,7 +4,8 @@ import {
   LoadingAndErrorWrapper,
   type LoadingAndErrorWrapperProps,
 } from "metabase/common/components/LoadingAndErrorWrapper";
-import TextArea, {
+import {
+  TextArea,
   type TextAreaProps,
 } from "metabase/common/components/TextArea";
 import { Box, type BoxProps } from "metabase/ui";
@@ -28,7 +29,7 @@ export const ModalMain = (props: BoxPropsWithChildren) => {
 };
 
 export const ModalSection = (props: BoxPropsWithChildren) => {
-  return <Box mb="md" {...props} />;
+  return <Box mb="lg" {...props} />;
 };
 
 export const ModalLabel = (props: BoxPropsWithChildren) => {

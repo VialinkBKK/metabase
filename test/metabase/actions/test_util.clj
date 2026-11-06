@@ -1,25 +1,30 @@
 (ns ^:mb/driver-tests metabase.actions.test-util
+  {:clj-kondo/config '{:linters {:deprecated-var {:exclude {metabase.test.data/mbql-query {:namespaces [metabase.actions.test-util]}
+                                                            metabase.test.data/run-mbql-query {:namespaces [metabase.actions.test-util]}}}}}}
   (:require
    [clojure.java.jdbc :as jdbc]
    [clojure.test :refer :all]
    [java-time.api :as t]
    [metabase.actions.models :as action]
+   [metabase.actions.schema :as actions.schema]
    [metabase.driver :as driver]
    [metabase.driver.ddl.interface :as ddl.i]
    [metabase.driver.sql-jdbc.connection :as sql-jdbc.conn]
    [metabase.driver.sql.query-processor :as sql.qp]
+   [metabase.driver.util :as driver.u]
+   [metabase.lib.core :as lib]
    [metabase.query-processor.test-util :as qp.test-util]
    [metabase.test.data :as data]
    [metabase.test.data.dataset-definitions :as defs]
    [metabase.test.data.datasets :as datasets]
    [metabase.test.data.interface :as tx]
    [metabase.test.data.users :as test.users]
-   [metabase.test.http-client :as client]
    [metabase.test.initialize :as initialize]
    [metabase.test.util :as tu]
    [metabase.util.honey-sql-2 :as h2x]
    [metabase.util.random :as u.random]
-   [toucan2.core :as t2]))
+   [toucan2.core :as t2]
+   [toucan2.tools.with-temp :as t2.with-temp]))
 
 (set! *warn-on-reflection* true)
 
@@ -80,23 +85,24 @@
   You can use [[with-actions-test-data-tables]] if you need something other than the `categories` table, e.g. for
   testing FK constraints."
   (ActionsTestDatasetDefinition.))
-(map :table-name actions-test-data)
 
 (defn do-with-dataset-definition
   "Impl for [[with-temp-test-data]] and [[with-actions-test-data]] macros."
   [dataset-definition thunk]
   ;; use a unique DB name each time so this is thread-safe
   (let [db                 (atom nil)
-        dataset-definition (tx/get-dataset-definition dataset-definition)
+        dataset-definition (tx/map->DatabaseDefinition (into {} (tx/get-dataset-definition dataset-definition)))
         dataset-definition (update dataset-definition :database-name #(str % "-" (u.random/random-name)))]
-    (try
-      (data/dataset dataset-definition
-        (reset! db (data/db))
-        (thunk))
-      (finally
-        (when-let [{driver :engine, db-id :id} @db]
-          (tx/destroy-db! driver dataset-definition)
-          (t2/delete! :model/Database :id db-id))))))
+    (when (or (nil? driver/*driver*)
+              (driver.u/supports? driver/*driver* :test/dynamic-dataset-loading nil))
+      (try
+        (data/dataset dataset-definition
+          (reset! db (data/db))
+          (thunk))
+        (finally
+          (when-let [{driver :engine, db-id :id} @db]
+            (tx/destroy-db! driver dataset-definition)
+            (t2/delete! :model/Database :id db-id)))))))
 
 (defmacro with-actions-test-data
   "Sets the current dataset to a freshly-loaded copy of [[defs/test-data]] that only includes the `categories` table
@@ -123,7 +129,9 @@
       ...)"
   {:style/indent :defn}
   [table-definitions & body]
-  `(do-with-dataset-definition (tx/dataset-definition "temp-test-data" ~table-definitions) (fn [] ~@body)))
+  `(do-with-dataset-definition (tx/dataset-definition (str "temp-test-data" (u.random/random-name))
+                                                      ~table-definitions)
+                               (fn [] ~@body)))
 
 (defmacro with-empty-db
   "Sets the current dataset to a freshly created db that gets destroyed at the conclusion of `body`.
@@ -162,94 +170,90 @@
                      (row-count))))
             (testing "delete row"
               (is (= [1]
-                     (jdbc/execute! (sql-jdbc.conn/db->pooled-connection-spec (data/id))
+                     (jdbc/execute! (sql-jdbc.conn/db->pooled-connection-spec (driver.u/lib-database (data/id)))
                                     (delete-categories-1-query)))))
             (testing "after"
               (is (= [[74]]
                      (row-count))))))))))
 
-(defn do-with-action
+(defn- insert-action!
+  "Normalizes `action` the way the REST API decodes one and inserts it, returning its id."
+  [action]
+  (action/insert! (lib/normalize ::actions.schema/action.for-insert action)))
+
+(defmulti ^:private create-action*!
+  {:arglists '([options-map model-id])}
+  (fn [options-map _model-id]
+    (:type options-map)))
+
+(defmethod create-action*! :query
+  [options-map model-id]
+  (let [action-id (insert-action!
+                   (merge {:model_id model-id
+                           :name "Query Example"
+                           :parameters [{:id "id"
+                                         :slug "id"
+                                         :type "number"
+                                         :target [:variable [:template-tag "id"]]}
+                                        {:id "name"
+                                         :slug "name"
+                                         :type "text"
+                                         :required false
+                                         :target [:variable [:template-tag "name"]]}]
+                           :visualization_settings {:inline true}
+                           :public_uuid (str (random-uuid))
+                           :made_public_by_id (test.users/user->id :crowberto)
+                           :database_id (data/id)
+                           :creator_id (test.users/user->id :crowberto)
+                           :dataset_query {:database (data/id)
+                                           :type :native
+                                           :native {:query (str "UPDATE categories\n"
+                                                                "SET name = concat([[{{name}}, ' ',]] 'Sh', 'op')\n"
+                                                                "WHERE id = {{id}}")
+                                                    :template-tags {"id" {:name         "id"
+                                                                          :display-name "ID"
+                                                                          :type         :number
+                                                                          :required     true}
+                                                                    "name" {:name         "name"
+                                                                            :display-name "Name"
+                                                                            :type         :text
+                                                                            :required     false}}}}}
+                          options-map))]
+    {:action-id action-id :model-id model-id}))
+
+(defmethod create-action*! :implicit
+  [options-map model-id]
+  (let [action-id (insert-action! (merge
+                                   {:type :implicit
+                                    :name "Update Example"
+                                    :kind "row/update"
+                                    :public_uuid (str (random-uuid))
+                                    :made_public_by_id (test.users/user->id :crowberto)
+                                    :creator_id (test.users/user->id :crowberto)
+                                    :model_id model-id}
+                                   options-map))]
+    {:action-id action-id :model-id model-id}))
+
+(defn create-action!
   "Impl for [[with-action]]."
   [options-map model-id]
   (let [options-map (merge options-map {:created_at (t/zoned-date-time)
                                         :updated_at (t/zoned-date-time)})]
-    (case (:type options-map)
-      :query
-      (let [action-id (action/insert!
-                       (merge {:model_id model-id
-                               :name "Query Example"
-                               :parameters [{:id "id"
-                                             :slug "id"
-                                             :type "number"
-                                             :target [:variable [:template-tag "id"]]}
-                                            {:id "name"
-                                             :slug "name"
-                                             :type "text"
-                                             :required false
-                                             :target [:variable [:template-tag "name"]]}]
-                               :visualization_settings {:inline true}
-                               :public_uuid (str (random-uuid))
-                               :made_public_by_id (test.users/user->id :crowberto)
-                               :database_id (data/id)
-                               :creator_id (test.users/user->id :crowberto)
-                               :dataset_query {:database (data/id)
-                                               :type :native
-                                               :native {:query (str "UPDATE categories\n"
-                                                                    "SET name = concat([[{{name}}, ' ',]] 'Sh', 'op')\n"
-                                                                    "WHERE id = {{id}}")
-                                                        :template-tags {"id" {:name         "id"
-                                                                              :display-name "ID"
-                                                                              :type         :number
-                                                                              :required     true}
-                                                                        "name" {:name         "name"
-                                                                                :display-name "Name"
-                                                                                :type         :text
-                                                                                :required     false}}}}}
-                              options-map))]
-        {:action-id action-id :model-id model-id})
+    (create-action*! options-map model-id)))
 
-      :implicit
-      (let [action-id (action/insert! (merge
-                                       {:type :implicit
-                                        :name "Update Example"
-                                        :kind "row/update"
-                                        :public_uuid (str (random-uuid))
-                                        :made_public_by_id (test.users/user->id :crowberto)
-                                        :creator_id (test.users/user->id :crowberto)
-                                        :model_id model-id}
-                                       options-map))]
-        {:action-id action-id :model-id model-id})
+(defn do-with-actions! [model-def f]
+  (initialize/initialize-if-needed! :web-server)
+  (t2.with-temp/with-temp [:model/Card model model-def]
+    (tu/with-model-cleanup [:model/Action]
+      (f model))))
 
-      :http
-      (let [action-id (action/insert! (merge
-                                       {:type :http
-                                        :name "Echo Example"
-                                        :template {:url (client/build-url "testing/echo[[?fail={{fail}}]]" {})
-                                                   :method "POST"
-                                                   :body "{\"the_parameter\": {{id}}}"
-                                                   :headers "{\"x-test\": \"{{id}}\"}"}
-                                        :parameters [{:id "id"
-                                                      :type "number"
-                                                      :target [:template-tag "id"]}
-                                                     {:id "fail"
-                                                      :type "text"
-                                                      :target [:template-tag "fail"]}]
-                                        :response_handle ".body"
-                                        :model_id model-id
-                                        :public_uuid (str (random-uuid))
-                                        :made_public_by_id (test.users/user->id :crowberto)
-                                        :creator_id (test.users/user->id :crowberto)}
-                                       options-map))]
-        {:action-id action-id :model-id model-id}))))
-
-;;; TODO FIXME -- rename this to [[with-actions!]] and then remove the Kondo ignore comment below
-#_{:clj-kondo/ignore [:metabase/test-helpers-use-non-thread-safe-functions]}
+;;; TODO FIXME -- rename this to [[with-actions!]]
 (defmacro with-actions
   "Execute `body` with newly created Actions.
   `binding-forms-and-options-maps` is a vector of even number of elements, binding and options-map,
   similar to a `let` form.
   The first two elements of `binding-forms-and-options-maps` can describe the model, for this the
-  first option-map should map :dataset to a truthy value and contain :dataset_query. In this case
+  first option-map should have `:type :model` `:dataset_query`. In this case
   the first binding is bound to the model card created.
   For actions, the binding form is bound to a map with :action-id and :model-id set to the ID of
   the created action and model card respectively. The options-map overrides the defaults in
@@ -257,37 +261,40 @@
 
   (with-actions [{model-card-id :id} {:type :model :dataset_query (mt/mbql-query types)}
                  {id :action-id} {}
-                 {:keys [action-id model-id]} {:type :http :name \"Temp HTTP Action\"}]
+                 {:keys [action-id model-id]} {:type :implicit :name \"Temp Implicit Action\"}]
     (assert (= model-card-id model-id))
     (something model-card-id id action-id model-id))"
-  {:style/indent 1}
-  [binding-forms-and-option-maps & body]
-  (assert (vector? binding-forms-and-option-maps)
+  {:style/indent 1, :arglists '([action-bindings & body]
+                                [[model-binding {:type :model, :as model} & action-bindings] & body])}
+  [[_maybe-model-bindings maybe-model-def :as bindings] & body]
+  (assert (vector? bindings)
           "binding-forms-and-option-maps should be a vector")
-  (assert (even? (count binding-forms-and-option-maps))
+  (assert (even? (count bindings))
           "binding-forms-and-option-maps should have an even number of elements")
-  (let [model (gensym "model-")
-        [_ maybe-model-def :as model-part] (subvec binding-forms-and-option-maps 0 2)
-        [[custom-binding model-def] binding-forms-and-option-maps]
+  (let [model
+        (gensym "model-")
+
+        [model-binding model-def & action-bindings]
         (if (and (map? maybe-model-def)
                  (= (:type maybe-model-def) :model)
                  (contains? maybe-model-def :dataset_query))
-          [model-part (drop 2 binding-forms-and-option-maps)]
-          ['[_ {:type :model, :dataset_query (mt/mbql-query categories)}]
-           binding-forms-and-option-maps])]
-    `(do
-       (initialize/initialize-if-needed! :web-server)
-       (mt/with-temp ~[:model/Card model model-def]
-         (tu/with-model-cleanup [:model/Action]
-           (let [~custom-binding ~model
-                 ~@(mapcat (fn [[binding-form option-map]]
-                             [binding-form `(do-with-action (merge {:type :query} ~option-map) (:id ~model))])
-                           (partition 2 binding-forms-and-option-maps))]
-             ~@body))))))
+          bindings
+          (list*
+           '_
+           {:type :model, :dataset_query '(metabase.test/mbql-query categories)}
+           bindings))]
+    `(do-with-actions!
+      ~model-def
+      (fn [~model]
+        (let [~model-binding ~model
+              ~@(mapcat (fn [[action-binding action]]
+                          [action-binding `(create-action! (merge {:type :query} ~action) (:id ~model))])
+                        (partition 2 action-bindings))]
+          ~@body)))))
 
 (comment
   (with-actions [{id :action-id} {:type :implicit :kind "row/create"}
-                 {:keys [action-id model-id]} {:type :http}]
+                 {:keys [action-id model-id]} {}]
     (something id action-id model-id))
   (with-actions [{model-card-id :id} {:type :model, :dataset_query (data/mbql-query types)}
                  {id :action-id} {:type :implicit :kind "row/create"}
@@ -301,24 +308,21 @@
   (tu/with-temp-vals-in-db :model/Database db-id {:settings {:database-enable-actions enable?}}
     (thunk)))
 
-;;; TODO -- FIXME, rename this to `with-actions-enabled!` and remove the `:clj-kondo/ignore`
-#_{:clj-kondo/ignore [:metabase/test-helpers-use-non-thread-safe-functions]}
+;;; TODO -- FIXME, rename this to `with-actions-enabled!`
 (defmacro with-actions-enabled
   "Execute `body` with Actions enabled for the current test Database."
   {:style/indent 0}
   [& body]
   `(do-with-actions-set! (data/id) true (fn [] ~@body)))
 
-;;; TODO -- FIXME, rename this to `with-actions-disabled!` and remove the `:clj-kondo/ignore`
-#_{:clj-kondo/ignore [:metabase/test-helpers-use-non-thread-safe-functions]}
+;;; TODO -- FIXME, rename this to `with-actions-disabled!`
 (defmacro with-actions-disabled
   "Execute `body` with Actions disabled for the current test Database."
   {:style/indent 0}
   [& body]
   `(do-with-actions-set! (data/id) false (fn [] ~@body)))
 
-;;; TODO FIXME -- rename this to [[with-actions!]] and then remove the Kondo ignore comment below
-#_{:clj-kondo/ignore [:metabase/test-helpers-use-non-thread-safe-functions]}
+;;; TODO FIXME -- rename this to [[with-actions-test-data-and-actions-enabled!]]
 (defmacro with-actions-test-data-and-actions-enabled
   "Combines [[with-actions-test-data]] and [[with-actions-enabled]]."
   {:style/indent 0}
@@ -326,3 +330,15 @@
   `(with-actions-test-data
      (with-actions-enabled
        ~@body)))
+
+(defn latest-query-execution-id
+  "The id of the newest QueryExecution row, or 0 when there is none: the `since-id` for [[action-executions]]."
+  []
+  (or (t2/select-one-pk :model/QueryExecution {:order-by [[:id :desc]]}) 0))
+
+(defn action-executions
+  "The action-context QueryExecution rows written after `since-id`, oldest first."
+  [since-id]
+  (into []
+        (filter (comp #{:action-execute :public-action-execute} :context))
+        (t2/select :model/QueryExecution {:where [:> :id since-id], :order-by [[:id :asc]]})))

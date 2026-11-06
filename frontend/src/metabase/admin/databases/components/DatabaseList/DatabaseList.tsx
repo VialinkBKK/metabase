@@ -1,14 +1,14 @@
 import cx from "classnames";
 import { useMemo } from "react";
-import { Link } from "react-router";
 import { t } from "ttag";
 
+import { Link } from "metabase/common/components/Link";
 import AdminS from "metabase/css/admin.module.css";
 import CS from "metabase/css/core/index.css";
 import { FormMessage } from "metabase/forms";
-import { isSyncCompleted } from "metabase/lib/syncing";
 import { PLUGIN_FEATURE_LEVEL_PERMISSIONS } from "metabase/plugins";
 import { Button, Flex, Loader, UnstyledButton } from "metabase/ui";
+import { isSyncCompleted } from "metabase/utils/syncing";
 import type { Database, Engine } from "metabase-types/api";
 
 const query = {
@@ -70,6 +70,7 @@ export const DatabaseList = ({
               <tr>
                 <th>{t`Name`}</th>
                 <th>{t`Engine`}</th>
+                <th>{t`Status`}</th>
               </tr>
             </thead>
             <tbody>
@@ -95,9 +96,12 @@ export const DatabaseList = ({
                       </Flex>
                     </td>
                     <td>
-                      {engines?.[database.engine ?? ""]?.["driver-name"] ??
-                        database.engine}
+                      {database.is_stub
+                        ? t`Unknown`
+                        : (engines?.[database.engine ?? ""]?.["driver-name"] ??
+                          database.engine)}
                     </td>
+                    <td>{database.is_stub ? t`Stubbed` : t`Active`}</td>
                   </tr>
                 ))
               ) : (
@@ -118,12 +122,12 @@ export const DatabaseList = ({
                 })}
               >
                 {isAddingSampleDatabase ? (
-                  <span className={cx(CS.textLight, CS.noDecoration)}>
+                  <span className={cx(CS.textSecondary, CS.noDecoration)}>
                     {t`Restoring the sample database...`}
                   </span>
                 ) : (
                   <UnstyledButton
-                    c="brand"
+                    c="core-brand"
                     onClick={() => addSampleDatabase(query)}
                   >
                     {t`Bring the sample database back`}

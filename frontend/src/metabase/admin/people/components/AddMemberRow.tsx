@@ -2,29 +2,41 @@ import { useMemo, useState } from "react";
 import { t } from "ttag";
 
 import { useListUsersQuery } from "metabase/api";
-import UserAvatar from "metabase/common/components/UserAvatar";
+import { UserAvatar } from "metabase/common/components/UserAvatar";
+import { PLUGIN_TENANTS } from "metabase/plugins";
 import { Flex, Pill, Popover, Text, UnstyledButton } from "metabase/ui";
-import type { Member, User } from "metabase-types/api";
+import type { Group, Member, User } from "metabase-types/api";
 
 import { userToColor } from "../colors";
 
 import { AddRow } from "./AddRow";
 
 interface AddMemberRowProps {
+  group: Group;
   members: Member[];
   onCancel: () => void;
   onDone: (userIds: number[]) => void;
 }
 
-export function AddMemberRow({ members, onCancel, onDone }: AddMemberRowProps) {
-  const listUsersReq = useListUsersQuery();
+export function AddMemberRow({
+  group,
+  members,
+  onCancel,
+  onDone,
+}: AddMemberRowProps) {
+  const isTenantGroup = PLUGIN_TENANTS.isTenantGroup(group);
+
+  const listUsersQuery = useListUsersQuery(
+    isTenantGroup ? { tenancy: "external" } : undefined,
+  );
+
   const [text, setText] = useState("");
   const [selectedUsersById, setSelectedUsersById] = useState<Map<number, User>>(
     new Map(),
   );
 
   const availableToSelectUsers = useMemo(() => {
-    const { isLoading, error, data } = listUsersReq;
+    const { isLoading, error, data } = listUsersQuery;
     if (isLoading || error) {
       return [];
     }
@@ -33,7 +45,7 @@ export function AddMemberRow({ members, onCancel, onDone }: AddMemberRowProps) {
     return allUsers.filter(
       ({ id }) => !selectedUsersById.has(id) && !groupMemberIds.has(id),
     );
-  }, [members, selectedUsersById, listUsersReq]);
+  }, [members, selectedUsersById, listUsersQuery]);
 
   const handleRemoveUser = (user: User) => {
     const newSelectedUsersById = new Map(selectedUsersById);
@@ -66,7 +78,7 @@ export function AddMemberRow({ members, onCancel, onDone }: AddMemberRowProps) {
           opened={suggestedUsers.length > 0}
           position="bottom-start"
           withArrow
-          shadow="md"
+          shadow="sm"
         >
           <Popover.Target>
             <div>
@@ -77,14 +89,12 @@ export function AddMemberRow({ members, onCancel, onDone }: AddMemberRowProps) {
                 onChange={(e) => setText(e.target.value)}
                 onDone={handleDone}
                 onCancel={onCancel}
+                ariaLabel={t`Search for a user to add`}
               >
-                {Array.from(selectedUsersById.values()).map((user, index) => (
+                {Array.from(selectedUsersById.values()).map((user) => (
                   <Pill
                     key={user.id}
-                    size="xl"
-                    bg="bg-medium"
-                    c="text-primary"
-                    ms={index > 0 ? "sm" : ""}
+                    size="md"
                     withRemoveButton
                     onRemove={() => handleRemoveUser(user)}
                   >
@@ -96,13 +106,13 @@ export function AddMemberRow({ members, onCancel, onDone }: AddMemberRowProps) {
           </Popover.Target>
 
           <Popover.Dropdown>
-            <Flex direction="column" p="xs" miw="15rem">
+            <Flex direction="column" p="xxs" miw="15rem">
               {suggestedUsers.map((user: User, index: number) => (
                 <Flex
                   key={index}
                   component={UnstyledButton}
                   align="center"
-                  gap="md"
+                  gap="lg"
                   p="0.5rem 1rem"
                   onClick={() => handleAddUser(user)}
                 >

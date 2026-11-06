@@ -18,7 +18,7 @@ First, you'll want to make sure your browser is on friendly terms with Metabase:
 
 **Explanation**
 
-A dashboard with 50 cards is almost always going to be slower than 5 dashboards with 10 cards. Metabase displays a dashboard by refreshing all of the questions on it (that is, re-executing all of the queries against your database). Your data warehouse may try to run these queries at the same time to return the results faster, however, these queries can actually compete with each other and slow things down (like having too many programs open on your computer at once).
+A dashboard with 50 cards is almost always going to be slower than 5 dashboards with 10 cards. Metabase displays a dashboard by refreshing all of the questions on it (that is, re-executing all of the queries against your database). Your data warehouse may try to run these queries at the same time to return the results faster, however, these queries can compete with each other and slow things down (like having too many programs open on your computer at once).
 
 Aside from running faster, a small and focused dashboard is also easier for people to understand without getting overwhelmed. For more tips, check out our article on [BI dashboard best practices](https://www.metabase.com/learn/metabase-basics/querying-and-dashboards/dashboards/bi-dashboard-best-practices).
 
@@ -34,17 +34,17 @@ Aside from running faster, a small and focused dashboard is also easier for peop
 
 If you have a dashboard that many people check around the same time (e.g., at the start of the work day), you may end up with queued queries or saturated database connections. Caching allows you to prepare for peak traffic by running those slow queries once, ahead of time, so that the results are ready to go.
 
-Caching takes less effort because it doesn't involve any changes to your schemas or databases. If you're ready to invest more resources into the root cause of dashboard performance issues, check out this list of common [schema and database optimizations](https://metabase.com/learn/metabase-basics/administration/administration-and-operation/making-dashboards-faster#organize-data-to-anticipate-common-questions).
+Caching takes less effort because it doesn't involve any changes to your schemas or databases. If you're ready to invest more resources into the root cause of dashboard performance issues, check out this list of common [schema and database optimizations](https://www.metabase.com/learn/metabase-basics/administration/administration-and-operation/making-dashboards-faster#organize-data-to-anticipate-common-questions).
 
 ## Embedded dashboard is slow compared to original dashboard
 
-1. To speed up the embedded dashboard, set up a [locked parameter to pre-filter your data](../embedding/static-embedding-parameters.md#restricting-data-in-a-static-embed-with-locked-parameters).
+1. To speed up the embedded dashboard, set up a [locked parameter to pre-filter your data](../embedding/parameters.md#restrict-data-on-guest-embeds).
 
 **Explanation**
 
-One of the easiest ways to make a question or dashboard run faster is to work with a smaller dataset. Your Metabase admin can apply automatic data limitations using things like [SSO](../people-and-groups/start.md#authentication), [data permissions](../permissions/data.md), and [data sandboxing](../permissions/data-sandboxes.md).
+One of the easiest ways to make a question or dashboard run faster is to work with a smaller dataset. Your Metabase admin can apply automatic data limitations using things like [SSO](../people-and-groups/start.md#authentication), [data permissions](../permissions/data.md), and [row and column security](../permissions/row-and-column-security.md).
 
-When someone loads a question or a dashboard in a static embed, however, that question or dashboard will query the full dataset (rather than a smaller dataset limited by permissions). Static, [signed embeds](../embedding/static-embedding.md) don't require people to be logged in, and unauthenticated people viewing the signed embed won't be subject to the permissions and data restrictions set up by your admin.
+When someone loads a question or a dashboard in a guest embed, however, that question or dashboard will query the full dataset (rather than a smaller dataset limited by permissions). [Guest embeds](../embedding/guest-embedding.md) don't require people to be logged in, and unauthenticated people viewing the guest embed won't be subject to the permissions and data restrictions set up by your admin.
 
 ## Dashboard is slow compared to similar dashboards
 
@@ -57,7 +57,7 @@ When someone loads a question or a dashboard in a static embed, however, that qu
 
 **Explanation**
 
-When you update your question to use a minimal number of rows or columns (or switch your question to use a smaller table, such as a summary table) your database can spend less time scanning those records in order to return your results. Narrowing the scope of your question is especially important to think about if you're starting from someone else's saved question or model, because you might not need all of the data that the original creator decided to include.
+When you update your question to use a minimal number of rows or columns (or switch your question to use a smaller table, such as a summary table) your database can spend less time scanning those records to return your results. Narrowing the scope of your question is especially important to think about if you're starting from someone else's saved question or model, because you might not need all of the data that the original creator decided to include.
 
 If all of your dashboards are slow, you might be limited by the performance of a particular data source. In that case, we recommend teaming up with your database admin to [Troubleshoot database performance](./db-performance.md).
 

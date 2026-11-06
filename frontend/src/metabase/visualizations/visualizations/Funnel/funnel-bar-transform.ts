@@ -1,5 +1,5 @@
-import { formatValue } from "metabase/lib/formatting";
-import { isNotNull } from "metabase/lib/types";
+import { isNotNull } from "metabase/utils/types";
+import { formatValue } from "metabase/value-formatting";
 import type { TransformSeries } from "metabase/visualizations/components/TransformedVisualization";
 import type { RowValue } from "metabase-types/api";
 
@@ -51,6 +51,7 @@ export const funnelToBarTransform: TransformSeries = (rawSeries, settings) => {
           "graph.y_axis.auto_split": false,
           "graph.y_axis.title_text": cols[metricIndex].display_name,
           "legend.is_reversed": false,
+          "legend.position": settings["legend.position"],
         },
       },
       data: {

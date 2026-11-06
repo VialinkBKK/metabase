@@ -14,30 +14,52 @@
    [metabase.search.filter :as search.filter]
    [metabase.search.in-place.filter :as search.in-place.filter]
    [metabase.search.in-place.scoring :as scoring]
+   [metabase.search.in-place.search-model :as search-model]
    [metabase.search.in-place.util :as search.util]
    [metabase.search.permissions :as search.permissions]
-   [metabase.util :as u]
    [metabase.util.honey-sql-2 :as h2x]
-   [metabase.util.log :as log]
    [metabase.util.malli :as mu]
    [metabase.util.malli.schema :as ms]
    [toucan2.core :as t2]))
 
+(def ^:private honeysql-registry
+  "Registry backing [[HoneySQLExpr]] and [[HoneySQLQuery]]: `::expr` is a column/table keyword, a literal, a
+  (possibly nested) operator clause, or a subquery."
+  {::expr  [:or :keyword :string number? :boolean nil? (ms/InstanceOfClass java.time.temporal.Temporal)
+            [:sequential [:ref ::expr]]
+            [:set [:ref ::expr]]
+            [:ref ::query]]
+   ::query [:map {:closed true}
+            [:select     {:optional true} [:or [:ref ::expr] [:sequential [:ref ::expr]]]]
+            [:from       {:optional true} [:or [:ref ::expr] [:sequential [:ref ::expr]]]]
+            [:where      {:optional true} [:ref ::expr]]
+            [:with       {:optional true} [:or [:ref ::expr] [:sequential [:ref ::expr]]]]
+            [:join       {:optional true} [:or [:ref ::expr] [:sequential [:ref ::expr]]]]
+            [:left-join  {:optional true} [:or [:ref ::expr] [:sequential [:ref ::expr]]]]
+            [:inner-join {:optional true} [:or [:ref ::expr] [:sequential [:ref ::expr]]]]
+            [:union-all  {:optional true} [:or [:ref ::expr] [:sequential [:ref ::expr]]]]
+            [:order-by   {:optional true} [:or [:ref ::expr] [:sequential [:ref ::expr]]]]
+            [:limit      {:optional true} [:ref ::expr]]]})
+
+(def ^:private HoneySQLExpr
+  [:schema {:registry honeysql-registry} [:ref ::expr]])
+
 (def ^:private HoneySQLColumn
   [:or
    :keyword
-   [:tuple :any :keyword]])
+   [:tuple HoneySQLExpr :keyword]])
+
+(def HoneySQLQuery
+  "A partially-built Honey SQL query map for the legacy (index-free) search query."
+  [:schema {:registry honeysql-registry} [:ref ::query]])
 
 (defmethod search.engine/supported-engine? :search.engine/in-place [_]
   true)
 
-(defn search-model->revision-model
-  "Return the appropriate revision model given a search model."
-  [model]
-  (case model
-    "dataset" (recur "card")
-    "metric" (recur "card")
-    (str/capitalize model)))
+(defmethod search.engine/disjunction :search.engine/in-place [_ terms]
+  ;; The default composition is disjunction with this engine.
+  (when (seq terms)
+    [(str/join " " terms)]))
 
 (mu/defn- ->column-alias :- keyword?
   "Returns the column name. If the column is aliased, i.e. [`:original_name` `:aliased_name`], return the aliased
@@ -96,9 +118,12 @@
    :table_id            :integer
    :table_schema        :text
    :table_name          :text
+   :table_display_name  :text
    :table_description   :text
    ;; returned for Metric, Segment, and Action
    :database_id         :integer
+   ;; returned for Document
+   :document            :text
    ;; returned for Database and Table
    :initial_sync_status :text
    :database_name       :text
@@ -109,13 +134,23 @@
    :pk_ref              :text
    :model_index_id      :integer
    ;; returned for Card and Action
-   :dataset_query       :text))
+   :dataset_query       :text
+   ;; returned for Table
+   :is_published        :boolean
+   :data_authority      :text
+   :data_layer          :text
+   ;; returned for DataApp
+   :data_app_slug       :text))
+
+(def ^:private SearchColumn
+  "Enum of every key of [[all-search-columns]]."
+  (into [:enum] (keys all-search-columns)))
 
 (mu/defn- canonical-columns :- [:sequential HoneySQLColumn]
   "Returns a seq of lists of canonical columns for the search query with the given `model` Will return column names
   prefixed with the `model` name so that it can be used in criteria. Projects a `nil` for columns the `model` doesn't
   have and doesn't modify aliases."
-  [model :- SearchableModel, col-alias->honeysql-clause :- [:map-of :keyword HoneySQLColumn]]
+  [model :- SearchableModel, col-alias->honeysql-clause :- [:map-of SearchColumn HoneySQLColumn]]
   (for [[search-col col-type] all-search-columns
         :let [maybe-aliased-col (get col-alias->honeysql-clause search-col)]]
     (cond
@@ -148,7 +183,7 @@
 (mu/defn- add-table-db-id-clause
   "Add a WHERE clause to only return tables with the given DB id.
   Used in data picker for joins because we can't join across DB's."
-  [query :- ms/Map id :- [:maybe ms/PositiveInt]]
+  [query :- HoneySQLQuery id :- [:maybe ms/PositiveInt]]
   (if (some? id)
     (sql.helpers/where query [:= id :db_id])
     query))
@@ -156,40 +191,53 @@
 (mu/defn- add-card-db-id-clause
   "Add a WHERE clause to only return cards with the given DB id.
   Used in data picker for joins because we can't join across DB's."
-  [query :- ms/Map id :- [:maybe ms/PositiveInt]]
+  [query :- HoneySQLQuery id :- [:maybe ms/PositiveInt]]
   (if (some? id)
     (sql.helpers/where query [:= id :database_id])
     query))
 
 (defn add-table-where-clauses
-  "Add a `WHERE` clause to the query to only return tables the current user has access to"
+  "Add a `WHERE` clause to the query to only return tables the current user has access to.
+   Also adds any CTEs required for permission filtering."
   [qry model search-ctx]
-  (sql.helpers/where qry (case model
-                           "table" (search.permissions/permitted-tables-clause search-ctx :table.id)
-                           "search-index" [:or
-                                           [:= :search_index.model nil]
-                                           [:!= :search_index.model [:inline "table"]]
-                                           [:and
-                                            [:= :search_index.model [:inline "table"]]
-                                            (search.permissions/permitted-tables-clause search-ctx :search_index.model_id)]])))
+  (let [col (case model "table" :table.id "search-index" :search_index.model_id)
+        {:keys [with clause]} (search.permissions/permitted-tables-clause search-ctx col)]
+    (cond-> qry
+      (seq with) (update :with (fnil into []) with)
+      true       (sql.helpers/where
+                  (case model
+                    "table" clause
+                    "search-index" [:or
+                                    [:= :search_index.model nil]
+                                    [:!= :search_index.model "table"]
+                                    [:and
+                                     [:= :search_index.model "table"]
+                                     clause]])))))
 
 (mu/defn add-collection-join-and-where-clauses
   "Add a `WHERE` clause to the query to only return Collections the Current User has access to; join against Collection,
   so we can return its `:name`."
-  [honeysql-query :- :map
+  [honeysql-query :- HoneySQLQuery
    model          :- [:maybe :string]
    search-ctx     :- SearchContext]
   (let [collection-id-col      (case model
                                  "collection"    :collection.id
+                                 "action"        :action.collection_id
                                  "search-index"  :search_index.collection_id
                                  :collection_id)
-        permitted-clause       (search.permissions/permitted-collections-clause search-ctx collection-id-col)
+        permitted-clause       (if (= model "table")
+                                 ;; Tables have their own permission filter (add-table-where-clauses).
+                                 ;; Skip collection filtering to avoid blocking tables where the user
+                                 ;; has data permissions but no collection access.
+                                 [:= [:inline 1] [:inline 1]]
+                                 (search.permissions/permitted-collections-clause search-ctx collection-id-col))
         personal-clause        (search.filter/personal-collections-where-clause search-ctx collection-id-col)]
-    (cond-> honeysql-query
-      ;; add a JOIN against Collection *unless* the source table is already Collection
-      (not= model "collection") (sql.helpers/left-join [:collection :collection] [:= collection-id-col :collection.id])
-      true                      (sql.helpers/where permitted-clause)
-      personal-clause           (sql.helpers/where personal-clause))))
+    (-> honeysql-query
+        (sql.helpers/where permitted-clause)
+        (cond->
+         ;; add a JOIN against Collection *unless* the source table is already Collection
+         (not= model "collection") (sql.helpers/left-join [:collection :collection] [:= collection-id-col :collection.id])
+         personal-clause           (sql.helpers/where personal-clause)))))
 
 (mu/defn- replace-select :- :map
   "Replace a select from query that has alias is `target-alias` with [`with` `target-alias`] column, throw an error if
@@ -199,7 +247,7 @@
   and some of them are dummy column casted to the correct type.
 
   This function then will replace the dummy column with alias is `target-alias` with the `with` column."
-  [query :- :map
+  [query :- HoneySQLQuery
    target-alias :- :keyword
    with :- :keyword]
   (let [selects     (:select query)
@@ -216,7 +264,7 @@
                                                     :with         with})))))
 
 (mu/defn- with-last-editing-info :- :map
-  [query :- :map
+  [query :- HoneySQLQuery
    model :- [:enum "card" "dashboard"]]
   (-> query
       (replace-select :last_editor_id :r.user_id)
@@ -224,10 +272,10 @@
       (sql.helpers/left-join [:revision :r]
                              [:and [:= :r.model_id (search.config/column-with-model-alias model :id)]
                               [:= :r.most_recent true]
-                              [:= :r.model (search-model->revision-model model)]])))
+                              [:= :r.model (search-model/search-model->revision-model model)]])))
 
 (mu/defn- with-moderated-status :- :map
-  [query :- :map
+  [query :- HoneySQLQuery
    model :- [:enum "card" "dataset" "dashboard"]]
   (-> query
       (replace-select :moderated_status :mr.status)
@@ -244,9 +292,13 @@
         columns-to-search (->> all-search-columns
                                (filter (fn [[_k v]] (= v :text)))
                                (map first)
+                               ;; data_authority/data_layer are curation signals, not name/text fields —
+                               ;; exclude them from exact-match ranking (and to keep in-place ordering stable).
+                               ;; data_app_slug repeats a data app's name.
                                (remove #{:collection_authority_level :moderated_status
                                          :initial_sync_status :pk_ref :location
-                                         :collection_location}))
+                                         :collection_location :data_authority
+                                         :data_layer :document :data_app_slug}))
         case-clauses      (as-> columns-to-search <>
                             (map (fn [col] [:like [:lower col] match]) <>)
                             (interleave <> (repeat [:inline 0]))
@@ -259,61 +311,6 @@
   {:arglists '([model search-context])}
   (fn [model _] model))
 
-(defmulti searchable-columns
-  "The columns that can be searched for each model."
-  {:arglists '([model search-native-query])}
-  (fn [model _] model))
-
-(defmethod searchable-columns :default
-  [_ _]
-  [:name])
-
-(defmethod searchable-columns "action"
-  [_ search-native-query]
-  (cond-> [:name
-           :description]
-    search-native-query
-    (conj :dataset_query)))
-
-(defmethod searchable-columns "card"
-  [_ search-native-query]
-  (cond-> [:name
-           :description]
-    search-native-query
-    (conj :dataset_query)))
-
-(defmethod searchable-columns "dataset"
-  [_ search-native-query]
-  (searchable-columns "card" search-native-query))
-
-(defmethod searchable-columns "metric"
-  [_ search-native-query]
-  (searchable-columns "card" search-native-query))
-
-(defmethod searchable-columns "dashboard"
-  [_ _]
-  [:name
-   :description])
-
-(defmethod searchable-columns "page"
-  [_ search-native-query]
-  (searchable-columns "dashboard" search-native-query))
-
-(defmethod searchable-columns "database"
-  [_ _]
-  [:name
-   :description])
-
-(defmethod searchable-columns "table"
-  [_ _]
-  [:name
-   :display_name
-   :description])
-
-(defmethod searchable-columns "indexed-entity"
-  [_ _]
-  [:name])
-
 (def ^:private default-columns
   "Columns returned for all models."
   [:id :name :description :archived :created_at :updated_at])
@@ -324,9 +321,9 @@
 
 (def ^:private dashboardcard-count-col
   "Subselect to get the count of associated DashboardCards"
-  [{:select [:%count.*]
-    :from   [:report_dashboardcard]
-    :where  [:= :report_dashboardcard.card_id :card.id]}
+  [^:allow-subquery {:select [:%count.*]
+                     :from   [:report_dashboardcard]
+                     :where  [:= :report_dashboardcard.card_id :card.id]}
    :dashboardcard_count])
 
 (def ^:private table-columns
@@ -348,7 +345,7 @@
   [_]
   (conj default-columns :model_id
         :creator_id
-        [:model.collection_id        :collection_id]
+        [:action.collection_id       :collection_id]
         [:model.id                   :model_id]
         [:model.name                 :model_name]
         [:query_action.database_id   :database_id]
@@ -361,11 +358,22 @@
         [:collection.type :collection_type]
         [:collection.location :collection_location]
         [:collection.authority_level :collection_authority_level]
-        [:dashboard.name :dashboard_name]
+        [:card.database_id :database_id]
         :dashboard_id
         bookmark-col dashboardcard-count-col
-        :result_metadata
         [:display :display_type]))
+
+(defmethod columns-for-model "document"
+  [_]
+  [:id :name :archived :created_at :updated_at :collection_id :creator_id :document])
+
+(defmethod columns-for-model "exploration"
+  [_]
+  [:id :name :description :archived :created_at :updated_at :collection_id :creator_id])
+
+(defmethod columns-for-model "transform"
+  [_]
+  [:id :name :created_at :updated_at])
 
 (defmethod columns-for-model "indexed-entity" [_]
   [[:model-index-value.name     :name]
@@ -405,6 +413,17 @@
   [_]
   (concat default-columns table-columns [:creator_id]))
 
+(defmethod columns-for-model "measure"
+  [_]
+  [:id :name :description :archived :created_at :updated_at
+   :table_id
+   :creator_id
+   [:table.db_id       :database_id]
+   [:table.schema      :table_schema]
+   [:table.name        :table_name]
+   [:table.display_name :table_display_name]
+   [:table.description :table_description]])
+
 (defmethod columns-for-model "metric"
   [_]
   (concat default-columns table-columns [:creator_id]))
@@ -423,7 +442,24 @@
    [:table.schema :table_schema]
    [:table.name :table_name]
    [:table.description :table_description]
+   [:table.collection_id :collection_id]
+   [[:case [:and [:= :table.collection_id nil] [:= :table.is_published true]]
+     "Our analytics"
+     :else
+     :collection.name] :collection_name]
+   [:collection.authority_level :collection_authority_level]
+   [:collection.type :collection_type]
+   [:table.data_authority :data_authority]
+   [:table.data_layer :data_layer]
    [:metabase_database.name :database_name]])
+
+(defmethod columns-for-model "transform"
+  [_]
+  [:id :name :description :created_at :updated_at])
+
+(defmethod columns-for-model "data-app"
+  [_]
+  [:id :name :display_name :description :created_at :updated_at [:name :data_app_slug]])
 
 (mu/defn- select-clause-for-model :- [:sequential HoneySQLColumn]
   "The search query uses a `union-all` which requires that there be the same number of columns in each of the segments
@@ -454,7 +490,7 @@
       (search.in-place.filter/build-filters model context)))
 
 (mu/defn- shared-card-impl
-  [model :- ::queries.schema/card-type
+  [model :- ::queries.schema/card.type
    search-ctx :- SearchContext]
   (-> (base-query-for-model "card" search-ctx)
       (sql.helpers/where [:= :card.type (name model)])
@@ -470,9 +506,9 @@
                           ;; from the collection picker or when browsing, so it shouldn't be visible in search either.
                           (when (:include-dashboard-questions? search-ctx)
                             [:exists
-                             {:select 1
-                              :from [:report_dashboardcard]
-                              :where [:= :card_id :card.id]}])])
+                             ^:allow-subquery {:select 1
+                                               :from [:report_dashboardcard]
+                                               :where [:= :card_id :card.id]}])])
       (add-collection-join-and-where-clauses "card" search-ctx)
       (add-card-db-id-clause (:table-db-id search-ctx))
       (with-last-editing-info "card")
@@ -485,6 +521,7 @@
                              [:= :model.id :action.model_id])
       (sql.helpers/left-join :query_action
                              [:= :query_action.action_id :action.id])
+      (sql.helpers/where [:not= :action.model_id nil])
       (add-collection-join-and-where-clauses model search-ctx)))
 
 (defmethod search-query-for-model "card"
@@ -512,10 +549,41 @@
                               [:= :bookmark.user_id (:current-user-id search-ctx)]])
       (add-collection-join-and-where-clauses model search-ctx)))
 
+(defmethod search-query-for-model "document"
+  [model search-ctx]
+  (-> (base-query-for-model "document" search-ctx)
+      (sql.helpers/left-join [:document_bookmark :bookmark]
+                             [:and
+                              [:= :bookmark.document_id :document.id]
+                              [:= :bookmark.user_id (:current-user-id search-ctx)]])
+      ;; documents in Explorations are never searchable
+      (sql.helpers/where [:= nil :document.exploration_id])
+      (add-collection-join-and-where-clauses model search-ctx)))
+
+(defmethod search-query-for-model "exploration"
+  [model search-ctx]
+  (-> (base-query-for-model "exploration" search-ctx)
+      (add-collection-join-and-where-clauses model search-ctx)))
+
+(defmethod search-query-for-model "transform"
+  [_model search-ctx]
+  (base-query-for-model "transform" search-ctx))
+
+(defmethod search-query-for-model "data-app"
+  [model search-ctx]
+  (-> (base-query-for-model model search-ctx)
+      (sql.helpers/where (search.permissions/permitted-data-apps-clause
+                          search-ctx
+                          (search.config/column-with-model-alias model :id)))))
+
 (defmethod search-query-for-model "database"
   [model search-ctx]
   (-> (base-query-for-model model search-ctx)
-      (sql.helpers/where [:= :router_database_id nil])))
+      (sql.helpers/where [:= :router_database_id nil] [:= :is_stub false])))
+
+(defmethod search-query-for-model "transform"
+  [model search-ctx]
+  (base-query-for-model model search-ctx))
 
 (defmethod search-query-for-model "dashboard"
   [model search-ctx]
@@ -547,10 +615,15 @@
       (sql.helpers/left-join [:collection :collection] [:= :model.collection_id :collection.id])
       (add-model-index-permissions-clause search-ctx)))
 
+(defmethod search-query-for-model "measure"
+  [model search-ctx]
+  (-> (base-query-for-model model search-ctx)
+      (sql.helpers/left-join [(t2/table-name :model/Table) :table] [:= :measure.table_id :table.id])))
+
 (defmethod search-query-for-model "segment"
   [model search-ctx]
   (-> (base-query-for-model model search-ctx)
-      (sql.helpers/left-join [:metabase_table :table] [:= :segment.table_id :table.id])))
+      (sql.helpers/left-join [(t2/table-name :model/Table) :table] [:= :segment.table_id :table.id])))
 
 (defmethod search-query-for-model "table"
   [model {:keys [current-user-perms table-db-id], :as search-ctx}]
@@ -558,18 +631,38 @@
     (-> (base-query-for-model model search-ctx)
         (add-table-db-id-clause table-db-id)
         (add-table-where-clauses model search-ctx)
+        (sql.helpers/left-join [:collection :collection] [:and :table.is_published [:= :table.collection_id :collection.id]])
         (sql.helpers/left-join :metabase_database [:= :table.db_id :metabase_database.id]))))
 
-(defmethod search.engine/model-set :search.engine/in-place
+(defn- extract-and-hoist-ctes
+  "Extract :with clauses from a collection of queries and return a map with:
+   - :ctes - all CTEs collected from queries (deduplicated by name)
+   - :queries - queries with their :with clauses removed
+
+   This is needed because MySQL/MariaDB doesn't support CTEs inside UNION ALL subqueries -
+   the WITH clause must be at the outermost level of the statement."
+  [queries]
+  (let [all-ctes (into [] (comp (mapcat :with) (distinct)) queries)
+        queries-without-ctes (mapv #(dissoc % :with) queries)]
+    {:ctes    all-ctes
+     :queries queries-without-ctes}))
+
+(defn model-set-query
+  "The Honey SQL query returning one row per search model with at least one result for `search-ctx` (every model is
+  considered, regardless of the context's `:models`), or nil when no model applies."
   [search-ctx]
-  (let [model-queries (for [model (search.in-place.filter/search-context->applicable-models
-                                   ;; It's unclear why we don't use the existing :models
-                                   (assoc search-ctx :models search.config/all-models))]
-                        {:nest (sql.helpers/limit (search-query-for-model model search-ctx) 1)})
-        query         (when (pos-int? (count model-queries))
-                        {:select [:*]
-                         :from   [[{:union-all model-queries} :dummy_alias]]})]
-    (into #{} (map :model) (some-> query mdb/query))))
+  (let [raw-queries   (vec (for [model (search.in-place.filter/search-context->applicable-models
+                                        ;; It's unclear why we don't use the existing :models
+                                        (assoc search-ctx :models search.config/all-models))]
+                             (search-query-for-model model search-ctx)))
+        {:keys [ctes queries]} (extract-and-hoist-ctes raw-queries)
+        nested-queries (mapv #(vary-meta (hash-map :nest (vary-meta (sql.helpers/limit % 1) assoc :allow-subquery true))
+                                         assoc :allow-subquery true)
+                             queries)]
+    (when (pos-int? (count nested-queries))
+      (cond-> {:select [:*]
+               :from   [[^:allow-subquery {:union-all nested-queries} :dummy_alias]]}
+        (seq ctes) (assoc :with ctes)))))
 
 (mu/defn full-search-query
   "Postgres 9 is not happy with the type munging it needs to do to make the union-all degenerate down to a trivial case
@@ -586,23 +679,17 @@
              {:limit search.config/*db-max-results*})
 
       :else
-      {:select   [:*]
-       :from     [[{:union-all (vec (for [model models
-                                          :let [query (search-query-for-model model search-ctx)]
-                                          :when (seq query)]
-                                      query))} :alias_is_required_by_sql_but_not_needed_here]]
-       :order-by order-clause
-       :limit    search.config/*db-max-results*})))
-
-;; Return a reducible-query corresponding to searching the entities without an index.
-(defmethod search.engine/results
-  :search.engine/in-place
-  [search-ctx]
-  (let [search-query (full-search-query search-ctx)]
-    (log/tracef "Searching with query:\n%s\n%s"
-                (u/pprint-to-str search-query)
-                (mdb/format-sql (first (mdb/compile search-query))))
-    (t2/reducible-query search-query)))
+      (let [model-queries (vec (for [model models
+                                     :let [query (search-query-for-model model search-ctx)]
+                                     :when (seq query)]
+                                 query))
+            {:keys [ctes queries]} (extract-and-hoist-ctes model-queries)
+            queries (mapv #(vary-meta % assoc :allow-subquery true) queries)]
+        (cond-> {:select   [:*]
+                 :from     [[^:allow-subquery {:union-all queries} :alias_is_required_by_sql_but_not_needed_here]]
+                 :order-by order-clause
+                 :limit    search.config/*db-max-results*}
+          (seq ctes) (assoc :with ctes))))))
 
 (defmethod search.engine/score :search.engine/in-place [search-ctx result]
   (scoring/score-and-result result search-ctx))

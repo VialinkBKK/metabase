@@ -8,7 +8,6 @@ describe("Add data modal (EE with token)", () => {
   describe("Database panel", () => {
     it("should not offer a setting manager to manage databases", async () => {
       setupAdvancedPermissions({ isAdmin: false, canManageSettings: true });
-      await userEvent.click(screen.getByRole("tab", { name: /Database$/ }));
 
       expect(
         screen.getByRole("tab", { name: /Database$/ }),
@@ -26,8 +25,10 @@ describe("Add data modal (EE with token)", () => {
         canUpload: true,
       });
 
-      expect(screen.getByText("Manage uploads")).toBeInTheDocument();
-      expect(screen.getByText("Enable uploads")).toBeInTheDocument();
+      await userEvent.click(await screen.findByRole("tab", { name: /CSV$/ }));
+      expect(await screen.findByText("Enable uploads")).toBeInTheDocument();
+      // The uploads settings link only shows once uploads are enabled.
+      expect(screen.queryByText("Manage uploads")).not.toBeInTheDocument();
     });
 
     it("should offer a setting manager to manage (csv) uploads", async () => {
@@ -38,7 +39,8 @@ describe("Add data modal (EE with token)", () => {
         canUpload: true,
       });
 
-      expect(screen.getByText("Manage uploads")).toBeInTheDocument();
+      await userEvent.click(await screen.findByRole("tab", { name: /CSV$/ }));
+      expect(await screen.findByText("Manage uploads")).toBeInTheDocument();
     });
 
     /**
@@ -57,7 +59,8 @@ describe("Add data modal (EE with token)", () => {
         canUpload: false,
       });
 
-      expect(screen.getByText("Manage uploads")).toBeInTheDocument();
+      await userEvent.click(await screen.findByRole("tab", { name: /CSV$/ }));
+      expect(await screen.findByText("Manage uploads")).toBeInTheDocument();
     });
   });
 });

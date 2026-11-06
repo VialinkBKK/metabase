@@ -1,44 +1,43 @@
 import userEvent from "@testing-library/user-event";
 
 import { renderWithProviders, screen } from "__support__/ui";
-import { checkNotNull } from "metabase/lib/types";
+import { checkNotNull } from "metabase/utils/types";
 import * as Lib from "metabase-lib";
-import {
-  columnFinder,
-  createQuery,
-  findTemporalBucket,
-} from "metabase-lib/test-helpers";
+import { SAMPLE_PROVIDER } from "metabase-lib/test-helpers";
+import type { TemporalUnit, TestColumnSpec } from "metabase-types/api";
+import { ORDERS_ID } from "metabase-types/api/mocks/presets";
 
 import { TimeseriesBucketPicker } from "./TimeseriesBucketPicker";
-
-function findBreakoutColumn(query: Lib.Query) {
-  const columns = Lib.breakoutableColumns(query, 0);
-  const findColumn = columnFinder(query, columns);
-  return findColumn("ORDERS", "CREATED_AT");
-}
-
-function findMonthBucket(query: Lib.Query, column: Lib.ColumnMetadata) {
-  return findTemporalBucket(query, column, "Month");
-}
 
 interface QueryWithBreakoutOpts {
   query?: Lib.Query;
   stageIndex?: number;
-  column?: Lib.ColumnMetadata;
-  bucket?: Lib.Bucket | null;
+  column?: TestColumnSpec;
+  bucket?: TemporalUnit | null;
 }
 
 function createQueryWithBreakout({
-  query: initialQuery = createQuery(),
-  column = findBreakoutColumn(initialQuery),
-  bucket = findMonthBucket(initialQuery, column),
+  column = {
+    type: "column",
+    name: "CREATED_AT",
+  },
+  bucket = "month",
   stageIndex = -1,
 }: QueryWithBreakoutOpts = {}) {
-  const query = Lib.breakout(
-    initialQuery,
-    stageIndex,
-    Lib.withTemporalBucket(column, bucket),
-  );
+  const query = Lib.createTestQuery(SAMPLE_PROVIDER, {
+    stages: [
+      {
+        source: { type: "table", id: ORDERS_ID },
+        breakouts: [
+          {
+            ...column,
+            unit: bucket ?? undefined,
+          },
+        ],
+      },
+    ],
+  });
+
   const [breakout] = Lib.breakouts(query, stageIndex);
   return {
     query,
@@ -70,7 +69,11 @@ function setup({ query, breakout, column, stageIndex = -1 }: SetupOpts) {
   const getNextBucketName = () => {
     const [column] = onChange.mock.lastCall;
     const breakout = Lib.temporalBucket(column);
-    return breakout ? Lib.displayInfo(query, 0, breakout).displayName : null;
+    if (breakout == null) {
+      return null;
+    }
+    const info = Lib.displayInfo(query, 0, breakout);
+    return info.shortName === "default" ? null : info.displayName;
   };
 
   return { onChange, getNextBucketName };
@@ -121,19 +124,27 @@ describe("TimeseriesBucketPicker", () => {
     expect(getNextBucketName()).toBeNull();
   });
 
-  it("should show all options when the current bucket is below the More button", async () => {
-    const initialQuery = createQuery();
-    const initialColumn = findBreakoutColumn(initialQuery);
-    const bucket = findTemporalBucket(
-      initialQuery,
-      initialColumn,
-      "Quarter of year",
-    );
-
+  it("should highlight the current temporal bucket", async () => {
     const { query, breakout, column } = createQueryWithBreakout({
-      query: initialQuery,
-      column: initialColumn,
-      bucket,
+      bucket: "quarter",
+    });
+    setup({ query, breakout, column });
+
+    await userEvent.click(screen.getByText("Quarter"));
+
+    expect(
+      await screen.findByRole("option", { name: "Quarter" }),
+    ).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("option", { name: "Month" })).toHaveAttribute(
+      "aria-selected",
+      "false",
+    );
+  });
+
+  it("should show all options when the current bucket is below the More button", async () => {
+    const { query, breakout, column } = createQueryWithBreakout({
+      column: { type: "column", name: "CREATED_AT" },
+      bucket: "quarter-of-year",
     });
 
     setup({ query, breakout, column });

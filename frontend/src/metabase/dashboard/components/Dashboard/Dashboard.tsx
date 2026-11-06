@@ -1,35 +1,36 @@
 import cx from "classnames";
 import { useMemo } from "react";
-import { t } from "ttag";
 
-import { DashboardArchivedEntityBanner } from "metabase/archive/components/ArchivedEntityBanner/DashboardArchivedEntityBanner";
-import ColorS from "metabase/css/core/colors.module.css";
 import DashboardS from "metabase/css/dashboard.module.css";
 import { DashboardHeader } from "metabase/dashboard/components/DashboardHeader";
+import { SIDEBAR_NAME } from "metabase/dashboard/constants";
 import { useDashboardContext } from "metabase/dashboard/context";
+import { getIsHeaderVisible } from "metabase/dashboard/selectors";
+import { useDashboardTimelines } from "metabase/dashboard/timeline-events";
 import { isEmbeddingSdk } from "metabase/embedding-sdk/config";
-import { FilterApplyToast } from "metabase/parameters/components/FilterApplyToast";
-import ParametersS from "metabase/parameters/components/ParameterValueWidget.module.css";
-import EmbedFrameS from "metabase/public/components/EmbedFrame/EmbedFrame.module.css";
+import EmbedFrameS from "metabase/embedding/theme.module.css";
+import { useSelector } from "metabase/redux";
 import { FullWidthContainer } from "metabase/styled-components/layout/FullWidthContainer";
-import { Box, Flex, Loader, Stack, Text } from "metabase/ui";
+import { Box, Flex } from "metabase/ui";
+import { DASHBOARD_PDF_EXPORT_ROOT_ID } from "metabase/visualizations/lib/save-dashboard-pdf";
 import type { DashboardCard } from "metabase-types/api";
 
-import { DASHBOARD_PDF_EXPORT_ROOT_ID } from "../../constants";
+import { DashboardArchivedEntityBanner } from "../DashboardArchivedEntityBanner";
 import {
   DashboardInfoButton,
   ExportAsPdfButton,
   FullscreenToggle,
-  NightModeToggleButton,
 } from "../DashboardHeader/buttons";
 import { DashboardParameterPanel } from "../DashboardParameterPanel";
 import { DashboardSidebars } from "../DashboardSidebars";
 import { DashboardTabs } from "../DashboardTabs";
 import { DashboardTitle } from "../DashboardTitle";
+import { FilterApplyToast } from "../FilterApplyToast";
 import { RefreshWidget } from "../RefreshWidget";
 
 import S from "./Dashboard.module.css";
 import { Grid, ParametersList } from "./components";
+import { useDashboardChartPaste } from "./use-dashboard-chart-paste";
 
 const DashboardDefaultView = ({ className }: { className?: string }) => {
   const {
@@ -38,8 +39,15 @@ const DashboardDefaultView = ({ className }: { className?: string }) => {
     isFullscreen,
     isSharing,
     selectedTabId,
-    shouldRenderAsNightMode,
+    sidebar,
   } = useDashboardContext();
+
+  const hasDockedSidebar = isSharing || sidebar.name === SIDEBAR_NAME.events;
+
+  useDashboardChartPaste();
+  useDashboardTimelines();
+
+  const isHeaderVisible = useSelector(getIsHeaderVisible);
 
   const currentTabDashcards = useMemo(() => {
     if (!dashboard || !Array.isArray(dashboard.dashcards)) {
@@ -56,17 +64,13 @@ const DashboardDefaultView = ({ className }: { className?: string }) => {
   const tabHasCards = currentTabDashcards.length > 0;
   const dashboardHasCards = dashboard && dashboard.dashcards.length > 0;
 
-  if (!dashboard) {
-    return (
-      <Stack justify="center" align="center" gap="sm" mt="xl">
-        <Loader size="lg" />
-        <Text c="text-light" size="xl">{t`Loading…`}</Text>
-      </Stack>
-    );
-  }
+  // While the dashboard loads, its header and grid render skeletons, so lay
+  // the page out as for a dashboard with cards.
+  const isEmpty = dashboard != null && (!dashboardHasCards || !tabHasCards);
+  const hasTabs = (dashboard?.tabs?.length ?? 0) > 1;
 
-  const isEmpty = !dashboardHasCards || (dashboardHasCards && !tabHasCards);
-  const isFullHeight = isEditing || isSharing;
+  // Embedding SDK has parent containers that requires dashboard to be full height to avoid double scrollbars.
+  const isFullHeight = isEditing || hasDockedSidebar || isEmbeddingSdk();
 
   return (
     <Flex
@@ -76,9 +80,6 @@ const DashboardDefaultView = ({ className }: { className?: string }) => {
         S.DashboardLoadingAndErrorWrapper,
         {
           [DashboardS.DashboardFullscreen]: isFullscreen,
-          [DashboardS.DashboardNight]: shouldRenderAsNightMode,
-          [ParametersS.DashboardNight]: shouldRenderAsNightMode,
-          [ColorS.DashboardNight]: shouldRenderAsNightMode,
           [S.isFullHeight]: isFullHeight,
         },
       )}
@@ -88,7 +89,7 @@ const DashboardDefaultView = ({ className }: { className?: string }) => {
       flex="1 0 auto"
       data-testid="dashboard"
     >
-      {dashboard.archived && <DashboardArchivedEntityBanner />}
+      {dashboard?.archived && <DashboardArchivedEntityBanner />}
 
       <Box
         component="header"
@@ -98,7 +99,9 @@ const DashboardDefaultView = ({ className }: { className?: string }) => {
           {
             [S.isEmbeddingSdk]: isEmbeddingSdk(),
             [S.isFullscreen]: isFullscreen,
-            [S.isNightMode]: shouldRenderAsNightMode,
+            // The tab row draws its own full-width bottom border, so drop the
+            // header container's border when tabs are shown to avoid a doubled line.
+            [S.noBorder]: hasTabs || isEditing || !isHeaderVisible,
           },
         )}
         data-element-id="dashboard-header-container"
@@ -112,13 +115,14 @@ const DashboardDefaultView = ({ className }: { className?: string }) => {
         miw={0}
         mih={0}
         className={cx(S.DashboardBody, {
-          [S.isEditingOrSharing]: isEditing || isSharing,
+          [S.isHeightConstrained]: isEditing || hasDockedSidebar,
+          [S.isEmbeddingSdk]: isEmbeddingSdk(),
         })}
       >
         <Box
           className={cx(S.ParametersAndCardsContainer, {
             [S.shouldMakeDashboardHeaderStickyAfterScrolling]:
-              !isFullscreen && (isEditing || isSharing),
+              !isFullscreen && (isEditing || hasDockedSidebar),
             [S.notEmpty]: !isEmpty,
           })}
           id={DASHBOARD_PDF_EXPORT_ROOT_ID}
@@ -151,10 +155,10 @@ type DashboardComponentType = typeof DashboardDefaultView & {
   FullscreenButton: typeof FullscreenToggle;
   ExportAsPdfButton: typeof ExportAsPdfButton;
   InfoButton: typeof DashboardInfoButton;
-  NightModeButton: typeof NightModeToggleButton;
   RefreshPeriod: typeof RefreshWidget;
 };
 
+// Unjustified type cast. FIXME
 const DashboardComponent = DashboardDefaultView as DashboardComponentType;
 DashboardComponent.Header = DashboardHeader;
 DashboardComponent.Grid = Grid;
@@ -164,7 +168,6 @@ DashboardComponent.ParametersList = ParametersList;
 DashboardComponent.FullscreenButton = FullscreenToggle;
 DashboardComponent.ExportAsPdfButton = ExportAsPdfButton;
 DashboardComponent.InfoButton = DashboardInfoButton;
-DashboardComponent.NightModeButton = NightModeToggleButton;
 DashboardComponent.RefreshPeriod = RefreshWidget;
 
 export const Dashboard = DashboardComponent;

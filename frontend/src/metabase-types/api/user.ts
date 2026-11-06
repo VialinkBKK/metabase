@@ -1,13 +1,23 @@
 import type { CollectionId } from "./collection";
+import type {
+  ContentDiagnosticsDuplicatedUserParams,
+  ContentDiagnosticsImbalancedUserParams,
+  ContentDiagnosticsSlowUserParams,
+  ContentDiagnosticsStaleUserParams,
+} from "./content-diagnostics";
 import type { DashboardId } from "./dashboard";
+import type { DatabaseId } from "./database";
+import type { DependencyDiagnosticsUserParams } from "./dependencies";
+import type { ExportFormat, TableExportFormat } from "./export-format";
 import type { PaginationRequest, PaginationResponse } from "./pagination";
+import type { ConcreteTableId, SchemaName } from "./table";
 
 export type UserId = number;
 export type UserAttributeKey = string;
 export type UserAttributeValue = string;
 export type UserAttributeMap = Record<UserAttributeKey, UserAttributeValue>;
 
-export type UserAttributeSource = "system" | "jwt" | "user";
+export type UserAttributeSource = "system" | "tenant" | "jwt" | "user";
 
 type StructuredAttributeBase = {
   frozen: boolean;
@@ -34,25 +44,57 @@ export interface BaseUser {
   is_active: boolean;
   is_qbnewb: boolean;
   is_superuser: boolean;
+  is_data_analyst: boolean;
 
   date_joined: string;
   last_login: string;
   first_login: string;
   updated_at: string;
+  tenant_id: number | null;
+}
+
+export interface UserPermissions {
+  can_create_queries?: boolean;
+  can_create_native_queries?: boolean;
+
+  // requires advanced_permissions feature
+  is_group_manager?: boolean;
+  is_data_analyst?: boolean;
+  can_access_data_model?: boolean;
+  can_access_db_details?: boolean;
+  can_access_monitoring?: boolean;
+  can_access_setting?: boolean;
+  can_access_subscription?: boolean;
+  can_access_data_studio?: boolean;
+  can_access_transforms?: boolean;
 }
 
 export interface User extends BaseUser {
+  attributes: UserAttributeMap | null;
   login_attributes: UserAttributeMap | null;
   structured_attributes?: StructuredUserAttributes;
   user_group_memberships?: { id: number; is_group_manager: boolean }[];
   is_installer: boolean;
   has_invited_second_user: boolean;
   has_question_and_dashboard: boolean;
-  personal_collection_id: CollectionId;
-  sso_source: "jwt" | "ldap" | "google" | "scim" | "saml" | null;
+  slack_account_status?: "active" | "inactive" | null;
+  can_write_any_collection: boolean;
+  personal_collection_id: CollectionId | null;
+  tenant_collection_id: CollectionId | null;
+  sso_source:
+    | "jwt"
+    | "ldap"
+    | "google"
+    | "scim"
+    | "saml"
+    | "oidc"
+    | "slack"
+    | null;
+  has_used_password?: boolean;
   custom_homepage: {
     dashboard_id: DashboardId;
   } | null;
+  permissions?: UserPermissions;
 }
 
 export interface UserListResult {
@@ -61,7 +103,11 @@ export interface UserListResult {
   last_name: string | null;
   common_name: string;
   email: string;
-  personal_collection_id: CollectionId;
+  /**
+   * `null` for API-key users (see `include-personal-collection-ids`
+   * in `collections/models/collection.clj`).
+   */
+  personal_collection_id: CollectionId | null;
   structured_attributes?: StructuredUserAttributes;
 }
 
@@ -81,6 +127,7 @@ export type UserInfo = Pick<
   | "last_login"
   | "is_superuser"
   | "is_qbnewb"
+  | "is_active"
 >;
 
 export type UserListQuery = {
@@ -98,6 +145,12 @@ export type UserLoginHistoryItem = {
 
 export type UserLoginHistory = UserLoginHistoryItem[];
 
+export type InviteTarget = {
+  type: "dashboard" | "question";
+  id: number;
+  name: string;
+};
+
 export type CreateUserRequest = {
   email: string;
   first_name?: string;
@@ -105,6 +158,8 @@ export type CreateUserRequest = {
   user_group_memberships?: { id: number; is_group_manager: boolean }[];
   login_attributes?: UserAttributeMap;
   password?: string;
+  source?: "setup" | "admin";
+  invite_target?: InviteTarget;
 };
 
 export type UpdatePasswordRequest = {
@@ -118,6 +173,8 @@ export type ListUsersRequest = {
   query?: string;
   group_id?: number;
   include_deactivated?: boolean;
+  tenancy?: UserTenancy;
+  tenant_id?: number;
 } & PaginationRequest;
 
 export type ListUsersResponse = {
@@ -148,8 +205,78 @@ export type UserKeyValue =
       namespace: "last_download_format";
       key: string;
       value: {
-        last_download_format: "csv" | "xlsx" | "json" | "png";
-        last_table_download_format: "csv" | "xlsx" | "json";
+        last_download_format: ExportFormat;
+        last_table_download_format: TableExportFormat;
+      };
+    }
+  | {
+      namespace: "transforms";
+      key: string;
+      value: "tree" | "alphabetical" | "last-modified";
+    }
+  | {
+      namespace: "data_studio";
+      key: "isNavbarOpened" | "hasSeenGuide";
+      value: boolean;
+    }
+  | {
+      namespace: "monitor";
+      key: "isNavbarOpened";
+      value: boolean;
+    }
+  | {
+      namespace: "embedding_hub";
+      key: "isNavbarOpened";
+      value: boolean;
+    }
+  | {
+      namespace: "dependency_diagnostics";
+      key: string;
+      value: DependencyDiagnosticsUserParams;
+    }
+  | {
+      namespace: "content_diagnostics";
+      key: "stale";
+      value: ContentDiagnosticsStaleUserParams;
+    }
+  | {
+      namespace: "content_diagnostics";
+      key: "slow";
+      value: ContentDiagnosticsSlowUserParams;
+    }
+  | {
+      namespace: "content_diagnostics";
+      key: "duplicated";
+      value: ContentDiagnosticsDuplicatedUserParams;
+    }
+  | {
+      namespace: "content_diagnostics";
+      key: "empty";
+      value: ContentDiagnosticsImbalancedUserParams;
+    }
+  | {
+      namespace: "content_diagnostics";
+      key: "sparse";
+      value: ContentDiagnosticsImbalancedUserParams;
+    }
+  | {
+      namespace: "content_diagnostics";
+      key: "crowded";
+      value: ContentDiagnosticsImbalancedUserParams;
+    }
+  | {
+      namespace: "schema_viewer";
+      key: "last_database";
+      value: {
+        databaseId: DatabaseId;
+        schema?: SchemaName;
+      };
+    }
+  | {
+      namespace: "schema_viewer";
+      key: `${DatabaseId}__${SchemaName}`;
+      value: {
+        table_ids: ConcreteTableId[];
       };
     };
 
@@ -162,3 +289,5 @@ export type GetUserKeyValueRequest = UserKeyValueKey;
 export type UpdateUserKeyValueRequest = UserKeyValue & {
   expires_at?: string;
 };
+
+export type UserTenancy = "internal" | "external" | "all";

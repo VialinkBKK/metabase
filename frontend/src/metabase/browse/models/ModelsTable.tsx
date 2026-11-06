@@ -1,38 +1,39 @@
+import cx from "classnames";
 import { type MouseEvent, useCallback, useState } from "react";
-import { push } from "react-router-redux";
 import { t } from "ttag";
 
-import { getCollectionName } from "metabase/collections/utils";
-import { Ellipsified } from "metabase/common/components/Ellipsified";
+import { getCollectionName } from "metabase/common/collections/utils";
 import { EllipsifiedCollectionPath } from "metabase/common/components/EllipsifiedPath/EllipsifiedCollectionPath";
-import EntityItem from "metabase/common/components/EntityItem";
+import { EntityIcon } from "metabase/common/components/EntityIcon";
+import { EntityItemName } from "metabase/common/components/EntityItemName";
 import { SortableColumnHeader } from "metabase/common/components/ItemsTable/BaseItemsTable";
+import { Columns } from "metabase/common/components/ItemsTable/Columns";
 import {
   ItemNameCell,
-  MaybeItemLink,
   TBody,
   Table,
   TableColumn,
-} from "metabase/common/components/ItemsTable/BaseItemsTable.styled";
-import { Columns } from "metabase/common/components/ItemsTable/Columns";
+} from "metabase/common/components/ItemsTable/TableElements";
 import type { ResponsiveProps } from "metabase/common/components/ItemsTable/utils";
+import { Link } from "metabase/common/components/Link";
 import { MarkdownPreview } from "metabase/common/components/MarkdownPreview";
-import { useDispatch } from "metabase/lib/redux";
-import * as Urls from "metabase/lib/urls";
-import { FixedSizeIcon, Flex, Icon, Repeat, Skeleton } from "metabase/ui";
-import { SortDirection, type SortingOptions } from "metabase-types/api/sorting";
-
+import { useGetIcon } from "metabase/hooks/use-icon";
+import { useNavigate } from "metabase/router";
 import {
-  Cell,
-  CollectionLink,
-  CollectionTableCell,
-  NameColumn,
-  TableRow,
-} from "../components/BrowseTable.styled";
+  Ellipsified,
+  FixedSizeIcon,
+  Flex,
+  Repeat,
+  Skeleton,
+} from "metabase/ui";
+import * as Urls from "metabase/urls";
+import type { SortingOptions } from "metabase-types/api";
+
+import BrowseTableS from "../components/BrowseTable.module.css";
 
 import { trackModelClick } from "./analytics";
 import type { ModelResult, SortColumn } from "./types";
-import { getIcon, getModelDescription, sortModels } from "./utils";
+import { getModelDescription, sortModels } from "./utils";
 
 export interface ModelsTableProps {
   models?: ModelResult[];
@@ -40,21 +41,17 @@ export interface ModelsTableProps {
   skeleton?: boolean;
 }
 
-export const itemsTableContainerName = "ItemsTableContainer";
-
 const descriptionProps: ResponsiveProps = {
   hideAtContainerBreakpoint: "sm",
-  containerName: itemsTableContainerName,
 };
 
 const collectionProps: ResponsiveProps = {
   hideAtContainerBreakpoint: "xs",
-  containerName: itemsTableContainerName,
 };
 
 const DEFAULT_SORTING_OPTIONS: SortingOptions<SortColumn> = {
   sort_column: "collection",
-  sort_direction: SortDirection.Asc,
+  sort_direction: "asc",
 };
 
 export const ModelsTable = ({
@@ -79,7 +76,7 @@ export const ModelsTable = ({
     <Table aria-label={skeleton ? undefined : t`Table of models`}>
       <colgroup>
         {/* <col> for Name column */}
-        <NameColumn containerName={itemsTableContainerName} />
+        <col className={BrowseTableS.nameColumn} />
 
         {/* <col> for Collection column */}
         <TableColumn {...collectionProps} width={`${collectionWidth}%`} />
@@ -157,7 +154,7 @@ function preventDefault(event: MouseEvent) {
 }
 
 const ModelRow = ({ model }: { model?: ModelResult }) => {
-  const dispatch = useDispatch();
+  const navigate = useNavigate();
 
   const handleClick = useCallback(
     (event: MouseEvent) => {
@@ -167,13 +164,13 @@ const ModelRow = ({ model }: { model?: ModelResult }) => {
 
       // do not trigger click when selecting text
       const selection = document.getSelection();
-      if (selection?.type === "Range") {
+      if (selection?.type === "Range" && selection?.toString().length > 0) {
         event.stopPropagation();
         return;
       }
 
       const { id, name } = model;
-      const url = Urls.model({ id, name });
+      const url = Urls.model({ id, name, type: "model" });
       const subpathSafeUrl = Urls.getSubpathSafeUrl(url);
 
       trackModelClick(model.id);
@@ -184,50 +181,51 @@ const ModelRow = ({ model }: { model?: ModelResult }) => {
       if ((event.ctrlKey || event.metaKey) && event.button === 0) {
         Urls.openInNewTab(subpathSafeUrl);
       } else {
-        dispatch(push(url));
+        navigate(url);
       }
     },
-    [model, dispatch],
+    [model, navigate],
   );
 
   return (
-    <TableRow onClick={handleClick}>
+    <tr
+      className={model ? BrowseTableS.tableRow : BrowseTableS.tableRowSkeleton}
+      onClick={handleClick}
+    >
       <NameCell model={model} />
       <CollectionCell model={model} />
       <DescriptionCell model={model} />
       <Columns.RightEdge.Cell />
-    </TableRow>
+    </tr>
   );
 };
 
 function NameCell({ model }: { model?: ModelResult }) {
+  const getIcon = useGetIcon();
   const headingId = `model-${model?.id || "dummy"}-heading`;
-  const icon = getIcon(model);
+  const icon = getIcon(model ?? { model: "dataset" }) ?? { name: "folder" };
+  const name = <EntityItemName name={model?.name || ""} />;
   return (
     <ItemNameCell data-testid="model-name" aria-labelledby={headingId}>
-      <MaybeItemLink
-        to={model ? Urls.model({ id: model.id, name: model.name }) : undefined}
-        style={{
-          // To align the icons with "Name" in the <th>
-          paddingInlineStart: "1.4rem",
-          paddingInlineEnd: ".5rem",
-        }}
-        onClick={preventDefault}
-      >
-        <Icon
-          size={16}
+      <Flex id={headingId} align="center" gap="0.5rem" ps="1.4rem" pe="0.5rem">
+        <EntityIcon
+          size="1rem"
           {...icon}
-          color="var(--mb-color-icon-primary)"
+          color="icon-brand"
           style={{ flexShrink: 0 }}
         />
-        {
-          <EntityItem.Name
-            name={model?.name || ""}
-            variant="list"
-            id={headingId}
-          />
-        }
-      </MaybeItemLink>
+        {model ? (
+          <Link
+            to={Urls.model({ id: model.id, name: model.name, type: "model" })}
+            onClick={preventDefault}
+            style={{ overflow: "hidden" }}
+          >
+            {name}
+          </Link>
+        ) : (
+          name
+        )}
+      </Flex>
     </ItemNameCell>
   );
 }
@@ -250,27 +248,28 @@ function CollectionCell({ model }: { model?: ModelResult }) {
   );
 
   return (
-    <CollectionTableCell
+    <td
+      className={cx(BrowseTableS.collectionCell, BrowseTableS.hideAtXs)}
       data-testid={`path-for-collection: ${collectionName}`}
-      {...collectionProps}
     >
       {model?.collection ? (
-        <CollectionLink
+        <Link
+          className={BrowseTableS.collectionLink}
           to={Urls.collection(model.collection)}
           onClick={stopPropagation}
         >
           {content}
-        </CollectionLink>
+        </Link>
       ) : (
         content
       )}
-    </CollectionTableCell>
+    </td>
   );
 }
 
 function DescriptionCell({ model }: { model?: ModelResult }) {
   return (
-    <Cell {...descriptionProps}>
+    <td className={cx(BrowseTableS.cell, BrowseTableS.hideAtSm)}>
       {model ? (
         <MarkdownPreview
           lineClamp={12}
@@ -282,6 +281,6 @@ function DescriptionCell({ model }: { model?: ModelResult }) {
       ) : (
         <SkeletonText />
       )}
-    </Cell>
+    </td>
   );
 }

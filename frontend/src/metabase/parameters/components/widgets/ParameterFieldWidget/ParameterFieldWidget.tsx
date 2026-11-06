@@ -6,19 +6,20 @@ import _ from "underscore";
 import CS from "metabase/css/core/index.css";
 import { UpdateFilterButton } from "metabase/parameters/components/UpdateFilterButton";
 import { Box } from "metabase/ui";
-import type Question from "metabase-lib/v1/Question";
-import type Field from "metabase-lib/v1/metadata/Field";
 import {
   getFilterArgumentFormatOptions,
   isEqualsOperator,
 } from "metabase-lib/v1/operators/utils";
-import type { UiParameter } from "metabase-lib/v1/parameters/types";
+import type {
+  ParameterField,
+  UiParameter,
+} from "metabase-lib/v1/parameters/types";
 import { deriveFieldOperatorFromParameter } from "metabase-lib/v1/parameters/utils/operators";
 import {
   getIsMultiSelect,
   hasValue,
 } from "metabase-lib/v1/parameters/utils/parameter-values";
-import type { Dashboard, RowValue } from "metabase-types/api";
+import type { CardId, DashboardId, RowValue } from "metabase-types/api";
 
 import { Footer } from "../Widget";
 import { MIN_WIDTH } from "../constants";
@@ -27,14 +28,14 @@ import FieldValuesWidget from "./FieldValuesWidget";
 import { normalizeValue } from "./normalizeValue";
 
 interface ParameterFieldWidgetProps {
-  fields: Field[];
+  fields: ParameterField[];
   isEditing?: boolean;
   parameter: UiParameter;
   parameters?: UiParameter[];
   setValue: (value: RowValue[]) => void;
   value?: string | string[];
-  question?: Question;
-  dashboard?: Dashboard | null;
+  cardId?: CardId;
+  dashboardId?: DashboardId;
 }
 
 export function ParameterFieldWidget({
@@ -44,8 +45,8 @@ export function ParameterFieldWidget({
   fields,
   parameter,
   parameters,
-  question,
-  dashboard,
+  cardId,
+  dashboardId,
 }: ParameterFieldWidgetProps) {
   const [unsavedValue, setUnsavedValue] = useState<RowValue[]>(() =>
     normalizeValue(value),
@@ -70,7 +71,8 @@ export function ParameterFieldWidget({
 
     if (isRequired && isEmpty) {
       if (hasValue(parameter.default)) {
-        setValue(parameter.default);
+        // Unjustified type cast. FIXME
+        setValue(parameter.default as RowValue[]);
       }
       return;
     }
@@ -103,17 +105,18 @@ export function ParameterFieldWidget({
               value={value}
               parameter={parameter}
               parameters={parameters}
-              question={question}
-              dashboard={dashboard}
+              cardId={cardId}
+              dashboardId={dashboardId}
               onChange={onValueChange}
               placeholder={isEditing ? t`Enter a default value…` : undefined}
               fields={fields}
               autoFocus={index === 0}
               multi={supportsMultipleValues}
-              formatOptions={
-                operator && getFilterArgumentFormatOptions(operator, index)
-              }
-              color="brand"
+              formatOptions={{
+                ...(operator &&
+                  getFilterArgumentFormatOptions(operator, index)),
+                ...fields?.[0]?.settings,
+              }}
               minWidth={300}
               maxWidth={400}
             />

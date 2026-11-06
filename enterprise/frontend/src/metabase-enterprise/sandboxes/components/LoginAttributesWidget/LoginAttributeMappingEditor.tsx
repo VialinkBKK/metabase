@@ -3,6 +3,7 @@ import { t } from "ttag";
 import _ from "underscore";
 
 import {
+  ActionIcon,
   Box,
   Button,
   Flex,
@@ -73,7 +74,9 @@ export const buildStructuredEntries = (
         disabled: frozen,
         revert:
           original ||
-          (source === "jwt" ? { value, source, frozen: false } : undefined),
+          (source === "jwt" || source === "tenant"
+            ? { value, source, frozen: false }
+            : undefined),
       },
     }))
     .sort((a, b) =>
@@ -101,8 +104,10 @@ export const LoginAttributeMappingEditor = ({
   const [entries, setEntries] = useState<MappingEditorEntry[]>(
     structuredAttributes ? [] : buildEntries(simpleAttributes),
   );
+  const [autoFocusIndex, setAutoFocusIndex] = useState<number | null>(null);
 
   useEffect(() => {
+    // structuredAttributes can change if a different tenant is selected
     if (structuredAttributes) {
       setEntries((previousEntries) => [
         ...buildStructuredEntries(structuredAttributes),
@@ -118,6 +123,7 @@ export const LoginAttributeMappingEditor = ({
       onError(hasError(newEntries));
     } else {
       onChange(buildMapping(newEntries));
+      setAutoFocusIndex(newEntries.length - 1);
     }
   };
 
@@ -140,9 +146,10 @@ export const LoginAttributeMappingEditor = ({
                 }}
                 keyOpts={keyOpts}
                 error={entryError(entries, key)}
+                autoFocus={index === autoFocusIndex}
               />
             </Flex>
-            <Flex gap="sm" w="50%">
+            <Flex gap="sm" w="50%" align="center">
               <ValueInput
                 canDelete={canDeleteThis}
                 canRevert={!!canRevert}
@@ -169,11 +176,13 @@ export const LoginAttributeMappingEditor = ({
         );
       })}
       <Button
-        variant="light"
-        size="xs"
+        variant="transparent"
+        size="compact-md"
         leftSection={<Icon name="add" />}
-        onClick={() => handleChange(addEntry(entries))}
-        mt="md"
+        onClick={() => {
+          handleChange(addEntry(entries));
+        }}
+        mt="lg"
         disabled={_.some(
           entries,
           (entry) => entry.value === "" || entry.key === "",
@@ -190,11 +199,13 @@ const KeyInput = ({
   value,
   onChange,
   error,
+  autoFocus,
 }: {
   value: string;
   onChange: (e: React.ChangeEvent<HTMLInputElement>) => void;
   keyOpts: MappingEditorEntry["keyOpts"];
   error?: string | boolean;
+  autoFocus?: boolean;
 }) => {
   if (keyOpts?.disabled) {
     return (
@@ -212,6 +223,7 @@ const KeyInput = ({
       w="100%"
       onChange={onChange}
       error={error}
+      autoFocus={autoFocus}
     />
   );
 };
@@ -243,45 +255,56 @@ const ValueInput = ({
         {...valueOpts}
       />
       {canDelete && (
-        <Button
-          leftSection={<Icon name="close" />}
+        <ActionIcon
+          variant="subtle"
+          size="sm"
           onClick={onDelete}
-          color={"text"}
           data-testid="remove-mapping"
-        />
+          aria-label={t`Remove mapping`}
+        >
+          <Icon name="close" />
+        </ActionIcon>
       )}
       {canRevert && (
         <Tooltip
           label={t`Revert to "${valueOpts?.revert?.value}" value from ${valueOpts?.revert?.source}`}
         >
-          <Button
-            leftSection={<Icon name="refresh" />}
+          <ActionIcon
+            variant="subtle"
+            size="sm"
             onClick={onRevert}
-            color={"text"}
             data-testid="revert-mapping"
-          />
+          >
+            <Icon name="refresh" />
+          </ActionIcon>
         </Tooltip>
       )}
     </>
   );
 };
 
-const infoText = (source?: "system" | "jwt" | "user"): string => {
+const infoText = (source?: "system" | "jwt" | "user" | "tenant"): string => {
   switch (source) {
     case "system":
       return t`This attribute is system defined`;
     case "jwt":
       return t`This attribute was set by the login token, but you can override its value`;
+    case "tenant":
+      return t`This attribute is inherited from the tenant, but you can override its value`;
     default:
       return "";
   }
 };
 
-const InfoCard = ({ source }: { source?: "system" | "user" | "jwt" }) =>
-  !["system", "jwt"].includes(source ?? "") ? null : (
+const InfoCard = ({
+  source,
+}: {
+  source?: "tenant" | "system" | "user" | "jwt";
+}) =>
+  !["tenant", "system", "jwt"].includes(source ?? "") ? null : (
     <HoverCard>
       <HoverCard.Target>
-        <Icon name="info_filled" c="text-light" />
+        <Icon name="info" c="text-secondary" />
       </HoverCard.Target>
       <HoverCard.Dropdown maw="20rem">
         <Text p="sm" maw="20rem">

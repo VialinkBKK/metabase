@@ -5,10 +5,17 @@ import type {
 import type { User } from "metabase-types/api/user";
 import { isObject } from "metabase-types/guards";
 
+export type SlackChannelId = string;
+
+export type SlackChannelOption = {
+  displayName: string;
+  id: SlackChannelId;
+};
+
 type ChannelField = {
   name: string;
   displayName: string;
-  options?: string[];
+  options?: SlackChannelOption[];
   required?: boolean;
 };
 
@@ -25,6 +32,8 @@ export type ChannelSpec = {
   recipients?: ChannelSpecRecipients;
   error?: any;
 };
+
+export type ChannelSpecs = Record<ChannelType, ChannelSpec>;
 
 export type ChannelDetails = {
   url: string;
@@ -90,11 +99,27 @@ export interface ChannelApiResponse {
 
 export type ChannelType = keyof ChannelApiResponse["channels"];
 
+export type PulseChannelDetails = {
+  channel?: string;
+  channel_id?: string;
+  subject?: string;
+  include_pdf?: boolean;
+  attachment_only?: boolean;
+  [specFieldName: string]: string | boolean | undefined;
+};
+
+/** An address outside Metabase, which the API returns without a user id. */
+export type ExternalEmailRecipient = {
+  email: string;
+};
+
+export type ChannelRecipient = User | ExternalEmailRecipient;
+
 export type Channel = {
-  channel_type: string;
-  details?: Record<string, string>;
+  channel_type: ChannelType;
+  details?: PulseChannelDetails;
   enabled?: boolean;
-  recipients?: User[];
+  recipients?: ChannelRecipient[];
   channel_id?: number;
 } & Pick<
   ScheduleSettings,

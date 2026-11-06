@@ -7,9 +7,10 @@ import {
 } from "@mantine/dates";
 import { useUncontrolled } from "@mantine/hooks";
 import cx from "classnames";
-import dayjs from "dayjs";
 import { type Ref, forwardRef } from "react";
 import { c } from "ttag";
+
+import { dayjs } from "metabase/dayjs";
 
 import CalendarS from "../Calendar/Calendar.module.css";
 
@@ -40,7 +41,7 @@ export const QuarterPicker = forwardRef(function QuarterPicker(
   }: QuarterPickerProps,
   ref: Ref<HTMLDivElement>,
 ) {
-  const [value, setValue] = useUncontrolled<DateStringValue>({
+  const [value, setValue] = useUncontrolled<DateStringValue | null>({
     value: valueProp?.toString(),
     defaultValue: defaultValue?.toString(),
     onChange,
@@ -49,7 +50,7 @@ export const QuarterPicker = forwardRef(function QuarterPicker(
   const [date, setDate] = useUncontrolled({
     value: dateProp?.toString(),
     defaultValue: defaultDate?.toString(),
-    finalValue: value ?? new Date(),
+    finalValue: value ?? new Date().toString(),
     onChange: onDateChange,
   });
 

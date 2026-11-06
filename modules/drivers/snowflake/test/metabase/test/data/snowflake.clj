@@ -5,6 +5,8 @@
    [metabase.driver :as driver]
    [metabase.driver.sql-jdbc.connection :as sql-jdbc.conn]
    [metabase.driver.sql-jdbc.execute :as sql-jdbc.execute]
+   [metabase.driver.sql.test-util.unique-prefix :as sql.tu.unique-prefix]
+   [metabase.test :as mt]
    [metabase.test.data.impl :as data.impl]
    [metabase.test.data.interface :as tx]
    [metabase.test.data.sql :as sql.tx]
@@ -13,7 +15,8 @@
    [metabase.test.data.sql-jdbc.load-data :as load-data]
    [metabase.test.data.sql.ddl :as ddl]
    [metabase.util :as u]
-   [metabase.util.log :as log])
+   [metabase.util.log :as log]
+   [toucan2.core :as t2])
   (:import
    (java.sql PreparedStatement ResultSet)))
 
@@ -31,6 +34,8 @@
                               :type/Decimal        "DECIMAL"
                               :type/Float          "FLOAT"
                               :type/Integer        "INTEGER"
+                              ;; :type/Number is used by tx/id-field-type for Snowflake PKs
+                              :type/Number         "NUMBER"
                               :type/Text           "TEXT"
                               ;; 3 = millisecond precision. Default is allegedly 9 (nanosecond precision) according to
                               ;; https://docs.snowflake.com/en/sql-reference/data-types-datetime#time, but it seems like
@@ -39,24 +44,34 @@
                               :type/Time           "TIME(3)"}]
   (defmethod sql.tx/field-base-type->sql-type [:snowflake base-type] [_ _] sql-type))
 
+(defn- already-qualified? [database-name]
+  (and (string? database-name)
+       (or (str/starts-with? database-name "temp_")
+           (str/starts-with? database-name "sha_"))))
+
+(def ^:private to-cleanup (atom #{}))
+
 (defn qualified-db-name
-  "Prepend `database-name` with the hash of the db-def so we don't stomp on any other jobs running at the same
-  time."
-  [{:keys [database-name] :as db-def}]
-  (if (str/starts-with? database-name "sha_")
-    database-name
-    (str "sha_" (tx/hash-dataset db-def) "_" database-name)))
+  "Isolate db name so we don't stomp on any other jobs running at the same time."
+  [{:keys [database-name options] :as db-def}]
+  (cond (already-qualified? database-name) database-name
+        (:static options) (str "sha_" (tx/hash-dataset (update db-def :options
+                                                               dissoc :static))
+                               "_" database-name)
+        :else (let [name (sql.tu.unique-prefix/unique-prefix database-name)]
+                (swap! to-cleanup conj name)
+                name)))
 
 (defmethod tx/dbdef->connection-details :snowflake
   [_driver context dbdef]
   (merge
    {:account             (tx/db-test-env-var-or-throw :snowflake :account)
     :user                (tx/db-test-env-var-or-throw :snowflake :user)
-    :password            (tx/db-test-env-var-or-throw :snowflake :password)
+    :private-key-options "uploaded"
+    :private-key-value (mt/priv-key->base64-uri (tx/db-test-env-var-or-throw :snowflake :private-key))
+    :use-password false
     :additional-options  (tx/db-test-env-var :snowflake :additional-options)
-    ;; this lowercasing this value is part of testing the fix for
-    ;; https://github.com/metabase/metabase/issues/9511
-    :warehouse           (u/lower-case-en (tx/db-test-env-var-or-throw :snowflake :warehouse))
+    :warehouse           (tx/db-test-env-var-or-throw :snowflake :warehouse)
     ;;
     ;; SESSION parameters
     ;;
@@ -73,7 +88,7 @@
 ;; Snowflake requires you identify an object with db-name.schema-name.table-name
 (defmethod sql.tx/qualified-name-components :snowflake
   ([driver db-name]
-   (if (some-> db-name (str/starts-with? "sha_"))
+   (if (already-qualified? db-name)
      [db-name]
      [(qualified-db-name (tx/get-dataset-definition (or data.impl/*dbdef-used-to-create-db* (tx/default-dataset driver))))]))
   ([driver db-name table-name]
@@ -91,59 +106,87 @@
   []
   (sql-jdbc.conn/connection-details->spec :snowflake (tx/dbdef->connection-details :snowflake :server nil)))
 
-(defn- old-dataset-names
-  "Return a collection of all dataset names that are old
-   -- tracked that haven't been touched in 2 days or are not tracked and two days old"
-  []
-  (let [days-ago -2
-        ;; tracked UNION ALL untracked
-        query "(select name from metabase_test_tracking.PUBLIC.datasets
-                where accessed_at < dateadd(day, ?, current_timestamp()))
-               UNION All
-               (select database_name from metabase_test_tracking.information_schema.databases d
-                where d.database_name not in (select name from metabase_test_tracking.PUBLIC.datasets)
-                and d.database_name like 'sha_%'
-                and created < dateadd(day, ?, current_timestamp()))"]
-    (into [] (map :name) (jdbc/reducible-query (no-db-connection-spec) [query days-ago days-ago]))))
+;;; --------------------------------- Cleanup ----------------------------------
 
-(defn- delete-old-datasets!
-  "Delete any datasets prefixed by a date that is two days ago or older. See comments above."
-  []
-  ;; the printlns below are on purpose because we want them to show up when running tests, even on CI, to make sure this
-  ;; stuff is working correctly. We can change it to `log` in the future when we're satisfied everything is working as
-  ;; intended -- Cam
-  #_{:clj-kondo/ignore [:discouraged-var]}
-  (println "[Snowflake] deleting old datasets...")
-  (when-let [old-datasets (not-empty (old-dataset-names))]
-    (sql-jdbc.execute/do-with-connection-with-options
-     :snowflake
-     (no-db-connection-spec)
-     {:write? true}
-     (fn [^java.sql.Connection conn]
-       (with-open [stmt (.createStatement conn)]
-         (doseq [dataset-name old-datasets]
-           #_{:clj-kondo/ignore [:discouraged-var]}
-           (println "[Snowflake] Deleting old dataset:" dataset-name)
-           (try
-             (.execute stmt (format "DROP DATABASE IF EXISTS \"%s\";"
-                                    dataset-name))
-             (.execute stmt (format "delete from metabase_test_tracking.PUBLIC.datasets where name = '%s';"
-                                    dataset-name))
-             ;; if this fails for some reason it's probably just because some other job tried to delete the dataset at the
-             ;; same time. No big deal. Just log this and carry on trying to delete the other datasets. If we don't end up
-             ;; deleting anything it's not the end of the world because it won't affect our ability to run our tests
-             (catch Throwable e
-               #_{:clj-kondo/ignore [:discouraged-var]}
-               (println "[Snowflake] Error deleting old dataset:" (ex-message e))))))))))
+(defmethod tx/after-run :snowflake [_driver]
+  (let [spec (no-db-connection-spec)]
+    (doseq [name @to-cleanup]
+      (jdbc/execute! spec [(format "DROP DATABASE \"%s\";" name)]))))
 
-(defonce ^:private deleted-old-datasets?
-  (atom false))
+;;; --------------------------------- Orphan GC ----------------------------------
+;;;
+;;; Nightly sweep (`.github/workflows/test.cleanup-dwh-data.yml`). This replaces the old in-process cleanup, which
+;;; ran on every job and was disabled for causing hard-to-debug CI failures.
 
-(defn- delete-old-datasets-if-needed!
-  "Call [[delete-old-datasets!]], only if we haven't done so already."
+(defn- account
+  "Label for the Snowflake account under sweep, used as the `:server` key in the nightly report."
   []
-  (when (compare-and-set! deleted-old-datasets? false true)
-    (delete-old-datasets!)))
+  (tx/db-test-env-var-or-throw :snowflake :account))
+
+(defn- drop-orphan [conn server dry-run? name]
+  (try
+    (when-not dry-run?
+      (jdbc/execute! conn [(format "DROP DATABASE \"%s\";" name)]))
+    {:server server :name name :status :deleted}
+    (catch Exception e
+      {:server server :name name :status :error :error (ex-message e)})))
+
+(defn- gc-orphans! [conn {:keys [hours dry-run?]}]
+  (with-open [^PreparedStatement stmt (sql-jdbc.execute/prepared-statement
+                                       :snowflake conn
+                                       "SHOW TERSE DATABASES STARTS WITH 'temp_'" [])
+              ^ResultSet rs (sql-jdbc.execute/execute-prepared-statement! :snowflake stmt)]
+    (->> (resultset-seq rs)
+         (filter (partial sql.tu.unique-prefix/old-temp-dataset? hours))
+         (mapv (partial drop-orphan conn (account) dry-run?)))))
+
+(defn- drop-tracked-dataset [conn server dry-run? {:keys [database_name]}]
+  (try
+    (when-not dry-run?
+      (jdbc/execute! conn [(format "DROP DATABASE IF EXISTS \"%s\";" database_name)])
+      (jdbc/execute! conn ["DELETE FROM metabase_test_tracking.PUBLIC.datasets where name = ?"
+                           database_name]))
+    {:server server :name database_name :status :deleted}
+    (catch Exception e
+      {:server server :name database_name :status :error :error (ex-message e)})))
+
+(def ^:private tracked-sql
+  (str "select d.database_name
+          from metabase_test_tracking.information_schema.databases d
+          left join metabase_test_tracking.PUBLIC.datasets t on t.name = d.database_name
+         where (startswith(d.database_name, 'isolate_')
+                           and d.created < dateadd(hour, 0 - ?, current_timestamp()))
+            or (startswith(d.database_name, 'sha_')
+                           and coalesce(t.accessed_at, d.created) < dateadd(hour, 0 - ?, current_timestamp()))
+         order by d.created"))
+
+(defn- gc-tracked-datasets!
+  "Datasets created by CI runs from older versions still use the tracking table. Until
+  we stop supporting version 58 and 63 we'll have to keep GCing these, but we handle them
+  in a separate function so they'll be easier to delete later."
+  [conn {:keys [hours dry-run?]}]
+  (with-open [^PreparedStatement stmt (sql-jdbc.execute/prepared-statement
+                                       :snowflake conn
+                                       tracked-sql [hours hours])
+              ^ResultSet rs (sql-jdbc.execute/execute-prepared-statement! :snowflake stmt)]
+    (->> (resultset-seq rs)
+         (mapv (partial drop-tracked-dataset conn (account) dry-run?)))))
+
+(defmethod tx/gc-orphans! :snowflake
+  [_driver options]
+  (sql-jdbc.execute/do-with-connection-with-options
+   :snowflake
+   (no-db-connection-spec)
+   {:write? true}
+   (fn [conn]
+     (concat (gc-orphans! conn options)
+             (and (:tracked? options) (gc-tracked-datasets! conn options))))))
+
+(defmethod tx/count-datasets :snowflake
+  [_driver]
+  {(account) (:count (first (jdbc/query (no-db-connection-spec)
+                                        ["select count(*) as count
+                                          from metabase_test_tracking.information_schema.databases"])))})
 
 (defn- set-current-user-timezone!
   [timezone]
@@ -159,8 +202,6 @@
   [driver db-def & options]
   ;; qualify the DB name with the unique prefix
   (let [db-def (assoc db-def :database-name (qualified-db-name db-def))]
-    ;; clean up any old datasets that should be deleted
-    (delete-old-datasets-if-needed!)
     ;; Snowflake by default uses America/Los_Angeles timezone. See https://docs.snowflake.com/en/sql-reference/parameters#timezone.
     ;; We expect UTC in tests. Hence fixing [[metabase.query-processor.timezone/database-timezone-id]] (PR #36413)
     ;; produced lot of failures. Following expression addresses that, setting timezone for the test user.
@@ -170,11 +211,14 @@
 
 (defmethod tx/destroy-db! :snowflake
   [_driver dbdef]
+  (when (= "test-data" (:database-name dbdef))
+    (throw (Exception. "tried to delete test-data dataset.")))
   (let [database-name (qualified-db-name dbdef)
         sql           (format "DROP DATABASE \"%s\";" database-name)]
     (log/infof "[Snowflake] %s" sql)
-    (jdbc/query (no-db-connection-spec)
-                ["DELETE FROM metabase_test_tracking.PUBLIC.datasets where name = ?" database-name])
+    ;; test-harness cleanup output goes to the CI console, not the app log
+    #_{:clj-kondo/ignore [:discouraged-var]}
+    (println "[Snowflake] destroy database " database-name (:database-name dbdef))
     (jdbc/execute! (no-db-connection-spec) [sql])))
 
 ;; For reasons I don't understand the Snowflake JDBC driver doesn't seem to work when trying to use parameterized
@@ -191,54 +235,22 @@
 
 (defmethod sql.tx/pk-sql-type :snowflake [_] "INTEGER AUTOINCREMENT")
 
-(defmethod tx/id-field-type :snowflake [_] :type/Number)
+(defmethod tx/id-field-type :snowflake [_] :type/BigInteger)
 
 (defmethod load-data/row-xform :snowflake
   [_driver _dbdef tabledef]
   (load-data/maybe-add-ids-xform tabledef))
 
-(defmethod tx/aggregate-column-info :snowflake
-  ([driver ag-type]
-   (merge
-    ((get-method tx/aggregate-column-info ::tx/test-extensions) driver ag-type)
-    (when (#{:count :cum-count} ag-type)
-      {:base_type :type/Number})))
+;; Load each chunk without wrapping it in a transaction: on Snowflake `setAutoCommit` and `commit` are each a server
+;; round trip, so the default per-chunk transaction turns one INSERT into three. [[load-data/create-db!]] has already
+;; put this connection in autocommit mode, so the rows still land. No atomicity is lost - every chunk committed
+;; separately anyway, and [[dataset-rows-ok?!]] is what catches a half-loaded dataset and forces a reload.
+(defmethod load-data/do-insert! :snowflake
+  [driver conn table-identifier rows]
+  (load-data/do-insert*! driver conn table-identifier rows {:transaction? false}))
 
-  ([driver ag-type field]
-   (merge
-    ((get-method tx/aggregate-column-info ::tx/test-extensions) driver ag-type field)
-    (when (#{:count :cum-count} ag-type)
-      {:base_type :type/Number}))))
-
-(defn- setup-tracking-db!
-  "Idempotently create test tracking database"
-  [conn driver]
-  (with-open [^PreparedStatement setup-1 (sql-jdbc.execute/prepared-statement
-                                          driver
-                                          conn
-                                          "CREATE DATABASE IF NOT EXISTS metabase_test_tracking;"
-                                          [])
-              ^PreparedStatement setup-2 (sql-jdbc.execute/prepared-statement
-                                          driver
-                                          conn
-                                          "CREATE TABLE IF NOT EXISTS metabase_test_tracking.PUBLIC.datasets (hash TEXT, name TEXT, accessed_at TIMESTAMP_TZ, access_note TEXT)"
-                                          [])
-              ^ResultSet _ (sql-jdbc.execute/execute-prepared-statement! driver setup-1)
-              ^ResultSet _ (sql-jdbc.execute/execute-prepared-statement! driver setup-2)]
-    nil))
-
-(defn- dataset-tracked?!
-  [conn driver db-def]
-  (with-open [^PreparedStatement stmt (sql-jdbc.execute/prepared-statement
-                                       driver
-                                       conn
-                                       "SELECT true as tracked FROM metabase_test_tracking.PUBLIC.datasets WHERE hash = ? and name = ?"
-                                       [(tx/hash-dataset db-def) (qualified-db-name db-def)])
-              ^ResultSet rs (sql-jdbc.execute/execute-prepared-statement! driver stmt)]
-    (some-> rs
-            resultset-seq
-            first
-            :tracked)))
+(defmethod sql.tx/generated-column-sql :snowflake [_ expr]
+  (format "AS (%s)" expr))
 
 (defn- database-exists?!
   [conn driver db-def]
@@ -250,6 +262,25 @@
               ^ResultSet rs (sql-jdbc.execute/execute-prepared-statement! driver stmt)]
     (some-> rs resultset-seq first)))
 
+(defn- dataset-rows-ok?! [conn {:keys [table-definitions] :as dataset}]
+  ;; sometimes for unknown reasons we get datasets double- or triple-inserted
+  ;; and we have not been able to determine why. if a dataset has too many rows,
+  ;; treat it as if it hasn't been loaded and force it to be reloaded.
+  (with-open [^PreparedStatement stmt (sql-jdbc.execute/prepared-statement
+                                       :snowflake conn
+                                       (format "SHOW TABLES IN DATABASE \"%s\""
+                                               (qualified-db-name dataset)) [])
+              ^ResultSet rs (sql-jdbc.execute/execute-prepared-statement! :snowflake stmt)]
+    (let [table-names (set (map :table-name table-definitions))
+          db-tables (->> (resultset-seq rs)
+                         ;; there are some other tables of unknown source in there
+                         ;; like "g_inspector_ji_f9f65557_e249_4543_ab34_9e"
+                         (filter #(table-names (:name %))))
+          db-row-counts (zipmap (map :name db-tables) (map :rows db-tables))
+          dataset-row-counts (zipmap (map :table-name table-definitions)
+                                     (map (comp count :rows) table-definitions))]
+      (= db-row-counts dataset-row-counts))))
+
 (defmethod tx/dataset-already-loaded? :snowflake
   [driver db-def]
   ;; check and see if ANY tables are loaded for the current catalog
@@ -258,30 +289,8 @@
    (sql-jdbc.conn/connection-details->spec driver (tx/dbdef->connection-details driver :server db-def))
    {:write? false}
    (fn [^java.sql.Connection conn]
-     (setup-tracking-db! conn driver)
-     (and
-      (dataset-tracked?! conn driver db-def)
-      (database-exists?! conn driver db-def)))))
-
-(defmethod tx/track-dataset :snowflake
-  [driver db-def]
-  (sql-jdbc.execute/do-with-connection-with-options
-   driver
-   (sql-jdbc.conn/connection-details->spec driver (tx/dbdef->connection-details driver :server db-def))
-   {:write? false}
-   (fn [^java.sql.Connection conn]
-     (with-open [^PreparedStatement stmt (sql-jdbc.execute/prepared-statement
-                                          driver
-                                          conn
-                                          (str "MERGE INTO metabase_test_tracking.PUBLIC.datasets d"
-                                               "  USING (select ? as hash, ? as name, current_timestamp() as accessed_at, ? as access_note) as n on d.hash = n.hash"
-                                               "  WHEN MATCHED THEN UPDATE SET d.accessed_at = n.accessed_at, d.access_note = n.access_note"
-                                               "  WHEN NOT MATCHED THEN INSERT (hash,name, accessed_at, access_note) VALUES (n.hash, n.name, n.accessed_at, n.access_note)")
-                                          [(tx/hash-dataset db-def)
-                                           (qualified-db-name db-def)
-                                           (tx/tracking-access-note)])
-                 ^ResultSet rs (sql-jdbc.execute/execute-prepared-statement! driver stmt)]
-       (some-> rs resultset-seq doall)))))
+     (and (database-exists?! conn driver db-def)
+          (dataset-rows-ok?! conn db-def)))))
 
 (defn drop-if-exists-and-create-roles!
   [driver details roles]
@@ -354,28 +363,128 @@
     (jdbc/execute! spec (format "GRANT ROLE %s TO USER %s" "ACCOUNTADMIN" db-user))))
 
 (comment
-  (old-dataset-names)
-  (into [] (jdbc/reducible-query (no-db-connection-spec) ["select * from metabase_test_tracking.PUBLIC.datasets"]))
-  ;; Tracked databases ordered by age
-  (->> ["select d.name, d.accessed_at, i.created, timestampdiff('minute', i.created, d.accessed_at) as diff, timestampdiff('minute', i.created, current_timestamp()) as age
-         from metabase_test_tracking.PUBLIC.datasets d
-         inner join metabase_test_tracking.information_schema.databases i on i.database_name = d.name
-         order by 5 asc"]
-       (jdbc/reducible-query (no-db-connection-spec))
-       (into [] (map (juxt :name :diff :age :accessed_at :created))))
+  (let [test-data (tx/get-dataset-definition (data.impl/resolve-dataset-definition
+                                              *ns* 'test-data))]
+    (tx/dataset-already-loaded? :snowflake test-data))
+  (jdbc/query (no-db-connection-spec) ["SELECT query_text, end_time
+                                        FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+                                        WHERE query_text LIKE 'DROP DATABASE %'
+                                        ORDER BY end_time DESC limit 64"]))
 
-  ;; Tracked DBs that are not in snowflake
-  (->> ["select name, accessed_at from metabase_test_tracking.PUBLIC.datasets d
-       where d.name not in (select database_name from metabase_test_tracking.information_schema.databases)
-       order by accessed_at"]
-       (jdbc/reducible-query (no-db-connection-spec))
-       (into [] (map (juxt :name :accessed_at))))
+(defmethod sql.tx/session-schema :snowflake [_driver] "PUBLIC")
 
-  ;; DBs in snowflake that are not tracked
-  (->> ["select database_name, created from metabase_test_tracking.information_schema.databases  d
-         where d.database_name not in (select name from metabase_test_tracking.PUBLIC.datasets)
-         and d.database_name like 'sha_%'
-         -- and created < dateadd(day, -2, current_timestamp())
-         order by created"]
-       (jdbc/reducible-query (no-db-connection-spec))
-       (into [] (map (juxt :database_name :created)))))
+;;; ------------------------------------------------ Fake Sync Support ------------------------------------------------
+
+;; Enable fake sync for Snowflake on feature branches.
+;; Fake sync skips network calls to the database for metadata sync, which saves significant CI time.
+;; On master/release branches, use real sync to catch any sync regressions.
+(defmethod driver/database-supports? [:snowflake :test/use-fake-sync]
+  [_driver _feature _database]
+  (not (tx/on-master-or-release-branch?)))
+
+;; too much contention here causing unreliable tests
+(defmethod driver/database-supports? [:snowflake :test/dynamic-dataset-loading]
+  [_driver _feature _database] false)
+
+(defmethod tx/fake-sync-schema :snowflake
+  [_driver]
+  "PUBLIC")
+
+(defmethod tx/fake-sync-table-name :snowflake
+  [_driver _database-name table-name]
+  ;; Snowflake uses separate databases per dataset, so table names are NOT prefixed
+  ;; with the database name. Unlike Redshift (which uses test_data_venues), Snowflake
+  ;; tables are just "venues" within the sha_xxx_test_data database.
+  table-name)
+
+(defmethod tx/fake-sync-database-type :snowflake
+  [_driver base-type]
+  ;; Return the database_type as Snowflake's query processor expects it.
+  ;; The QP uses lowercase types without precision (e.g., "time" not "TIME(3)").
+  ;; Snowflake normalizes types: TEXT->VARCHAR, FLOAT->DOUBLE, INTEGER->NUMBER
+  ;;
+  ;; For timezone columns: DDL uses TIMESTAMP_TZ, but DB reports as TIMESTAMPTZ
+  (case base-type
+    :type/Text                   "VARCHAR"
+    :type/Float                  "DOUBLE"
+    :type/Integer                "NUMBER"
+    :type/BigInteger             "NUMBER"
+    :type/Number                 "NUMBER"
+    :type/Boolean                "BOOLEAN"
+    :type/Date                   "date"
+    :type/DateTime               "timestampntz"
+    :type/DateTimeWithTZ         "timestamptz"   ; DDL: TIMESTAMP_TZ, reported as: TIMESTAMPTZ
+    :type/DateTimeWithLocalTZ    "timestamptz"
+    :type/DateTimeWithZoneID     "timestamptz"
+    :type/DateTimeWithZoneOffset "timestamptz"
+    :type/Time                   "time"
+    :type/TimeWithLocalTZ        "time"
+    :type/TimeWithZoneOffset     "time"
+    ;; For other types, use the creation type
+    (sql.tx/field-base-type->sql-type :snowflake base-type)))
+
+(defmethod tx/fake-sync-base-type :snowflake
+  [_driver base-type]
+  ;; Snowflake normalizes some types. Real sync maps them to specific base_types,
+  ;; so fake-sync must match what sync would produce:
+  ;;
+  ;; - `(BIG)INTEGER` -> `NUMBER` + JDBC Type `java.sql.Types/BIGINT` -> `:type/BigInteger` (as of #67609)
+  ;;
+  ;; - TimeWithLocalTZ/TimeWithZoneOffset -> TIME -> :type/Time (Snowflake only has one TIME type)
+  ;;
+  ;; - DateTimeWithTZ/DateTimeWithZoneID/DateTimeWithZoneOffset -> TIMESTAMP_TZ -> :type/DateTimeWithLocalTZ
+  ;;   (Note: :type/DateTimeWithTZ -> TIMESTAMP_TZ -> sync as TIMESTAMPTZ -> :type/DateTimeWithLocalTZ)
+  (case base-type
+    :type/Integer                :type/BigInteger
+    :type/BigInteger             :type/BigInteger
+    :type/TimeWithLocalTZ        :type/Time
+    :type/TimeWithZoneOffset     :type/Time
+    :type/DateTimeWithTZ         :type/DateTimeWithLocalTZ
+    :type/DateTimeWithZoneID     :type/DateTimeWithLocalTZ
+    :type/DateTimeWithZoneOffset :type/DateTimeWithLocalTZ
+    ;; Other types are unchanged
+    base-type))
+
+(defmethod tx/fake-sync-native-base-type :snowflake
+  [_driver native-type]
+  ;; Map native Snowflake type strings to their base_type.
+  ;; These must match what sql-jdbc.sync/database-type->base-type returns for Snowflake.
+  ;; See metabase.driver.snowflake for the full mapping.
+  (case (some-> native-type u/upper-case-en)
+    ;; Timestamp types
+    "TIMESTAMPTZ"  :type/DateTimeWithLocalTZ
+    "TIMESTAMPLTZ" :type/DateTimeWithTZ
+    "TIMESTAMPNTZ" :type/DateTime
+    "TIMESTAMP"    :type/DateTime
+    ;; Other common types
+    "VARCHAR"      :type/Text
+    "TEXT"         :type/Text
+    "NUMBER"       :type/Number
+    "FLOAT"        :type/Float
+    "DOUBLE"       :type/Float
+    "BOOLEAN"      :type/Boolean
+    "DATE"         :type/Date
+    "TIME"         :type/Time
+    ;; Default: unknown types get :type/*
+    :type/*))
+
+;; a very common failure for snowflake is for tests to accidentally create tables
+;; in static datasets; let's see if we can prevent that from happening.
+(defmethod driver/create-table! :snowflake
+  [driver database-id table-name & args]
+  (let [dataset-name (data.impl/database-source-dataset-name
+                      (t2/select-one [:model/Database :settings] :id database-id))
+        dataset (try
+                  (tx/get-dataset-definition
+                   (data.impl/resolve-dataset-definition
+                    'metabase.test.data.dataset-definitions
+                    (symbol dataset-name)))
+                  ;; dynamic datasets won't always resolve this way
+                  (catch Exception _))]
+    (if (or (not (:static (:options dataset)))
+            (get (:table-definitions dataset) table-name))
+      (apply (get-method driver/create-table! :sql-jdbc) driver database-id table-name args)
+      (throw (ex-info "tried to create table in static dataset"
+                      {:database-id database-id
+                       :database-name (:database-name dataset)
+                       :table-name table-name})))))

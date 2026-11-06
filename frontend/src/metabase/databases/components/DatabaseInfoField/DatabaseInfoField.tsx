@@ -1,4 +1,6 @@
-import Markdown from "metabase/common/components/Markdown";
+import type { JSX } from "react";
+
+import { Markdown } from "metabase/common/components/Markdown";
 import { Flex } from "metabase/ui";
 
 export interface DatabaseInfoFieldProps {
@@ -10,8 +12,8 @@ const DatabaseInfoField = ({
 }: DatabaseInfoFieldProps): JSX.Element | null => {
   return placeholder ? (
     <Flex
-      bg="bg-light"
-      c="text-medium"
+      bg="background_page-secondary"
+      c="text-secondary"
       data-testid="app-banner"
       mb="sm"
       p="0.75rem"

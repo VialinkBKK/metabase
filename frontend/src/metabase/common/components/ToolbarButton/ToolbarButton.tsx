@@ -1,25 +1,39 @@
 import type { ButtonHTMLAttributes, MouseEvent, Ref } from "react";
 import { forwardRef } from "react";
 
-import type { ActionIconProps, IconName, TooltipProps } from "metabase/ui";
+import type { ActionIconProps, IconProps, TooltipProps } from "metabase/ui";
 import { ActionIcon, Box, Icon, Tooltip } from "metabase/ui";
+import type { IconName } from "metabase-types/api";
 
 export type ToolbarButtonProps = {
   icon?: IconName;
-  "aria-label": string;
-  tooltipLabel?: TooltipProps["label"];
+  iconProps?: Partial<IconProps>;
+  tooltipPosition?: TooltipProps["position"];
   visibleOnSmallScreen?: boolean;
   isActive?: boolean;
   hasBackground?: boolean;
 } & ActionIconProps &
+  (
+    | {
+        "aria-label": string;
+        tooltipLabel?: TooltipProps["label"];
+      }
+    | {
+        // Allow `aria-label` to be optional if `tooltipLabel` is provided as a string, so we don't need to provide the same string twice.
+        "aria-label"?: string;
+        tooltipLabel: string;
+      }
+  ) &
   ButtonHTMLAttributes<HTMLButtonElement>;
 
 export const ToolbarButton = forwardRef(function ToolbarButton(
   {
     icon = "unknown",
+    iconProps,
     "aria-label": ariaLabel,
     onClick,
     tooltipLabel,
+    tooltipPosition,
     visibleOnSmallScreen = true,
     isActive = false,
     hasBackground = true,
@@ -38,27 +52,25 @@ export const ToolbarButton = forwardRef(function ToolbarButton(
 
   const actionButton = (
     <ActionIcon
+      variant="subtle"
       data-testid="toolbar-button"
-      data-is-active={isActive}
+      aria-pressed={isActive || undefined}
+      selected={isActive}
       ref={ref}
       display={{
         base: visibleOnSmallScreen ? "flex" : "none",
         sm: "flex",
       }}
-      size="2rem"
-      variant="viewHeader"
-      aria-label={ariaLabel}
+      aria-label={
+        ariaLabel ??
+        (typeof tooltipLabel === "string" ? tooltipLabel : undefined)
+      }
       onClick={handleButtonClick}
       bg={hasBackground ? undefined : "transparent"}
       disabled={disabled}
       {...actionIconProps}
     >
-      {children ?? (
-        <Icon
-          name={icon}
-          color={isActive ? "var(--mb-color-brand)" : undefined}
-        />
-      )}
+      {children ?? <Icon name={icon} {...iconProps} />}
     </ActionIcon>
   );
 
@@ -66,7 +78,7 @@ export const ToolbarButton = forwardRef(function ToolbarButton(
     return actionButton;
   }
   return (
-    <Tooltip label={tooltipLabel}>
+    <Tooltip label={tooltipLabel} position={tooltipPosition}>
       <Box>{actionButton}</Box>
     </Tooltip>
   );

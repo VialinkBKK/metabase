@@ -1,10 +1,10 @@
 import { c, t } from "ttag";
 
-import ExternalLink from "metabase/common/components/ExternalLink";
+import upsellCloudImage from "assets/img/upsell-cloud.png?url";
+import { ExternalLink } from "metabase/common/components/ExternalLink";
+import { UpsellBigCard } from "metabase/common/components/upsells/components";
+import S from "metabase/common/components/upsells/components/Upsells.module.css";
 import { useHasTokenFeature } from "metabase/common/hooks";
-
-import { UpsellBigCard } from "./components";
-import S from "./components/Upsells.module.css";
 
 export const UpsellCloud = ({
   source,
@@ -26,7 +26,7 @@ export const UpsellCloud = ({
       buttonText={t`Try for free`}
       source={source}
       onClick={onOpenModal}
-      illustrationSrc="app/assets/img/upsell-cloud.png"
+      illustrationSrc={upsellCloudImage}
     >
       {c("'restores' and 'upgrades' are nouns in plural in this context")
         .t`Get automatic backups, restores, and upgrades, built-in network monitoring, unlimited expert help from engineers and more.`}{" "}

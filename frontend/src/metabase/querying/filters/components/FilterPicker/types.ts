@@ -1,4 +1,3 @@
-import type { DefinedClauseName } from "metabase/querying/expressions";
 import type * as Lib from "metabase-lib";
 
 export type FilterPickerWidgetProps = {
@@ -12,6 +11,7 @@ export type FilterPickerWidgetProps = {
   withSubmitButton: boolean;
   onChange: (filter: Lib.ExpressionClause, opts: FilterChangeOpts) => void;
   onBack?: () => void;
+  readOnly?: boolean;
 };
 
 export type FilterChangeOpts = {
@@ -36,6 +36,6 @@ export type SegmentListItem = Lib.SegmentDisplayInfo & {
 
 export type ExpressionClauseItem = {
   type: "expression-clause";
-  clause: DefinedClauseName;
+  clause: Lib.DefinedClauseName;
   displayName: string;
 };

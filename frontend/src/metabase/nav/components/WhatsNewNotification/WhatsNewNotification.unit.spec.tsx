@@ -1,3 +1,4 @@
+import userEvent from "@testing-library/user-event";
 import fetchMock from "fetch-mock";
 
 import { setupEnterprisePlugins } from "__support__/enterprise";
@@ -7,8 +8,9 @@ import {
   setupSettingsEndpoints,
 } from "__support__/server-mocks";
 import { mockSettings } from "__support__/settings";
+import { createMockState } from "__support__/state";
 import { renderWithProviders, screen, waitFor } from "__support__/ui";
-import * as domUtils from "metabase/lib/dom";
+import * as iframeUtils from "metabase/utils/iframe";
 import type { VersionInfo, VersionInfoRecord } from "metabase-types/api"; // Add VersionInfo
 import {
   createMockSettings,
@@ -17,7 +19,6 @@ import {
   createMockVersionInfo,
   createMockVersionInfoRecord as mockVersion,
 } from "metabase-types/api/mocks";
-import { createMockState } from "metabase-types/store/mocks";
 
 import { WhatsNewNotification } from "./WhatsNewNotification";
 
@@ -52,7 +53,7 @@ const setup = ({
   versions?: VersionInfoRecord[];
 } = {}) => {
   // Added default empty object
-  jest.spyOn(domUtils, "isWithinIframe").mockReturnValue(isEmbedded);
+  jest.spyOn(iframeUtils, "isWithinIframe").mockReturnValue(isEmbedded);
 
   const versionMock = createMockVersion({ tag: currentVersionTag });
   const [latest, ...older] = versions;
@@ -154,26 +155,25 @@ describe("WhatsNewNotification", () => {
       const dismissButton = await screen.findByRole("button", {
         name: /close/i,
       }); // Use the icon name if no specific label
-      dismissButton.click();
+      await userEvent.click(dismissButton);
 
       await waitFor(() => {
-        expect(fetchMock.called(LAST_ACK_SETTINGS_URL)).toBe(true);
+        expect(fetchMock.callHistory.called(LAST_ACK_SETTINGS_URL)).toBe(true);
       });
 
       await waitFor(() => {
-        const fetchOptions = fetchMock.lastOptions(LAST_ACK_SETTINGS_URL);
-        expect(fetchOptions?.method).toBe("PUT");
+        const calls = fetchMock.callHistory.calls(LAST_ACK_SETTINGS_URL);
+        const lastCall = calls[calls.length - 1];
+        expect(lastCall?.request?.method).toBe("PUT");
       });
 
       await waitFor(async () => {
-        const fetchOptions = fetchMock.lastOptions(LAST_ACK_SETTINGS_URL);
-        expect(
-          JSON.parse(await (fetchOptions?.body as Promise<string>)),
-        ).toEqual({ value: currentVersionTag });
+        const lastCall = fetchMock.callHistory.lastCall(LAST_ACK_SETTINGS_URL);
+        // Unjustified type cast. FIXME
+        expect(JSON.parse(lastCall?.options?.body as string)).toEqual({
+          value: currentVersionTag,
+        });
       });
-
-      // Clean up fetchMock after the test
-      fetchMock.reset();
     });
 
     it("should link the most recent eligible release notes", async () => {

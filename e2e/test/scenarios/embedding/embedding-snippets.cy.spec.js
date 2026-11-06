@@ -24,11 +24,16 @@ tokens.forEach((token) => {
       H.activateToken(token);
     });
 
-    it("dashboard should have the correct embed snippet", () => {
+    it("dashboard and question should have the correct embed snippets", () => {
       const defaultDownloadsValue =
         token === "pro-self-hosted" ? true : undefined;
+
+      cy.log("Dashboard");
       H.visitDashboard(ORDERS_DASHBOARD_ID);
-      H.openStaticEmbeddingModal({ acceptTerms: false });
+      H.openLegacyStaticEmbeddingModal({
+        resource: "dashboard",
+        resourceId: ORDERS_DASHBOARD_ID,
+      });
 
       H.modal().within(() => {
         cy.findByText(
@@ -52,25 +57,25 @@ tokens.forEach((token) => {
           );
 
         cy.findAllByTestId("embed-backend-select-button")
-          .should("contain", "Node.js")
+          .should("have.value", "Node.js")
           .click();
       });
 
-      H.popover()
+      H.selectDropdown()
         .should("contain", "Node.js")
         .and("contain", "Ruby")
         .and("contain", "Python")
         .and("contain", "Clojure");
 
-      // eslint-disable-next-line no-unsafe-element-filtering
+      // eslint-disable-next-line metabase/no-unsafe-element-filtering
       codeBlock().last().should("have.text", IFRAME_CODE);
 
       H.modal()
         .findAllByTestId("embed-frontend-select-button")
-        .should("contain", "Pug / Jade")
+        .should("have.value", "Pug / Jade")
         .click();
 
-      H.popover()
+      H.selectDropdown()
         .should("contain", "Mustache")
         .and("contain", "Pug / Jade")
         .and("contain", "ERB")
@@ -80,7 +85,7 @@ tokens.forEach((token) => {
         cy.findByRole("tab", { name: "Look and Feel" }).click();
 
         // set transparent background metabase#23477
-        cy.findByText("Dashboard background").click();
+        cy.findByLabelText("Dashboard background").click();
         codeBlock()
           .first()
           .invoke("text")
@@ -96,8 +101,8 @@ tokens.forEach((token) => {
 
         if (token === "pro-self-hosted") {
           // Disable both download options
-          cy.findByText("Export to PDF").click();
-          cy.findByText("Results (csv, xlsx, json, png)").click();
+          cy.findByLabelText("Export to PDF").click();
+          cy.findByLabelText("Results (csv, xlsx, json, png)").click();
 
           codeBlock()
             .first()
@@ -121,13 +126,13 @@ tokens.forEach((token) => {
           highlightedTexts().should("have.length", 1);
         }
       });
-    });
 
-    it("question should have the correct embed snippet", () => {
-      const defaultDownloadsValue =
-        token === "pro-self-hosted" ? true : undefined;
+      cy.log("Question");
       H.visitQuestion(ORDERS_QUESTION_ID);
-      H.openStaticEmbeddingModal({ acceptTerms: false });
+      H.openLegacyStaticEmbeddingModal({
+        resource: "question",
+        resourceId: ORDERS_QUESTION_ID,
+      });
 
       H.modal().within(() => {
         cy.findByText(
@@ -153,7 +158,7 @@ tokens.forEach((token) => {
 
         // hide download button for pro/enterprise users metabase#23477
         if (token === "pro-self-hosted") {
-          cy.findByText("Download (csv, xlsx, json, png)").click();
+          cy.findByLabelText("Download (csv, xlsx, json, png)").click();
 
           codeBlock()
             .first()
@@ -169,11 +174,11 @@ tokens.forEach((token) => {
         }
 
         cy.findByTestId("embed-backend-select-button")
-          .should("contain", "Node.js")
+          .should("have.value", "Node.js")
           .click();
       });
 
-      H.popover()
+      H.selectDropdown()
         .should("contain", "Node.js")
         .and("contain", "Ruby")
         .and("contain", "Python")

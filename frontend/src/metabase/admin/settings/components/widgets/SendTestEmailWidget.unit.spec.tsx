@@ -7,6 +7,7 @@ import {
   setupPropertiesEndpoints,
   setupSettingsEndpoints,
 } from "__support__/server-mocks";
+import { createMockSettingsState } from "__support__/state";
 import { renderWithProviders, screen, waitFor } from "__support__/ui";
 import { UndoListing } from "metabase/common/components/UndoListing";
 import type { SettingKey } from "metabase-types/api";
@@ -15,7 +16,6 @@ import {
   createMockSettings,
   createMockTokenFeatures,
 } from "metabase-types/api/mocks";
-import { createMockSettingsState } from "metabase-types/store/mocks";
 
 import { SendTestEmailWidget } from "./SendTestEmailWidget";
 
@@ -37,6 +37,7 @@ const setup = async (props: {
   setupPropertiesEndpoints(settings);
   setupSettingsEndpoints(
     Object.entries(settings).map(([key, value]) =>
+      // Unjustified type cast. FIXME
       createMockSettingDefinition({ key: key as SettingKey, value }),
     ),
   );
@@ -79,9 +80,7 @@ describe("SendTestEmailWidget", () => {
   it("should show an error message if the test email errors", async () => {
     await setup({ emailConfigured: true });
 
-    fetchMock.post("path:/api/email/test", 400, {
-      overwriteRoutes: true,
-    });
+    fetchMock.modifyRoute("email-test", { response: 400 });
 
     await userEvent.click(
       screen.getByRole("button", { name: "Send test email" }),
@@ -91,6 +90,10 @@ describe("SendTestEmailWidget", () => {
       const toasts = screen.getAllByLabelText("warning icon");
       expect(toasts).toHaveLength(1);
     });
+    expect(screen.getByTestId("toast-undo")).toHaveAttribute(
+      "data-variant",
+      "negative",
+    );
 
     expect(
       screen.getByRole("alert", { name: "Error sending test email" }),

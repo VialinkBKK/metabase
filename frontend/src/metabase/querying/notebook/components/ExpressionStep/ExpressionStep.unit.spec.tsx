@@ -1,8 +1,13 @@
 import userEvent from "@testing-library/user-event";
 
-import { renderWithProviders, screen, within } from "__support__/ui";
+import { setupDatabaseEndpoints } from "__support__/server-mocks";
+import { act, renderWithProviders, screen, within } from "__support__/ui";
 import * as Lib from "metabase-lib";
-import { createQuery, createQueryWithClauses } from "metabase-lib/test-helpers";
+import { DEFAULT_TEST_QUERY, SAMPLE_PROVIDER } from "metabase-lib/test-helpers";
+import {
+  ORDERS_ID,
+  createSampleDatabase,
+} from "metabase-types/api/mocks/presets";
 
 import { createMockNotebookStep } from "../../test-utils";
 
@@ -12,7 +17,9 @@ interface SetupOpts {
   query?: Lib.Query;
 }
 
-function setup({ query = createQuery() }: SetupOpts = {}) {
+function setup({
+  query = Lib.createTestQuery(SAMPLE_PROVIDER, DEFAULT_TEST_QUERY),
+}: SetupOpts = {}) {
   const updateQuery = jest.fn();
 
   const step = createMockNotebookStep({
@@ -26,9 +33,12 @@ function setup({ query = createQuery() }: SetupOpts = {}) {
     return recentQuery;
   }
 
+  setupDatabaseEndpoints(createSampleDatabase());
+
   renderWithProviders(
     <ExpressionStep
       step={step}
+      // @ts-expect-error unit test
       color="#93A1AB"
       stageIndex={step.stageIndex}
       query={step.query}
@@ -47,9 +57,11 @@ describe("Notebook Editor > Expression Step", () => {
 
     await userEvent.click(screen.getByRole("img", { name: "add icon" }));
 
-    const input = screen.getByTestId("custom-expression-query-editor");
+    const input = await screen.findByTestId("custom-expression-query-editor");
     await userEvent.type(input, "1 + 1");
-    input.blur();
+    await act(async () => {
+      input.blur();
+    });
 
     await userEvent.type(
       screen.getByTestId("expression-name"),
@@ -65,8 +77,28 @@ describe("Notebook Editor > Expression Step", () => {
   });
 
   it("should handle updating existing expression", async () => {
-    const query = createQueryWithClauses({
-      expressions: [{ name: "old name", operator: "+", args: [1, 1] }],
+    const query = Lib.createTestQuery(SAMPLE_PROVIDER, {
+      stages: [
+        {
+          source: {
+            type: "table",
+            id: ORDERS_ID,
+          },
+          expressions: [
+            {
+              name: "old name",
+              value: {
+                type: "operator",
+                operator: "+",
+                args: [
+                  { type: "literal", value: 1 },
+                  { type: "literal", value: 1 },
+                ],
+              },
+            },
+          ],
+        },
+      ],
     });
     const { getRecentQuery } = setup({ query });
 
@@ -85,8 +117,28 @@ describe("Notebook Editor > Expression Step", () => {
   });
 
   it("should handle removing existing expression", async () => {
-    const query = createQueryWithClauses({
-      expressions: [{ name: "expression name", operator: "+", args: [1, 1] }],
+    const query = Lib.createTestQuery(SAMPLE_PROVIDER, {
+      stages: [
+        {
+          source: {
+            type: "table",
+            id: ORDERS_ID,
+          },
+          expressions: [
+            {
+              name: "expression name",
+              value: {
+                type: "operator",
+                operator: "+",
+                args: [
+                  { type: "literal", value: 1 },
+                  { type: "literal", value: 1 },
+                ],
+              },
+            },
+          ],
+        },
+      ],
     });
     const { getRecentQuery } = setup({ query });
 
@@ -105,16 +157,18 @@ describe("Notebook Editor > Expression Step", () => {
 
     await userEvent.click(screen.getByRole("img", { name: "add icon" }));
 
-    const input = screen.getByTestId("custom-expression-query-editor");
+    const input = await screen.findByTestId("custom-expression-query-editor");
     await userEvent.type(input, "1 + 1");
-    input.blur();
+    await act(async () => {
+      input.blur();
+    });
     await userEvent.type(screen.getByTestId("expression-name"), "Total{enter}");
 
     const recentQuery = getRecentQuery();
     const expressions = Lib.expressions(recentQuery, 0);
     expect(expressions).toHaveLength(1);
     expect(Lib.displayInfo(recentQuery, 0, expressions[0]).displayName).toBe(
-      "Total",
+      "Total (1)",
     );
   });
 });

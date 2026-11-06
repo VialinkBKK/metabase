@@ -6,23 +6,35 @@ title: Impersonation access
 
 {% include plans-blockquote.html feature="Impersonation access" %}
 
-> For now, impersonation access is only available for ClickHouse, MySQL, PostgreSQL, Redshift, Snowflake, and SQL Server. If you want to switch database _connections_ based on who is logged in, check out [Database routing](./database-routing.md).
-
-> If you're using views in PostgresSQL, the row-level security policies on views will only work on Postgres versions 15 and higher.
-
 This page covers the [View data](./data.md#view-data-permissions) permission level called Impersonation.
 
 **Impersonation access** allows admins to "outsource" View data permissions to roles in your database. Admins can associate user attributes with database-defined roles and their privileges. If someone is in a group with their View data permission set to Impersonation, the person will be able to view and query data based on the privileges granted to the role specified by their user attribute.
 
-## Impersonation vs sandboxing
+![Connection impersonation](./images/connection-impersonation.png)
+
+## Databases that support impersonation
+
+For now, impersonation access is only available for the following databases:
+
+- ClickHouse
+- MySQL
+- PostgreSQL. If you're using views in PostgreSQL, the row-level security policies on views will only work on Postgres versions 15 and higher.
+- Redshift
+- Snowflake
+- SQL Server
+- Starburst/Trino.
+
+If you want to switch database _connections_ based on who is logged in, check out [Database routing](./database-routing.md).
+
+## Impersonation vs row and column security
 
 ### Impersonation sets permissions for questions written in both the SQL editor and the query builder
 
 Impersonation operates at the database level. In a database engine, setting the role before the query runs can alter the results of the query, as the role defines the permissions that your database should use when it executes the statements.
 
-### Sandboxing only sets permissions for query builder questions
+### Row and column security only sets permissions for query builder questions
 
-Sandboxing operates at the Metabase level. Since Metabase can't parse SQL queries to find out what data people are allowed to view, sandboxing only applies to questions composed in the query builder (where Metabase can interpret the queries).
+Row and column security operates at the Metabase level. Since Metabase can't parse SQL queries to find out what data people are allowed to view, row and column security only applies to questions composed in the query builder (where Metabase can interpret the queries).
 
 ## Example use case for impersonation
 
@@ -39,18 +51,18 @@ For impersonation access to work, you'll first need to set up roles in your data
 
 ### Set up Metabase database connection for impersonation
 
-Impersonation uses database roles to run queries on your database, but there still needs to be a default role that that will be used to run operations like [sync, scans, and fingerprinting](../databases/sync-scan.md). So the user account that Metabase uses to [connect to your database](../databases/connecting.md) should have access to everything in that database that any Metabase group may need access to, as that database user account is what Metabase uses to sync table information.
+Impersonation uses database roles to run queries on your database, but there still needs to be a default role that will be used to run operations like [sync, scans, and fingerprinting](../databases/sync-scan.md). So the user account that Metabase uses to [connect to your database](../databases/connecting.md) should have access to everything in that database that any Metabase group may need access to, as that database user account is what Metabase uses to sync table information.
 
 You can then create roles in the database that have more restrictive access to the database (like row-level or table-level security). When the role is passed to the database using impersonation, the engine will return a subset of the data, or restrict the query altogether.
 
-> For **Redshift** databases, the user account Metabase uses to [connect to your Redshift database](../databases/connections/redshift.md) must be a superuser, as Metabase will need to be able to run the [SET SESSION AUTHORIZATION](https://docs.aws.amazon.com/redshift/latest/dg/r_SET_SESSION_AUTHORIZATION) command, which can only be run by a database superuser.
+> For **Redshift** databases, the user account Metabase uses to [connect to your Redshift database](../databases/connections/redshift.md) must be a superuser, as Metabase will need to be able to run the [SET SESSION AUTHORIZATION](https://docs.aws.amazon.com/redshift/latest/dg/r_SET_SESSION_AUTHORIZATION.html) command, which can only be run by a database superuser.
 
 ### In your database, set up roles
 
 In your database (not in Metabase):
 
 1. Create a new database role (in Redshift, this would be a new user).
-2. Grant that role privileges that you'd like impersonated users to have..
+2. Grant that role privileges that you'd like impersonated users to have.
 
 For exactly how to create a new role in your database and grant that role privileges, you'll need to consult your database's documentation. We also have some docs on [users, roles, and privileges](../databases/users-roles-privileges.md) that can help you get started.
 
@@ -70,6 +82,16 @@ SELECT TO vermont_sales_team USING (state = 'VT');
 
 ALTER TABLE people ENABLE ROW LEVEL SECURITY;
 ```
+
+### Snowflake connections should disable secondary roles when using impersonation
+
+For impersonation to work correctly with **Snowflake** databases, the user account Metabase uses to [connect to your Snowflake database](../databases/connections/snowflake.md) must have [secondary roles](https://docs.snowflake.com/en/user-guide/security-access-control-overview#authorization-through-primary-role-and-secondary-roles) disabled. You can disable secondary roles with:
+
+```sql
+ALTER USER metabase_user SET DEFAULT_SECONDARY_ROLES = ();
+```
+
+If you don't disable secondary roles, each impersonated role will also get permissions of all other roles you've granted to the Metabase user.
 
 ### Set up a Metabase group
 
@@ -99,9 +121,9 @@ People in one group can have different attribute values, but must have the same 
 
 ### Set up impersonation
 
-1. In Metabase, hit Cmd/Ctrl + K to bring up the command palette and search for **Permissions**, or go directly to **Admin settings** > **Permissions** > **Data**.
+1. In Metabase, hit Cmd/Ctrl + K to bring up the command palette and search for **Permissions**, or go directly to **Admin** > **Permissions** > **Data**.
 
-2. Select the group that you want to to associate with the database role you created.
+2. Select the group that you want to associate with the database role you created.
 
 3. Select the database to configure access to.
 
@@ -119,7 +141,7 @@ Remember to also set up ["Create queries"](./data.md#create-queries-permissions)
 
 ### Verify that impersonated permissions are working
 
-Admins will not be able to verify that impersonation is are working from their own account, so you should create a test user, add them to the group and set up their user attributes.
+Admins will not be able to verify that impersonation is working from their own account, so you should create a test user, add them to the group and set up their user attributes.
 
 To verify that the impersonated permissions are working:
 
@@ -133,7 +155,7 @@ SELECT * FROM people;
 
 to verify that the test user only sees data from Vermont.
 
-- If the test user has "Create queries" permissions set to "Query builder only", go to **Browse data** in the left sidebar and verify that the user can only see the tables they have access to, and only the data in those tables that
+- If the test user has "Create queries" permissions set to "Query builder only", go to **Browse data** in the left sidebar and verify that the user can only see the tables and data they have access to.
 
 ## People in a group with impersonation access to data do not necessarily share the same privileges
 
@@ -141,11 +163,27 @@ Metabase will use whatever role you specify in the user attribute for each perso
 
 ## Use impersonation to set up row-level SQL access
 
-You can use impersonation to give people access to the SQL editor, while restricting their access to data based on a specific database role. And not just table-level access, but row-level access---or however you define access for that role in your database. Effectively, you can use impersonation to set up data sandbox-like access to your data, while letting people use the SQL editor to query that data. The difference is that, _instead of setting up a data sandbox in Metabase, you need to set up that row-level security via the privileges granted to a role in your database._
+You can use impersonation to give people access to the SQL editor, while restricting their access to data based on a specific database role. And not just table-level access, but row-level access---or however you define access for that role in your database. Effectively, you can use impersonation to set up row and column security-like access to your data, while letting people use the SQL editor to query that data. The difference is that, _instead of setting up row and column security in Metabase, you need to set up that row-level security via the privileges granted to a role in your database._
 
 If instead you want to give a group SQL access to some, but not all, of the schemas or tables in that database, you can create an additional role in your database that only includes a subset of those tables---or even specific row-level access---and then use Metabase's impersonation feature to associate a user attribute with that role. Essentially what Metabase will do is take the user attribute and pass that attribute as a string into a `SET ROLE` or `USE ROLE` command for the database _before_ Metabase executes the query.
 
 Connection impersonation doesn't apply to people in the Metabase Admins group, as their more permissive privileges take precedence.
+
+## Impersonated queries must be a single SELECT statement
+
+When people with impersonated access use the native SQL editor, they will only be able to write queries with a single select statement. Metabase will check each native query before running it and reject anything that isn't a single `SELECT` statement. Common table expressions (`WITH`) and set operations (`UNION`, `INTERSECT`, `EXCEPT`) count as a single `SELECT` statement, so those queries will run.
+
+Examples of queries Metabase will reject:
+
+- Multiple statements separated by semicolons, like `SET ROLE analyst; SELECT * FROM people;`
+- Statements that create or change tables, including temporary tables (`CREATE`, `ALTER`, `DROP`)
+- Role-switching statements like `SET ROLE` or `USE ROLE`
+
+### Very large hand-written value lists are rejected
+
+To validate a native query safely, Metabase must parse the whole statement first. A query with a very large literal list written directly in the SQL—a `VALUES` clause, `IN` list, or `ARRAY` literal with more than 2,000 rows or items—can't be validated, so Metabase rejects it rather than run something it can't check. You'll see a message asking you to reduce the size of the list.
+
+This limit only applies to values you type into the SQL itself. [Filter widgets and field filters](../questions/native-editor/sql-parameters.md) pass their values to the database separately, so dashboard and question filters with long lists of values keep working. If you need to match against a large set of hand-written values, load them into a table and join to it instead of listing them inline.
 
 ## Metabase gives people the most permissive access to data across all of their groups
 
@@ -158,8 +196,12 @@ Blue group's more permissive access would override the impersonated access.
 
 ## Admins won't see the effects of impersonation
 
-Admins won't ever see the effects of impersonation effects, because their privileges will override those of any other group they're a member of.
+Admins won't ever see the effects of impersonation, because their privileges will override those of any other group they're a member of.
 
-Metabase's default Administrators group has "Can view" access to all databases, and Metabase uses the most permissive access for any person in multple groups, so any admin will have "Can view" - not "Impersonated" - access to the database.
+Metabase's default Administrators group has "Can view" access to all databases, and Metabase uses the most permissive access for any person in multiple groups, so any admin will have "Can view" - not "Impersonated" - access to the database.
 
 To test impersonation, create a test user, assign them a user attribute with the database role, and add them to the impersonated group. Then, log in as the test user and verify the data access.
+
+## Impersonation and Slack notifications
+
+People in groups with impersonation access cannot create Slack [alerts](../questions/alerts.md) or [dashboard subscriptions](../dashboards/subscriptions.md). Email alerts and subscriptions are still available. See [Notification permissions](./notifications.md).

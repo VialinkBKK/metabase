@@ -2,16 +2,19 @@
   (:require
    [buddy.core.codecs :as codecs]
    [buddy.core.hash :as buddy-hash]
+   [buddy.core.mac :as mac]
    [buddy.core.nonce :as nonce]
    [clojure.core.memoize :as memo]
+   [environ.core :as env]
    [metabase.events.core :as events]
-   [metabase.login-history.core :as login-history]
    [metabase.request.core :as request]
+   [metabase.session.db :as session.db]
    [metabase.session.settings :as session.settings]
    [metabase.util :as u]
+   [metabase.util.encryption :as encryption]
    [metabase.util.i18n :refer [tru]]
+   [metabase.util.log :as log]
    [metabase.util.malli :as mu]
-   [metabase.util.malli.schema :as ms]
    [metabase.util.string :as string]
    [methodical.core :as methodical]
    [toucan2.core :as t2]))
@@ -22,52 +25,39 @@
   []
   (codecs/bytes->hex (nonce/random-bytes 16)))
 
-(methodical/defmethod t2/table-name :model/Session [_model] :core_session)
+;; validated eagerly at load so a misconfigured secret fails at startup instead of 500ing the first auth request
+(defonce ^:private ^{:tag 'bytes} default-session-hash-secret
+  (encryption/validate-and-hash-secret-key (env/env :mb-session-secret-key) "MB_SESSION_SECRET_KEY"))
 
-(doto :model/Session
-  (derive :metabase/model)
-  (derive :hook/created-at-timestamped?))
+(when-not *compile-files*
+  (when-not default-session-hash-secret
+    (log/warn (str "MB_SESSION_SECRET_KEY is not set; session keys are stored without a signature. Anyone with access"
+                   " to the application database can forge a session and impersonate any user. Set it to a random"
+                   " string of at least 16 characters to prevent this. Setting or changing it logs out all active"
+                   " sessions."))))
 
-(t2/define-before-update :model/Session [_model]
-  (throw (RuntimeException. "You cannot update a Session.")))
+(defn- session-hash-secret
+  "Secret used to sign session keys before they are stored in or looked up from the app DB. Read from
+  `MB_SESSION_SECRET_KEY`. Nil when it is not set."
+  ^bytes []
+  default-session-hash-secret)
 
-(t2/define-before-insert :model/Session
-  [session]
-  (when (or (uuid? (:id session)) (string/valid-uuid? (:id session)))
-    (throw (RuntimeException. "Session id should not be stored plaintext in the session table.")))
-  (when (or (uuid? (:key_hashed session)) (string/valid-uuid? (:key_hashed session)))
-    (throw (RuntimeException. "Session key should not be stored plaintext in the session table.")))
-  (cond-> session
-    (some-> (request/current-request) request/embedded?) (assoc :anti_csrf_token (random-anti-csrf-token))))
+(def ^:private ^{:arglists '([secret session-key])} hash-session-key*
+  (memo/lru (fn [^bytes secret ^String session-key]
+              (let [key-bytes (.getBytes session-key java.nio.charset.StandardCharsets/US_ASCII)]
+                (codecs/bytes->hex
+                 (if secret
+                   (mac/hash key-bytes {:key secret :alg :hmac+sha512})
+                   (buddy-hash/sha512 key-bytes)))))
+            {} :lru/threshold 100))
 
-(t2/define-after-insert :model/Session
-  [{anti-csrf-token :anti_csrf_token, :as session}]
-  (let [session-type (if anti-csrf-token :full-app-embed :normal)]
-    (assoc session :type session-type)))
+(defn hash-session-key
+  "Hash the session-key for storage in (and lookup from) the database.
 
-(def ^:private CreateSessionUserInfo
-  [:map
-   [:id ms/PositiveInt]
-   [:last_login :any]])
-
-(def SessionSchema
-  "Schema for a Session."
-  [:and
-   [:map-of :keyword :any]
-   [:map
-    [:key string?]
-    [:type [:enum :normal :full-app-embed]]]])
-
-(defmulti create-session!
-  "Generate a new Session for a User. `session-type` is currently either `:password` (for email + password login) or
-  `:sso` (for other login types). Returns the newly generated Session with the id as the plain-text session-key."
-  {:arglists '([session-type user device-info])}
-  (fn [session-type & _]
-    session-type))
-
-(def ^{:arglists '([session-key])} hash-session-key
-  "Hash the session-key for storage in the database"
-  (memo/lru (fn [^String session-key] (codecs/bytes->hex (buddy-hash/sha512 (.getBytes session-key java.nio.charset.StandardCharsets/US_ASCII)))) {} :lru/threshold 100))
+  When `MB_SESSION_SECRET_KEY` is set the stored value is signed with that secret (HMAC-SHA512), so a valid
+  `key_hashed` value cannot be computed with app-db (SQL) access alone. Without it this is a plain SHA-512."
+  [session-key]
+  (hash-session-key* (session-hash-secret) session-key))
 
 (defn generate-session-key
   "Generate a new session key."
@@ -79,28 +69,52 @@
   []
   (string/random-string 12))
 
-(mu/defmethod create-session! :sso :- SessionSchema
-  [_ user :- CreateSessionUserInfo device-info :- request/DeviceInfo]
-  (let [session-key (generate-session-key)
-        session-key-hashed (hash-session-key session-key)
-        session-id (generate-session-id)
-        session (first (t2/insert-returning-instances! :model/Session
-                                                       :id session-id
-                                                       :key_hashed session-key-hashed
-                                                       :user_id (u/the-id user)))]
-    (assert (map? session))
+(methodical/defmethod t2/table-name :model/Session [_model] :core_session)
+
+(doto :model/Session
+  (derive :metabase/model)
+  (derive :hook/created-at-timestamped?))
+
+(def ^:private ending-columns
+  "The only columns an update of a Session may touch: the ones [[metabase.session.db/end-sessions!]] writes to record
+  that the session ended. Everything else on the row is immutable."
+  #{:ended_at :end_reason :ended_by_user_id :key_hashed})
+
+(t2/define-before-update :model/Session [session]
+  (when-not (every? ending-columns (keys (t2/changes session)))
+    (throw (RuntimeException. "You cannot update a Session.")))
+  ;; a recorded ending is final
+  (when (some? (:ended_at (t2/original session)))
+    (throw (RuntimeException. "You cannot change a Session that has ended.")))
+  session)
+
+(t2/define-before-insert :model/Session
+  [{session-key :session_key :as session}]
+  (when (or (uuid? (:id session)) (string/valid-uuid? (:id session)))
+    (throw (ex-info "Session id should not be stored plaintext in the session table." {})))
+  (when (or (uuid? (:key_hashed session)) (string/valid-uuid? (:key_hashed session)))
+    (throw (ex-info "Session key should not be stored plaintext in the session table." {})))
+  ;; Check auth identity provider if provided
+  (when-let [auth-identity-id (:auth_identity_id session)]
+    (when-let [auth-identity (session.db/auth-identity-provider auth-identity-id)]
+      (when (and (= "password" (:provider auth-identity))
+                 (not (session.settings/enable-password-login)))
+        (throw (ex-info (str (tru "Password login is disabled for this instance."))
+                        {:status-code 400})))))
+  (let [key-hashed (or (:key_hashed session) (hash-session-key session-key))]
+    (cond-> (-> session
+                (dissoc :session_key)
+                (assoc :key_hashed key-hashed))
+      ;; on mysql if the id is not supplied insert-returning-instance(s)! returns nil
+      ;; this is here to handle transitioning some tests
+      (not (:id session)) (assoc :id (generate-session-id))
+      (some-> (request/current-request) request/embedded?) (assoc :anti_csrf_token (random-anti-csrf-token)))))
+
+(t2/define-after-insert :model/Session
+  [session]
+  (when-let [user (session.db/user (:user_id session))]
     (let [event {:user-id (u/the-id user)}]
       (events/publish-event! :event/user-login event)
       (when (nil? (:last_login user))
-        (events/publish-event! :event/user-joined event)))
-    (login-history/record-login-history! session-id user device-info)
-    (assoc session :key session-key)))
-
-(mu/defmethod create-session! :password :- SessionSchema
-  [session-type
-   user :- CreateSessionUserInfo
-   device-info :- request/DeviceInfo]
-  ;; this is actually the same as `create-session!` for `:sso` but we check whether password login is enabled.
-  (when-not (session.settings/enable-password-login)
-    (throw (ex-info (str (tru "Password login is disabled for this instance.")) {:status-code 400})))
-  ((get-method create-session! :sso) session-type user device-info))
+        (events/publish-event! :event/user-joined event))))
+  session)

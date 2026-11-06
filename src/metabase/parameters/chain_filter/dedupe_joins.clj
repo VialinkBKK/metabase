@@ -1,7 +1,7 @@
 (ns metabase.parameters.chain-filter.dedupe-joins
   (:require
    [clojure.set :as set]
-   [medley.core :as m]))
+   [metabase.util.log :as log]))
 
 (def ^:private source-node (comp :table :lhs))
 
@@ -58,19 +58,49 @@
           (let [next-node (node-fn edge)]
             (recur (cons next-node nodes) (conj result next-node))))))))
 
+(defn- prefer-requested-fks
+  "Pick one edge from a group of parallel edges between the same source/target tables. Two independent preference
+  signals, consulted in order:
+
+  1. `preferred-fk-pairs` — unordered `#{lhs rhs}` pairs the caller knows the expanded query already uses. An exact
+     pair match is the strongest signal.
+  2. `preferred-fk-ids` — field-ids the caller wants to see on at least one endpoint (e.g. a parameter target
+     already bound to the FK itself, as in #65838).
+
+  If neither signal yields exactly one winner, log quietly and pick deterministically from whatever shortlist we
+  have."
+  [preferred-fk-ids preferred-fk-pairs edges]
+  (if (<= (count edges) 1)
+    (first edges)                       ; Edges should not be empty. We return nil if it is.
+    (let [exact (filter (fn [{{lhs :field} :lhs {rhs :field} :rhs}]
+                          (contains? preferred-fk-pairs #{lhs rhs}))
+                        edges)
+          by-id (filter (fn [{{lhs :field} :lhs {rhs :field} :rhs}]
+                          (or (preferred-fk-ids lhs) (preferred-fk-ids rhs)))
+                        edges)
+          choices (or (seq exact) (seq by-id) edges)]
+      (if (= (count choices) 1)
+        (first choices)
+        (do (log/debugf "Could not choose between multiple FKs for a chain filters join. %d edges, %d candidates"
+                        (count edges) (count choices))
+            (first choices))))))
+
 (defn dedupe-joins
   "Remove unnecessary joins from a collection of `in-joins`.
 
   `keep-ids` = the IDs of Tables that we want to keep joins for. Joins that are not needed to keep these Tables may be
   removed.
-
-  Note that this function implements a simple greedy algorithm, replacing the previous optimal, but exponential
-  implementation."
-  [source-id in-joins keep-ids]
-  (let [;; get rid of parallel edges, for our purposes they are equivalent
-        edges (m/distinct-by edge-nodes in-joins)
+  `field-ids` = field-ids the caller wants to see on at least one endpoint of a parallel edge (parameter-bound-to-FK
+  case from #65838).
+  `fk-pairs` = unordered `#{lhs rhs}` pairs the caller knows the expanded query already uses. An exact match wins
+  over a field-id match when both signals are available."
+  [source-id field-ids fk-pairs in-joins keep-ids]
+  (let [;; Group up any parallel edges, and choose one from each group.
+        edges     (-> (group-by edge-nodes in-joins)
+                      (update-vals #(prefer-requested-fks field-ids fk-pairs %))
+                      vals)
         out-edges (group-by source-node edges)
-        in-edges (group-by target-node edges)
+        in-edges  (group-by target-node edges)
         ;; Collect the IDs that must be included either way to prefer them
         ;; during the construction of the tree.
         transitive-keep-ids (forced-nodes source-node keep-ids in-edges)

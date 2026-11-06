@@ -1,6 +1,4 @@
-import { Route } from "react-router";
-
-import { setupEnterprisePlugins } from "__support__/enterprise";
+import { setupEnterpriseOnlyPlugin } from "__support__/enterprise";
 import {
   setupAuditInfoEndpoint,
   setupDashboardEndpoints,
@@ -9,9 +7,11 @@ import {
   setupUsersEndpoints,
 } from "__support__/server-mocks";
 import { mockSettings } from "__support__/settings";
+import { createMockState } from "__support__/state";
 import { createMockEntitiesState } from "__support__/store";
 import { renderWithProviders, waitForLoaderToBeRemoved } from "__support__/ui";
-import { MockDashboardContext } from "metabase/public/containers/PublicOrEmbeddedDashboard/mock-context";
+import { MockDashboardContext } from "metabase/dashboard/context/mock-context";
+import { Route } from "metabase/router";
 import type { Dashboard, Settings, TokenFeatures } from "metabase-types/api";
 import {
   createMockDashboard,
@@ -20,20 +20,19 @@ import {
   createMockUser,
 } from "metabase-types/api/mocks";
 import { createSampleDatabase } from "metabase-types/api/mocks/presets";
-import { createMockState } from "metabase-types/store/mocks";
 
 import { DashboardInfoSidebar } from "../DashboardInfoSidebar";
 
 export interface SetupOpts {
   dashboard?: Dashboard;
   settings?: Settings;
-  hasEnterprisePlugins?: boolean;
+  enterprisePlugins?: Parameters<typeof setupEnterpriseOnlyPlugin>[0][];
 }
 
 export async function setup({
   dashboard = createMockDashboard(),
   settings = createMockSettings(),
-  hasEnterprisePlugins,
+  enterprisePlugins = [],
 }: SetupOpts = {}) {
   const setDashboardAttribute = jest.fn();
   const onClose = jest.fn();
@@ -55,26 +54,26 @@ export async function setup({
     }),
     entities: createMockEntitiesState({
       databases: [createSampleDatabase()],
-      dashboards: [dashboard],
     }),
   });
 
-  if (hasEnterprisePlugins) {
-    setupEnterprisePlugins();
-  }
+  enterprisePlugins.forEach((plugin) => {
+    setupEnterpriseOnlyPlugin(plugin);
+  });
 
   renderWithProviders(
     <Route
       path="*"
-      component={() => (
+      element={
         <MockDashboardContext
           dashboard={dashboard}
+          // Unjustified type cast. FIXME
           setDashboardAttributes={setDashboardAttribute as any}
           closeSidebar={onClose}
         >
           <DashboardInfoSidebar />
         </MockDashboardContext>
-      )}
+      }
     />,
     { storeInitialState: state, withRouter: true },
   );
@@ -99,6 +98,5 @@ export const setupEnterprise = (
         ...tokenFeatures,
       }),
     }),
-    hasEnterprisePlugins: true,
   });
 };

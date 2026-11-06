@@ -3,8 +3,39 @@ import { SAMPLE_DB_ID, USER_GROUPS } from "e2e/support/cypress_data";
 import { SAMPLE_DATABASE } from "e2e/support/cypress_sample_database";
 import { ORDERS_QUESTION_ID } from "e2e/support/cypress_sample_instance_data";
 
-const { ORDERS_ID } = SAMPLE_DATABASE;
+const {
+  ACCOUNTS_ID,
+  ANALYTIC_EVENTS_ID,
+  FEEDBACK_ID,
+  INVOICES_ID,
+  ORDERS_ID,
+  PEOPLE_ID,
+  PRODUCTS_ID,
+  REVIEWS_ID,
+} = SAMPLE_DATABASE;
 const { ALL_USERS_GROUP, COLLECTION_GROUP } = USER_GROUPS;
+
+const SAMPLE_DB_TABLE_IDS = {
+  ACCOUNTS_ID,
+  ANALYTIC_EVENTS_ID,
+  FEEDBACK_ID,
+  INVOICES_ID,
+  ORDERS_ID,
+  PEOPLE_ID,
+  PRODUCTS_ID,
+  REVIEWS_ID,
+};
+
+const SAMPLE_DB_TABLE_NAMES = [
+  "Accounts",
+  "Analytic Events",
+  "Feedback",
+  "Invoices",
+  "Orders",
+  "People",
+  "Products",
+  "Reviews",
+];
 
 const DATA_ACCESS_PERM_IDX = 0;
 const CREATE_QUERIES_PERM_IDX = 1;
@@ -41,7 +72,7 @@ describe("scenarios > admin > permissions > view data > blocked", () => {
     cy.log(
       "assert that user properly sees native query warning related to table level blocking",
     );
-    // eslint-disable-next-line no-unsafe-element-filtering
+    // eslint-disable-next-line metabase/no-unsafe-element-filtering
     H.getPermissionRowPermissions("All Users")
       .eq(DATA_ACCESS_PERM_IDX)
       .findByLabelText("warning icon")
@@ -124,13 +155,19 @@ describe("scenarios > admin > permissions > view data > granular", () => {
     cy.signInAsAdmin();
   });
 
-  it("should not allow making permissions granular in the either database or group focused view", () => {
+  it("should not show the view data column without a token in either the database or group focused view", () => {
     cy.visit(`/admin/permissions/data/database/${SAMPLE_DB_ID}`);
 
+    cy.findByTestId("permission-table")
+      .findByText("Create queries")
+      .should("exist");
     cy.get("main").findByText("View data").should("not.exist");
 
     cy.visit(`/admin/permissions/data/group/${ALL_USERS_GROUP}`);
 
+    cy.findByTestId("permission-table")
+      .findByText("Create queries")
+      .should("exist");
     cy.get("main").findByText("View data").should("not.exist");
   });
 });
@@ -158,7 +195,7 @@ describe("scenarios > admin > permissions > view data > granular", () => {
     H.selectSidebarItem("All Users");
 
     H.assertPermissionTable([
-      ["Sample Database", "Granular", "No", "1 million rows", "No", "No"],
+      ["Sample Database", "Granular", "No", "1 million rows", "No", "No", "No"],
     ]);
 
     cy.button("Save changes").click();
@@ -176,7 +213,17 @@ describe("scenarios > admin > permissions > view data > granular", () => {
     });
   });
 
-  it("should allow making permissions granular in the group focused view", () => {
+  it("should preserve parent value for children when selecting granular, allow making permissions granular in the group focused view, and infer parent permissions if all granular permissions are equal", () => {
+    cy.log("Preserve parent value for children when selecting granular");
+    cy.visit(`/admin/permissions/data/group/${ALL_USERS_GROUP}`);
+
+    H.modifyPermission("Sample Database", DATA_ACCESS_PERM_IDX, "Blocked");
+
+    H.modifyPermission("Sample Database", DATA_ACCESS_PERM_IDX, "Granular");
+
+    H.assertPermissionForItem("Orders", DATA_ACCESS_PERM_IDX, "Blocked");
+
+    cy.log("Make permissions granular in the group focused view");
     cy.visit(`/admin/permissions/data/group/${ALL_USERS_GROUP}`);
 
     H.modifyPermission("Sample Database", DATA_ACCESS_PERM_IDX, "Granular");
@@ -191,7 +238,7 @@ describe("scenarios > admin > permissions > view data > granular", () => {
     H.selectSidebarItem("All Users");
 
     H.assertPermissionTable([
-      ["Sample Database", "Granular", "No", "1 million rows", "No", "No"],
+      ["Sample Database", "Granular", "No", "1 million rows", "No", "No", "No"],
     ]);
 
     cy.button("Save changes").click();
@@ -207,23 +254,9 @@ describe("scenarios > admin > permissions > view data > granular", () => {
     cy.wait("@saveGraph").then(({ response }) => {
       expect(response.statusCode).to.equal(200);
     });
-  });
 
-  it("should infer parent permissions if all granular permissions are equal", () => {
-    // TODO: this feature (not test) is broken when changing permissions for all schemas to the samve value
-
-    cy.visit(`/admin/permissions/data/group/${ALL_USERS_GROUP}`);
-
-    H.modifyPermission("Sample Database", DATA_ACCESS_PERM_IDX, "Granular");
-
-    makeOrdersSandboxed();
-
-    H.selectSidebarItem("All Users");
-
-    H.assertPermissionTable([
-      ["Sample Database", "Granular", "No", "1 million rows", "No", "No"],
-    ]);
-
+    cy.log("Infer parent permissions if all granular permissions are equal");
+    // TODO: this feature (not test) is broken when changing permissions for all schemas to the same value
     cy.findByTestId("permission-table")
       .find("tbody > tr")
       .contains("Sample Database")
@@ -235,18 +268,8 @@ describe("scenarios > admin > permissions > view data > granular", () => {
     H.selectSidebarItem("All Users");
 
     H.assertPermissionTable([
-      ["Sample Database", "Can view", "No", "1 million rows", "No", "No"],
+      ["Sample Database", "Can view", "No", "1 million rows", "No", "No", "No"],
     ]);
-  });
-
-  it("should preserve parent value for children when selecting granular for permissions available to child entities", () => {
-    cy.visit(`/admin/permissions/data/group/${ALL_USERS_GROUP}`);
-
-    H.modifyPermission("Sample Database", DATA_ACCESS_PERM_IDX, "Blocked");
-
-    H.modifyPermission("Sample Database", DATA_ACCESS_PERM_IDX, "Granular");
-
-    H.assertPermissionForItem("Orders", DATA_ACCESS_PERM_IDX, "Blocked");
   });
 });
 
@@ -266,7 +289,9 @@ describe(
 
       // Check there is no Impersonated option on H2
       H.selectPermissionRow("Sample Database", DATA_ACCESS_PERM_IDX);
-      H.popover().should("not.contain", "Impersonated");
+      H.popover()
+        .should("contain", "Blocked")
+        .and("not.contain", "Impersonated");
 
       // Set impersonated access on Postgres database
       H.modifyPermission("QA Postgres12", DATA_ACCESS_PERM_IDX, "Impersonated");
@@ -276,8 +301,24 @@ describe(
       H.savePermissions();
 
       H.assertPermissionTable([
-        ["Sample Database", "Can view", "No", "1 million rows", "No", "No"],
-        ["QA Postgres12", "Impersonated", "No", "1 million rows", "No", "No"],
+        [
+          "Sample Database",
+          "Can view",
+          "No",
+          "1 million rows",
+          "No",
+          "No",
+          "No",
+        ],
+        [
+          "QA Postgres12",
+          "Impersonated",
+          "No",
+          "1 million rows",
+          "No",
+          "No",
+          "No",
+        ],
       ]);
 
       // Checking it shows the right state on the tables level
@@ -318,8 +359,24 @@ describe(
       H.savePermissions();
 
       H.assertPermissionTable([
-        ["Sample Database", "Can view", "No", "1 million rows", "No", "No"],
-        ["QA Postgres12", "Impersonated", "No", "1 million rows", "No", "No"],
+        [
+          "Sample Database",
+          "Can view",
+          "No",
+          "1 million rows",
+          "No",
+          "No",
+          "No",
+        ],
+        [
+          "QA Postgres12",
+          "Impersonated",
+          "No",
+          "1 million rows",
+          "No",
+          "No",
+          "No",
+        ],
       ]);
     });
 
@@ -341,7 +398,7 @@ describe(
       H.saveImpersonationSettings();
       H.savePermissions();
 
-      // eslint-disable-next-line no-unsafe-element-filtering
+      // eslint-disable-next-line metabase/no-unsafe-element-filtering
       H.getPermissionRowPermissions("QA Postgres12")
         .eq(DATA_ACCESS_PERM_IDX)
         .findByLabelText("warning icon")
@@ -353,6 +410,21 @@ describe(
     });
 
     it("allows switching to the granular access and update table permissions", () => {
+      cy.log(
+        "Set unrestricted for children if database is set to impersonated before going granular",
+      );
+      cy.visit(`/admin/permissions/data/group/${ALL_USERS_GROUP}`);
+
+      H.modifyPermission("QA Postgres12", DATA_ACCESS_PERM_IDX, "Impersonated");
+
+      H.selectImpersonatedAttribute("role");
+      H.saveImpersonationSettings();
+
+      H.modifyPermission("QA Postgres12", DATA_ACCESS_PERM_IDX, "Granular");
+
+      H.assertPermissionForItem("Orders", DATA_ACCESS_PERM_IDX, "Can view");
+
+      cy.log("Same, after saving the impersonated permissions");
       cy.visit(`/admin/permissions/data/group/${ALL_USERS_GROUP}`);
 
       H.modifyPermission("QA Postgres12", DATA_ACCESS_PERM_IDX, "Impersonated");
@@ -388,8 +460,16 @@ describe(
 
       // On database level it got reset to Can view too
       H.assertPermissionTable([
-        ["Sample Database", "Can view", "No", "1 million rows", "No", "No"],
-        ["QA Postgres12", "Can view", "No", "1 million rows", "No", "No"],
+        [
+          "Sample Database",
+          "Can view",
+          "No",
+          "1 million rows",
+          "No",
+          "No",
+          "No",
+        ],
+        ["QA Postgres12", "Can view", "No", "1 million rows", "No", "No", "No"],
       ]);
     });
 
@@ -430,19 +510,6 @@ describe(
 
       cy.focused().should("have.attr", "placeholder", "username");
     });
-
-    it("should set unrestricted for children if database is set to impersonated before going granular", () => {
-      cy.visit(`/admin/permissions/data/group/${ALL_USERS_GROUP}`);
-
-      H.modifyPermission("QA Postgres12", DATA_ACCESS_PERM_IDX, "Impersonated");
-
-      H.selectImpersonatedAttribute("role");
-      H.saveImpersonationSettings();
-
-      H.modifyPermission("Sample Database", DATA_ACCESS_PERM_IDX, "Granular");
-
-      H.assertPermissionForItem("Orders", DATA_ACCESS_PERM_IDX, "Can view");
-    });
   },
 );
 
@@ -459,13 +526,20 @@ describe("scenarios > admin > permissions > view data > legacy no self-service",
     cy.visit(`/admin/permissions/data/group/${ALL_USERS_GROUP}`);
 
     H.selectPermissionRow("Sample Database", DATA_ACCESS_PERM_IDX);
-    H.popover().should("not.contain", "No self-service (Deprecated)");
+    H.popover()
+      .should("contain", "Blocked")
+      .and("not.contain", "No self-service (Deprecated)");
 
     H.selectPermissionRow("Sample Database", CREATE_QUERIES_PERM_IDX);
-    H.isPermissionDisabled(CREATE_QUERIES_PERM_IDX, "No", false);
+
+    H.isPermissionDisabled(
+      "Sample Database",
+      CREATE_QUERIES_PERM_IDX,
+      "No",
+      false,
+    );
 
     // load the page w/ legacy value in the graph and test that it does exist
-    cy.reload();
     cy.intercept("GET", `/api/permissions/graph/group/${ALL_USERS_GROUP}`, {
       statusCode: 200,
       body: {
@@ -481,6 +555,7 @@ describe("scenarios > admin > permissions > view data > legacy no self-service",
         },
       },
     });
+    cy.reload();
 
     H.assertPermissionTable([
       [
@@ -490,11 +565,17 @@ describe("scenarios > admin > permissions > view data > legacy no self-service",
         "1 million rows",
         "No",
         "No",
+        "No",
       ],
     ]);
 
     // User should not be able to modify Create queries permission while set to legacy-no-self-service
-    H.isPermissionDisabled(CREATE_QUERIES_PERM_IDX, "No", true);
+    H.isPermissionDisabled(
+      "Sample Database",
+      CREATE_QUERIES_PERM_IDX,
+      "No",
+      true,
+    );
 
     H.modifyPermission("Sample Database", DATA_ACCESS_PERM_IDX, "Can view");
 
@@ -518,6 +599,7 @@ describe("scenarios > admin > permissions > view data > legacy no self-service",
       [
         "Sample Database",
         "No self-service (Deprecated)",
+        "No",
         "No",
         "No",
         "No",
@@ -551,10 +633,11 @@ describe("scenarios > admin > permissions > view data > sandboxed", () => {
   });
 
   it("allows editing sandboxed access in the database focused view", () => {
+    cy.intercept("PUT", "/api/permissions/graph").as("saveGraph");
     cy.visit(`/admin/permissions/data/database/${SAMPLE_DB_ID}`);
 
     // make sure that we have native permissions now so that we can validate that
-    // permissions are droped to query builder only after we sandbox a table
+    // permissions are dropped to query builder only after we sandbox a table
     H.modifyPermission(
       "All Users",
       CREATE_QUERIES_PERM_IDX,
@@ -580,17 +663,17 @@ describe("scenarios > admin > permissions > view data > sandboxed", () => {
       "include",
       `/admin/permissions/data/database/${SAMPLE_DB_ID}/schema/PUBLIC/table/${ORDERS_ID}/segmented/group/${ALL_USERS_GROUP}`,
     );
-    // eslint-disable-next-line no-unscoped-text-selectors -- deprecated usage
+    // eslint-disable-next-line metabase/no-unscoped-text-selectors -- deprecated usage
     cy.findByText("Configure row and column security for this table");
     cy.button("Save").should("be.disabled");
 
-    // eslint-disable-next-line no-unscoped-text-selectors -- deprecated usage
+    // eslint-disable-next-line metabase/no-unscoped-text-selectors -- deprecated usage
     cy.findByText("Pick a column").click();
-    // eslint-disable-next-line no-unscoped-text-selectors -- deprecated usage
+    // eslint-disable-next-line metabase/no-unscoped-text-selectors -- deprecated usage
     cy.findByText("User ID").click();
 
     cy.findByPlaceholderText("Pick a user attribute").click();
-    // eslint-disable-next-line no-unscoped-text-selectors -- deprecated usage
+    // eslint-disable-next-line metabase/no-unscoped-text-selectors -- deprecated usage
     cy.findByText("attr_uid").click();
     cy.button("Save").click();
 
@@ -602,7 +685,7 @@ describe("scenarios > admin > permissions > view data > sandboxed", () => {
         "1 million rows",
         "Yes",
       ],
-      // expect that the view data permissions has been automatically droped to query builder only
+      // expect that the view data permissions has been automatically dropped to query builder only
       [
         "All Users",
         "Row and column security",
@@ -610,6 +693,7 @@ describe("scenarios > admin > permissions > view data > sandboxed", () => {
         "1 million rows",
         "No",
       ],
+      ["Data Analysts", "Blocked", "No", "No", "Yes"],
       ["collection", "Can view", "No", "1 million rows", "No"],
       ["data", "Can view", "Query builder and native", "1 million rows", "No"],
       ["nosql", "Can view", "Query builder only", "1 million rows", "No"],
@@ -627,16 +711,18 @@ describe("scenarios > admin > permissions > view data > sandboxed", () => {
       "include",
       `/admin/permissions/data/database/${SAMPLE_DB_ID}/schema/PUBLIC/table/${ORDERS_ID}/segmented/group/${ALL_USERS_GROUP}`,
     );
-    // eslint-disable-next-line no-unscoped-text-selectors -- deprecated usage
+    // eslint-disable-next-line metabase/no-unscoped-text-selectors -- deprecated usage
     cy.findByText("Configure row and column security for this table");
 
     cy.button("Save").click();
-    // eslint-disable-next-line no-unscoped-text-selectors -- deprecated usage
+    // eslint-disable-next-line metabase/no-unscoped-text-selectors -- deprecated usage
     cy.findByText("Configure row and column security for this table").should(
       "not.exist",
     );
 
-    cy.button("Save changes").click();
+    H.savePermissions();
+    cy.wait("@saveGraph").its("response.statusCode").should("eq", 200);
+    cy.reload();
 
     H.assertPermissionTable(expectedFinalPermissions);
   });
@@ -750,6 +836,59 @@ describe("scenarios > admin > permissions > view data > sandboxed", () => {
     cy.reload();
 
     H.assertPermissionTable(expectedFinalPermissions);
+  });
+
+  it("should keep existing row and column security when sandboxing the last table in a schema", () => {
+    Object.values(SAMPLE_DB_TABLE_IDS)
+      .filter((tableId) => tableId !== ORDERS_ID)
+      .forEach((tableId) => {
+        cy.sandboxTable({ group_id: ALL_USERS_GROUP, table_id: tableId });
+      });
+
+    cy.intercept("PUT", "/api/permissions/graph").as("saveGraph");
+    cy.visit(
+      `/admin/permissions/data/group/${ALL_USERS_GROUP}/database/${SAMPLE_DB_ID}/schema/PUBLIC`,
+    );
+
+    H.modifyPermission(
+      "Orders",
+      DATA_ACCESS_PERM_IDX,
+      "Row and column security",
+    );
+
+    H.modal().within(() => {
+      cy.findByText("Configure row and column security for this table");
+      cy.findByText("Pick a column").click();
+    });
+    H.popover().findByText("User ID").click();
+    H.modal().findByPlaceholderText("Pick a user attribute").click();
+    H.popover().findByText("attr_uid").click();
+    H.modal().button("Save").click();
+
+    H.savePermissions();
+    cy.wait("@saveGraph").its("response.statusCode").should("eq", 200);
+
+    cy.request("GET", "/api/mt/gtap").then(({ body: sandboxes }) => {
+      const sandboxedTableIds = sandboxes
+        .filter((sandbox) => sandbox.group_id === ALL_USERS_GROUP)
+        .map((sandbox) => sandbox.table_id)
+        .sort((a, b) => a - b);
+
+      expect(sandboxedTableIds).to.deep.equal(
+        Object.values(SAMPLE_DB_TABLE_IDS).sort((a, b) => a - b),
+      );
+    });
+
+    cy.reload();
+    H.assertPermissionTable(
+      SAMPLE_DB_TABLE_NAMES.map((name) => [
+        name,
+        "Row and column security",
+        "Query builder only",
+        "1 million rows",
+        "No",
+      ]),
+    );
   });
 });
 
@@ -886,7 +1025,7 @@ describe("scenarios > admin > permissions > view data > unrestricted", () => {
   });
 });
 
-// ENFORMCENT RELATED TESTS
+// ENFORCEMENT RELATED TESTS
 
 describe("scenarios > admin > permissions > view data > blocked (enforcement)", () => {
   beforeEach(() => {
@@ -895,48 +1034,31 @@ describe("scenarios > admin > permissions > view data > blocked (enforcement)", 
     H.activateToken("pro-self-hosted");
   });
 
-  it("should deny view access to a query builder question that makes use of a blocked table", () => {
-    assertCollectionGroupUserHasAccess(ORDERS_QUESTION_ID, true);
-    cy.visit(
-      `/admin/permissions/data/database/${SAMPLE_DB_ID}/schema/PUBLIC/table/${ORDERS_ID}`,
-    );
-    removeCollectionGroupPermissions();
-    assertCollectionGroupHasNoAccess(ORDERS_QUESTION_ID, true);
-  });
-
   it("should deny view access to a query builder question that makes use of a blocked database", () => {
-    assertCollectionGroupUserHasAccess(ORDERS_QUESTION_ID, true);
+    assertCollectionGroupUserHasAccess(ORDERS_QUESTION_ID);
     cy.visit(`/admin/permissions/data/database/${SAMPLE_DB_ID}`);
     removeCollectionGroupPermissions();
-    assertCollectionGroupHasNoAccess(ORDERS_QUESTION_ID, true);
+    assertCollectionGroupHasNoAccess(ORDERS_QUESTION_ID);
   });
 
-  it("should deny view access to any native question if the user has blocked view data for any table or database", () => {
+  it("should deny view access to query builder questions using a blocked table and to any native question", () => {
     H.createNativeQuestion({
       native: { query: "select 1" },
     }).then(({ body: { id: nativeQuestionId } }) => {
-      assertCollectionGroupUserHasAccess(nativeQuestionId, false);
+      assertCollectionGroupUserHasAccess(ORDERS_QUESTION_ID);
+      assertCollectionGroupUserHasAccess(nativeQuestionId);
       cy.visit(
         `/admin/permissions/data/database/${SAMPLE_DB_ID}/schema/PUBLIC/table/${ORDERS_ID}`,
       );
       removeCollectionGroupPermissions();
-      assertCollectionGroupHasNoAccess(nativeQuestionId, false);
+      assertCollectionGroupHasNoAccess(ORDERS_QUESTION_ID);
+      assertCollectionGroupHasNoAccess(nativeQuestionId);
     });
   });
 });
 
-function lackPermissionsView(isQbQuestion, shouldExist) {
-  if (isQbQuestion) {
-    cy.findByText("There was a problem with your question").should(
-      shouldExist ? "exist" : "not.exist",
-    );
-
-    if (shouldExist) {
-      cy.findByText("Show error details").click();
-    }
-  }
-
-  cy.findByText(/You do not have permissions to run this query/).should(
+function lackPermissionsView(shouldExist) {
+  cy.findByText("Sorry, you don't have permission to run this query.").should(
     shouldExist ? "exist" : "not.exist",
   );
 }
@@ -944,24 +1066,25 @@ function lackPermissionsView(isQbQuestion, shouldExist) {
 // NOTE: all helpers below make user of the "sandboxed" user and "collection" group to test permissions
 // as this user is of only one group and has permission to view existing question
 
-function assertCollectionGroupUserHasAccess(questionId, isQbQuestion) {
+function assertCollectionGroupUserHasAccess(questionId) {
   cy.signOut();
   cy.signIn("sandboxed");
 
   H.visitQuestion(questionId);
-  lackPermissionsView(isQbQuestion, false);
+  cy.findByTestId("query-visualization-root").should("be.visible");
+  lackPermissionsView(false);
 
   cy.signOut();
   cy.signInAsAdmin();
 }
 
-function assertCollectionGroupHasNoAccess(questionId, isQbQuestion) {
+function assertCollectionGroupHasNoAccess(questionId) {
   cy.signOut();
   cy.signIn("sandboxed");
 
   H.visitQuestion(questionId);
 
-  lackPermissionsView(isQbQuestion, true);
+  lackPermissionsView(true);
 }
 
 function removeCollectionGroupPermissions() {

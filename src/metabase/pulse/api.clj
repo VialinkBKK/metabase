@@ -5,14 +5,23 @@
    [metabase.api.macros :as api.macros]
    [metabase.api.routes.common :as routes.common]
    [metabase.api.util.handlers :as handlers]
+   ;; this router keeps mounting the deprecated pulse/alert routes until the notification APIs replace them
    ^{:clj-kondo/ignore [:deprecated-namespace]}
    [metabase.pulse.api.alert]
+   ;; this router keeps mounting the deprecated pulse/alert routes until the notification APIs replace them
    ^{:clj-kondo/ignore [:deprecated-namespace]}
    [metabase.pulse.api.pulse]
-   [metabase.pulse.api.unsubscribe]))
+   [metabase.pulse.api.unsubscribe]
+   [potemkin :as p]))
 
 (comment metabase.pulse.api.alert/keep-me
+         metabase.pulse.api.pulse/keep-me
          metabase.pulse.api.unsubscribe/keep-me)
+
+(p/import-vars
+ [metabase.pulse.api.pulse
+  create-pulse-with-perm-checks!
+  update-pulse-with-perm-checks!])
 
 (def ^{:arglists '([request respond raise])} pulse-routes
   "`/api/pulse` routes. `/api/pulse/unsubscribe/*` does not require authentication, so you can unsubscribe without being

@@ -1,15 +1,14 @@
+import { useState } from "react";
 import { t } from "ttag";
 
-import EmptyState from "metabase/common/components/EmptyState";
-import Modal from "metabase/common/components/Modal";
-import ModalContent, {
-  ModalContentActionIcon,
-} from "metabase/common/components/ModalContent";
+import { EmptyState } from "metabase/common/components/EmptyState";
+import { ActionIcon, Group, Icon, Modal, Text, Tooltip } from "metabase/ui";
 
 import type { ActionParametersInputFormProps } from "./ActionParametersInputForm";
 import ActionParametersInputForm from "./ActionParametersInputForm";
 
 interface ModalProps {
+  opened: boolean;
   title: string;
   showConfirmMessage?: boolean;
   showEmptyState: boolean;
@@ -22,6 +21,7 @@ export type ActionParametersInputModalProps = ModalProps &
   ActionParametersInputFormProps;
 
 function ActionParametersInputModal({
+  opened,
   showConfirmMessage,
   showEmptyState,
   title,
@@ -30,27 +30,51 @@ function ActionParametersInputModal({
   onClose,
   ...formProps
 }: ActionParametersInputModalProps) {
-  return (
-    <Modal data-testid="action-parameters-input-modal" onClose={onClose}>
-      <ModalContent
-        title={title}
-        headerActions={
-          onEdit ? (
-            <ModalContentActionIcon
-              name="pencil"
-              tooltip={t`Edit this action`}
-              onClick={onEdit}
-            />
-          ) : undefined
-        }
-        onClose={onClose}
-      >
-        <>
-          {showEmptyState && (
-            <EmptyState message={t`Choose a record to update`} />
-          )}
+  const [isOpenOrClosing, setIsOpenOrClosing] = useState(opened);
 
-          {!showEmptyState && (
+  if (opened && !isOpenOrClosing) {
+    setIsOpenOrClosing(true);
+  }
+
+  // Unlike `Modal`, `Modal.Root` still renders its portal while closed, and
+  // the action button keeps this mounted, so render nothing once it has
+  // finished closing, but stay rendered until then so it can fade out
+  if (!isOpenOrClosing) {
+    return null;
+  }
+
+  return (
+    <Modal.Root
+      data-testid="action-parameters-input-modal"
+      opened={opened}
+      size="lg"
+      density="relaxed"
+      onClose={onClose}
+      onExitTransitionEnd={() => setIsOpenOrClosing(false)}
+    >
+      <Modal.Overlay />
+      <Modal.Content>
+        <Modal.Header>
+          <Modal.Title>{title}</Modal.Title>
+          <Group gap="sm" wrap="nowrap">
+            {onEdit && (
+              <Tooltip label={t`Edit this action`}>
+                <ActionIcon
+                  variant="subtle"
+                  aria-label={t`Edit this action`}
+                  onClick={onEdit}
+                >
+                  <Icon name="pencil" />
+                </ActionIcon>
+              </Tooltip>
+            )}
+            <Modal.CloseButton />
+          </Group>
+        </Modal.Header>
+        <Modal.Body>
+          {showEmptyState ? (
+            <EmptyState message={t`Choose a record to update`} />
+          ) : (
             <>
               {showConfirmMessage && (
                 <ConfirmMessage message={confirmMessage} />
@@ -58,14 +82,14 @@ function ActionParametersInputModal({
               <ActionParametersInputForm {...formProps} />
             </>
           )}
-        </>
-      </ModalContent>
-    </Modal>
+        </Modal.Body>
+      </Modal.Content>
+    </Modal.Root>
   );
 }
 
 const ConfirmMessage = ({ message }: { message?: string }) => (
-  <div>{message ?? t`This action cannot be undone.`}</div>
+  <Text mb="xl">{message ?? t`This action cannot be undone.`}</Text>
 );
 
 // eslint-disable-next-line import/no-default-export -- deprecated usage

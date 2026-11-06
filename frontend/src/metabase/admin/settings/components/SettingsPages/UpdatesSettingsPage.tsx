@@ -1,17 +1,18 @@
 import cx from "classnames";
 import { t } from "ttag";
 
-import {
-  SettingsPageWrapper,
-  SettingsSection,
-} from "metabase/admin/components/SettingsSection";
 import { UpsellHostingBanner } from "metabase/admin/upsells";
 import { NotFound } from "metabase/common/components/ErrorPages";
-import { useSetting } from "metabase/common/hooks";
 import CS from "metabase/css/core/index.css";
+import { useSetting } from "metabase/settings";
+import {
+  AdminSettingInput,
+  SettingsPageWrapper,
+  SettingsSection,
+} from "metabase/settings-components";
 
-import { AdminSettingInput } from "../widgets/AdminSettingInput";
 import { VersionUpdateNotice } from "../widgets/VersionUpdateNotice";
+import { NewVersionInfo } from "../widgets/VersionUpdateNotice/VersionUpdateNotice";
 
 export function UpdatesSettingsPage() {
   const isHosted = useSetting("is-hosted?");
@@ -31,13 +32,14 @@ export function UpdatesSettingsPage() {
         />
         {checkForUpdates && (
           <div
-            className={cx(CS.pt3, CS.px2, {
+            className={cx(CS.pt3, {
               [CS.borderTop]: !isHosted,
             })}
           >
             <VersionUpdateNotice />
           </div>
         )}
+        <NewVersionInfo />
       </SettingsSection>
       <UpsellHostingBanner location="settings-updates-migrate_to_cloud" />
     </SettingsPageWrapper>

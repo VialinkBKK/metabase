@@ -42,7 +42,6 @@ type Props<
   role?: string;
   searchProp?: SearchProps<TItem>;
   searchable?: boolean | ((section: Section) => boolean | undefined);
-  fuzzySearch?: boolean;
   sections: TSection[];
   style?: CSSProperties;
 
@@ -62,7 +61,7 @@ export class AccordionList<
   TItem extends Item,
   TSection extends Section<TItem> = Section<TItem>,
 > extends Component<Props<TItem, TSection>, State> {
-  listRootRef: RefObject<HTMLDivElement>;
+  listRootRef: RefObject<HTMLDivElement | null>;
 
   constructor(props: Props<TItem, TSection>, context: unknown) {
     super(props, context);
@@ -266,7 +265,6 @@ export class AccordionList<
         section?.items && section.items.length > 10,
       sections,
       searchProp,
-      fuzzySearch,
     } = this.props;
     const { searchText } = this.state;
 
@@ -291,7 +289,6 @@ export class AccordionList<
     const sortedSections = searchFilter({
       sections,
       searchText,
-      fuzzySearch,
       searchProp,
     });
 
@@ -373,13 +370,16 @@ export class AccordionList<
       }
     }
 
+    // TSection can't be constructed here and renderers only read optional Section fields
+    const syntheticSection: TSection = {} as TSection;
+
     if (globalSearch) {
       const isEmpty = rows.filter((row) => row.type === "item").length === 0;
 
       if (isSearching && isEmpty) {
         rows.unshift({
           type: "no-results",
-          section: {} as TSection,
+          section: syntheticSection,
           sectionIndex: 0,
           isLastSection: false,
         });
@@ -387,10 +387,43 @@ export class AccordionList<
 
       rows.unshift({
         type: "search",
-        section: {} as TSection,
+        section: syntheticSection,
         sectionIndex: 0,
         isLastSection: false,
       });
+    } else if (isSearching) {
+      /**
+       * Without this, a search that matches nothing filters out every type-less section
+       * and collapses the list, hiding the search input, so the query can't be cleared.
+       */
+      const hasItems = rows.some((row) => row.type === "item");
+      const hasSearchRow = rows.some((row) => row.type === "search");
+      const isListSearchable = sections.some(
+        (section, sectionIndex) =>
+          sectionIsSearchable(sectionIndex) &&
+          sectionIsExpanded(sectionIndex) &&
+          section.items &&
+          section.items.length > 0 &&
+          !section.loading,
+      );
+
+      if (isListSearchable && !hasItems) {
+        if (!hasSearchRow) {
+          rows.unshift({
+            type: "search",
+            section: syntheticSection,
+            sectionIndex: 0,
+            isLastSection: false,
+          });
+        }
+
+        rows.push({
+          type: "no-results",
+          section: syntheticSection,
+          sectionIndex: 0,
+          isLastSection: false,
+        });
+      }
     }
 
     return rows;
@@ -421,8 +454,8 @@ export class AccordionList<
 
     return Boolean(
       alwaysExpanded ||
-        openSection === sectionIndex ||
-        (globalSearch && this.state.searchText.length > 0),
+      openSection === sectionIndex ||
+      (globalSearch && this.state.searchText.length > 0),
     );
   };
 

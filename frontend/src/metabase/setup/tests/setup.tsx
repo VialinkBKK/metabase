@@ -2,41 +2,72 @@ import { waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import fetchMock from "fetch-mock";
 
-import { setupEnterprisePlugins } from "__support__/enterprise";
 import {
+  setupEnterpriseOnlyPlugin,
+  setupEnterprisePlugins,
+} from "__support__/enterprise";
+import {
+  setupCurrentUserEndpoint,
+  setupEnginesEndpoint,
+  setupLlmModelsEndpoint,
+  setupLlmProviderTypesEndpoint,
+  setupLlmProvidersEndpoint,
   setupPropertiesEndpoints,
   setupSettingsEndpoints,
 } from "__support__/server-mocks";
 import { mockSettings } from "__support__/settings";
+import { createMockSetupState, createMockState } from "__support__/state";
 import { renderWithProviders, screen } from "__support__/ui";
+import type { SetupStep } from "metabase/redux/store";
 import type {
-  SettingDefinition,
+  EnterpriseSettings,
   TokenFeatures,
   UsageReason,
 } from "metabase-types/api";
 import {
+  createMockEngines,
+  createMockLlmProviderField,
+  createMockLlmProviderType,
   createMockSettings,
   createMockTokenFeatures,
+  createMockUser,
 } from "metabase-types/api/mocks";
-import {
-  createMockSetupState,
-  createMockState,
-} from "metabase-types/store/mocks";
 
 import { Setup } from "../components/Setup";
-import type { SetupStep } from "../types";
+
+const ANTHROPIC_TYPE = createMockLlmProviderType({
+  type: "anthropic",
+  label: "Anthropic",
+  fields: [
+    createMockLlmProviderField({
+      key: "api-key",
+      label: "API key",
+      type: "password",
+      required: true,
+      prefix: "sk-ant-",
+    }),
+  ],
+});
+
+const METABASE_TYPE = createMockLlmProviderType({
+  type: "metabase",
+  label: "Metabase AI service",
+  managed: true,
+  singleton: true,
+  fields: [],
+});
 
 export interface SetupOpts {
   step?: SetupStep;
   tokenFeatures?: TokenFeatures;
-  hasEnterprisePlugins?: boolean;
-  settingOverrides?: SettingDefinition[];
+  enterprisePlugins?: Parameters<typeof setupEnterpriseOnlyPlugin>[0][] | "*";
+  settings?: Partial<EnterpriseSettings>;
 }
 
 export async function setup({
   tokenFeatures = createMockTokenFeatures(),
-  hasEnterprisePlugins = false,
-  settingOverrides = [],
+  enterprisePlugins,
+  settings = {},
 }: SetupOpts = {}) {
   localStorage.clear();
   jest.clearAllMocks();
@@ -47,24 +78,35 @@ export async function setup({
     }),
     settings: mockSettings(
       createMockSettings({
+        ...settings,
         "token-features": tokenFeatures,
         "available-locales": [["en", "English"]],
       }),
     ),
   });
 
-  if (hasEnterprisePlugins) {
-    setupEnterprisePlugins();
+  if (enterprisePlugins) {
+    if (enterprisePlugins === "*") {
+      setupEnterprisePlugins();
+    } else {
+      enterprisePlugins.forEach(setupEnterpriseOnlyPlugin);
+    }
   }
 
   fetchMock.post("path:/api/session/password-check", { valid: true });
   fetchMock.post("path:/api/setup", {});
+  setupCurrentUserEndpoint(createMockUser({ is_superuser: true }));
   fetchMock.put("path:/api/setting/anon-tracking-enabled", 200);
   setupPropertiesEndpoints(
-    createMockSettings({ "token-features": tokenFeatures }),
+    createMockSettings({ ...settings, "token-features": tokenFeatures }),
   );
-  setupSettingsEndpoints(settingOverrides);
+  setupSettingsEndpoints([]);
   fetchMock.put("path:/api/setting", 200);
+  setupLlmProviderTypesEndpoint([ANTHROPIC_TYPE, METABASE_TYPE]);
+  setupLlmProvidersEndpoint([]);
+  setupLlmModelsEndpoint([]);
+
+  setupEnginesEndpoint(createMockEngines());
 
   renderWithProviders(<Setup />, { storeInitialState: state });
 
@@ -82,8 +124,6 @@ export const clickNextStep = async () =>
 
 export const skipWelcomeScreen = async () =>
   await userEvent.click(screen.getByText("Let's get started"));
-
-export const skipLanguageStep = clickNextStep;
 
 export const submitUserInfoStep = async ({
   firstName = "John",
@@ -149,15 +189,27 @@ export const expectSectionsToHaveLabelsInOrder = ({
 };
 
 export const getLastSettingsPutPayload = async () => {
-  const lastSettingsCall = fetchMock.lastCall("path:/api/setting", {
+  const settingsCalls = fetchMock.callHistory.calls("path:/api/setting", {
     method: "PUT",
   });
+  const lastSettingsCall = settingsCalls[settingsCalls.length - 1];
 
   expect(lastSettingsCall).toBeTruthy();
-  expect(lastSettingsCall![1]).toBeTruthy();
+  expect(lastSettingsCall.options?.body).toBeTruthy();
 
-  return JSON.parse((await lastSettingsCall![1]!.body!) as string);
+  // Unjustified type cast. FIXME
+  return JSON.parse((await lastSettingsCall.options.body!) as string);
 };
 
 export const skipTokenStep = async (name = "Skip") =>
   await userEvent.click(screen.getByRole("button", { name }));
+
+export const startAiConfigStep = async () =>
+  await userEvent.click(
+    await screen.findByRole("button", { name: "Set up AI" }),
+  );
+
+export const skipAiConfigStep = async () =>
+  await userEvent.click(
+    await screen.findByRole("button", { name: "I'll set this up later" }),
+  );

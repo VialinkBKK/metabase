@@ -99,7 +99,7 @@
                         (into {}
                               (keep (fn [fielddef]
                                       (when (isa? (:base-type fielddef) :type/JSON)
-                                        [(keyword (:field-name fielddef))
+                                        [(:field-name fielddef)
                                          (fn [json]
                                            [::sql.qp/compiled (h2x/cast "json" json)])])))
                               (:field-definitions tabledef)))]
@@ -123,7 +123,7 @@
             tabledef (m/find-first
                       #(= (:table-name %) "json")
                       (:table-definitions dbdef))]
-        (is (=? [[{:json_bit (mt/malli=? [:tuple [:= :metabase.driver.sql.query-processor/compiled] :any])}]]
+        (is (=? [[{"json_bit" (mt/malli=? [:tuple [:= :metabase.driver.sql.query-processor/compiled] :any])}]]
                 (into []
                       (map (fn [chunk]
                              (into [] (take 1) chunk)))
@@ -188,3 +188,6 @@
   (sql-jdbc.tx/drop-if-exists-and-create-roles! driver details roles)
   (grant-table-perms-to-roles! driver details roles)
   (sql-jdbc.tx/grant-roles-to-user! driver details roles user-name))
+
+(defmethod sql.tx/generated-column-sql :postgres [_ expr]
+  (format "GENERATED ALWAYS AS (%s) STORED" expr))

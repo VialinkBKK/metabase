@@ -1,26 +1,34 @@
-import { push } from "react-router-redux";
 import { createAction } from "redux-actions";
 import { t } from "ttag";
 
+import type {
+  DatasetEditorTab,
+  Dispatch,
+  GetState,
+} from "metabase/redux/store";
 import { addUndo } from "metabase/redux/undo";
-import type { Dispatch, GetState } from "metabase-types/store";
+import { navigate } from "metabase/router";
 
-import { getQuestion } from "../selectors";
+import { SET_METADATA_DIFF } from "../store/actions";
+import { getQuestion } from "../store/selectors";
 
 import { apiUpdateQuestion, updateQuestion } from "./core";
 import { runDirtyQuestionQuery } from "./querying";
 import { setQueryBuilderMode } from "./ui";
 
 export const setDatasetEditorTab =
-  (datasetEditorTab: "query" | "metadata") => (dispatch: Dispatch) => {
+  (datasetEditorTab: DatasetEditorTab) => (dispatch: Dispatch) => {
     dispatch(
-      setQueryBuilderMode("dataset", { datasetEditorTab, replaceState: false }),
+      setQueryBuilderMode("dataset", {
+        datasetEditorTab,
+        replaceState: false,
+      }),
     );
     dispatch(runDirtyQuestionQuery());
   };
 
-export const onCancelCreateNewModel = () => async (dispatch: Dispatch) => {
-  await dispatch(push("/"));
+export const onCancelCreateNewModel = () => async () => {
+  navigate("/");
 };
 
 export const turnQuestionIntoModel =
@@ -30,17 +38,14 @@ export const turnQuestionIntoModel =
       return;
     }
 
-    const model = question
-      .setType("model")
-      .setPinned(true)
-      .setDisplay("table")
-      .setSettings({});
+    const model = question.setType("model").setDisplay("table").setSettings({});
     await dispatch(apiUpdateQuestion(model, { rerunQuery: true }));
 
     dispatch(
       addUndo({
         message: t`This is a model now.`,
-        actions: [apiUpdateQuestion(question, { rerunQuery: true })],
+        action: () =>
+          dispatch(apiUpdateQuestion(question, { rerunQuery: true })),
       }),
     );
   };
@@ -52,18 +57,22 @@ export const turnModelIntoQuestion =
       return;
     }
 
-    const question = model.setType("question");
+    let question = model.setType("question");
+    // Display 'list' is not supported for questions, for now.
+    if (question.display() === "list") {
+      question = question.setDisplay("table");
+    }
+
     await dispatch(apiUpdateQuestion(question, { rerunQuery: true }));
 
     dispatch(
       addUndo({
         message: t`This is a question now.`,
-        actions: [apiUpdateQuestion(model)],
+        action: () => dispatch(apiUpdateQuestion(model)),
       }),
     );
   };
 
-export const SET_METADATA_DIFF = "metabase/qb/SET_METADATA_DIFF";
 export const setMetadataDiff = createAction(SET_METADATA_DIFF);
 
 export const onModelPersistenceChange =

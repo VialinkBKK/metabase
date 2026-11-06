@@ -5,8 +5,8 @@
    [clojure.java.io :as io]
    [clojure.string :as str]
    [clojure.test :refer :all]
-   [metabase.query-processor :as qp]
    [metabase.query-processor.pipeline :as qp.pipeline]
+   [metabase.query-processor.test :as qp]
    [metabase.test :as mt]
    [metabase.util :as u]))
 
@@ -21,6 +21,7 @@
      acc)
 
     ([row-count row]
+     ;; the printed rows ARE the behavior under test, asserted via with-out-str
      #_{:clj-kondo/ignore [:discouraged-var]}
      (printf "ROW %d -> %s\n" (inc row-count) (pr-str row))
      (inc row-count))))

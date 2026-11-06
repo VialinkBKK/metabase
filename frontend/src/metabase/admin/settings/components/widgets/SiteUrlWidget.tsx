@@ -1,16 +1,18 @@
 import { useState } from "react";
 import { t } from "ttag";
 
-import { useAdminSetting } from "metabase/api/utils";
+import { getErrorMessage } from "metabase/api/utils/errors";
 import { InputWithSelectPrefix } from "metabase/common/components/InputWithSelectPrefix";
 import { useHasTokenFeature } from "metabase/common/hooks";
-import type { GenericErrorResponse } from "metabase/lib/errors";
+import { useAdminSetting } from "metabase/settings";
+import {
+  SetByEnvVarWrapper,
+  SettingHeader,
+} from "metabase/settings-components";
 import { Box, Text } from "metabase/ui";
 
-import { SettingHeader } from "../SettingHeader";
-
 export function SiteUrlWidget() {
-  const { value, updateSetting, description, isLoading } =
+  const { value, updateSetting, description, isLoading, settingDetails } =
     useAdminSetting("site-url");
   const isHosted = useHasTokenFeature("hosting");
   const [errorMessage, setErrorMessage] = useState("");
@@ -22,10 +24,9 @@ export function SiteUrlWidget() {
     updateSetting({ key: "site-url", value: newValue }).then((response) => {
       setErrorMessage("");
       if (response?.error) {
-        const message =
-          (response.error as { data: GenericErrorResponse })?.data?.message ||
-          t`Error saving Site URL`;
-        setErrorMessage(message);
+        setErrorMessage(
+          getErrorMessage(response.error, t`Error saving Site URL`),
+        );
       }
     });
   };
@@ -46,18 +47,20 @@ export function SiteUrlWidget() {
           </>
         }
       />
-      <InputWithSelectPrefix
-        value={value || ""}
-        onChange={(newValue: string) => handleChange(newValue)}
-        prefixes={["https://", "http://"]}
-        defaultPrefix="http://"
-        placeholder={"http://example.com"}
-      />
-      {errorMessage && (
-        <Text size="sm" color="danger" mt="sm">
-          {errorMessage}
-        </Text>
-      )}
+      <SetByEnvVarWrapper settingKey="site-url" settingDetails={settingDetails}>
+        <InputWithSelectPrefix
+          value={value || ""}
+          onChange={(newValue: string) => handleChange(newValue)}
+          prefixes={["https://", "http://"]}
+          defaultPrefix="http://"
+          placeholder={"http://example.com"}
+        />
+        {errorMessage && (
+          <Text size="sm" color="feedback-negative" mt="sm">
+            {errorMessage}
+          </Text>
+        )}
+      </SetByEnvVarWrapper>
     </Box>
   );
 }

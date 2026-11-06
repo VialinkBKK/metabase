@@ -1,56 +1,49 @@
 import { t } from "ttag";
 
-import { useEditItemVerificationMutation } from "metabase/api";
-import { useSelector } from "metabase/lib/redux";
-import { getUserIsAdmin } from "metabase/selectors/user";
+import { getUserIsAdmin } from "metabase/current-user";
+import { useSelector } from "metabase/redux";
 import { Icon, Menu } from "metabase/ui";
-import type Question from "metabase-lib/v1/Question";
-import type { Dashboard, ModerationReview } from "metabase-types/api";
+import type { Card, Dashboard, ModerationReview } from "metabase-types/api";
 
+import { useEditItemVerificationMutation } from "../api/moderation";
 import {
   MODERATION_STATUS,
   getLatestModerationReview,
   getStatusIcon,
   isItemVerified,
 } from "../service";
-import { getVerifyQuestionTitle } from "../utils";
+import { getVerifyCardTitle } from "../utils";
 
-export const useQuestionMenuItems = (
-  question: Question,
-  reload: () => void,
-) => {
+export const useCardMenuItems = (card: Card, reload?: () => void) => {
   const latestModerationReview = getLatestModerationReview(
-    question.getModerationReviews(),
+    card.moderation_reviews ?? [],
   );
 
-  const items = useMenuItems({
+  return useMenuItems({
     reload,
-    moderated_item_id: question.id(),
+    moderated_item_id: card.id,
     moderated_item_type: "card",
     latestModerationReview,
-    title: getVerifyQuestionTitle(question),
+    title: getVerifyCardTitle(card),
   });
-
-  return items;
 };
 
 export const useDashboardMenuItems = (
   dashboard: Dashboard,
-  reload: () => void,
+  reload?: () => void,
 ) => {
   const latestModerationReview = getLatestModerationReview(
-    dashboard.moderation_reviews || [],
+    dashboard.moderation_reviews ?? [],
   );
 
-  const items = useMenuItems({
+  return useMenuItems({
     reload,
+    // Unjustified type cast. FIXME
     moderated_item_id: dashboard.id as number,
     moderated_item_type: "dashboard",
     latestModerationReview,
     title: t`Verify this dashboard`,
   });
-
-  return items;
 };
 
 const useMenuItems = ({
@@ -60,7 +53,7 @@ const useMenuItems = ({
   title,
   latestModerationReview,
 }: {
-  reload: () => void;
+  reload?: () => void;
   moderated_item_id: number;
   moderated_item_type: "card" | "dashboard";
   title: string;
@@ -97,7 +90,7 @@ const useMenuItems = ({
             });
           }
 
-          reload();
+          reload?.();
         }}
         data-testid={testId}
       >

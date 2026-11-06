@@ -1,14 +1,16 @@
 (ns metabase.lib.schema.expression
+  (:refer-clojure :exclude [some empty? #?(:clj for)])
   (:require
+   [malli.core :as mc]
    [metabase.lib.dispatch :as lib.dispatch]
    [metabase.lib.hierarchy :as lib.hierarchy]
-   [metabase.lib.options :as lib.options]
    [metabase.lib.schema.common :as common]
    [metabase.types.core :as types]
    [metabase.util :as u]
    [metabase.util.i18n :as i18n]
    [metabase.util.malli :as mu]
-   [metabase.util.malli.registry :as mr]))
+   [metabase.util.malli.registry :as mr]
+   [metabase.util.performance :refer [some empty? #?(:clj for)]]))
 
 (defmulti type-of-method
   "Impl for [[type-of]]. Use [[type-of]], but implement [[type-of-method]].
@@ -21,11 +23,11 @@
   always have type info!"
   {:arglists '([expr])}
   (fn [x]
-    ;; For the fallback case: use the actual type/class name as the dispatch type rather than `:type/*`. This is so we
+    ;; Dispatch on the concrete class when [[lib.dispatch/dispatch-value]] can't classify `x`. This is so we
     ;; can implement support for some platform-specific classes like `BigDecimal` or `java.time.OffsetDateTime`, for
     ;; use inside QP code or whatever. In the future maybe we can add support for JS-specific stuff too.
     (let [dispatch-value (lib.dispatch/dispatch-value x)]
-      (if (= dispatch-value :dispatch-type/*)
+      (if (= dispatch-value :dispatch-type/unknown)
         (type x)
         dispatch-value)))
   :hierarchy lib.hierarchy/hierarchy)
@@ -41,7 +43,7 @@
                      [false [:ref ::base-type]]]
   "Determine the type of an MBQL expression. Returns either a type keyword, or if the type is ambiguous, a set of
   possible types."
-  [expr]
+  [expr :- [:ref ::common/clause-arg]]
   (or
    ;; for MBQL clauses with `:effective-type` or `:base-type` in their options: ignore their dumb [[type-of-method]] methods
    ;; and return that type directly. Ignore everything else! Life hack!
@@ -50,6 +52,28 @@
         (or (:effective-type (second expr))
             (:base-type (second expr))))
    (type-of-method expr)))
+
+(defn resolve-type
+  "Resolve a possibly-ambiguous type to a single keyword type.
+
+  [[type-of]] can return a set of types for ambiguous expressions (e.g. `#{:type/Text :type/Date}` for date-like
+  strings). This function collapses such sets to a single type using [[metabase.types.core/most-specific-common-ancestor]].
+  Also handles `::type.unknown` and other non-type keywords by returning `:type/*`."
+  [expr-type]
+  (cond
+    (and (keyword? expr-type) (isa? expr-type :type/*))
+    expr-type
+
+    (and (set? expr-type) (seq expr-type))
+    (reduce types/most-specific-common-ancestor (first expr-type) (rest expr-type))
+
+    :else
+    :type/*))
+
+(defn type-of-resolved
+  "Like [[type-of]], but always returns a single keyword type. Resolves ambiguous set types via [[resolve-type]]."
+  [expr]
+  (resolve-type (type-of expr)))
 
 (defmethod type-of-method :default
   [expr]
@@ -77,8 +101,9 @@
             (i18n/tru "type-of {0} returned an invalid type {1}" (pr-str expr) (pr-str expr-type)))
     (is-type? expr-type base-type)))
 
+#_{:clj-kondo/ignore [:metabase/discourage-dynamic-vars]}
 (def ^:dynamic *suppress-expression-type-check?*
-  "Set this `true` to skip any type checks for expressions. This is useful while constructing expressions in MLv2 with
+  "Set this `true` to skip any type checks for expressions. This is useful while constructing expressions in Lib with
   full metadata, but it breaks during legacy conversion in some cases.
 
   In particular, if you override the metadata for a column to eg. treat a `:type/Integer` columns as a `:type/Instant`
@@ -101,54 +126,67 @@
   1b. expression is an registered MBQL clause and matches the schema registered
       with [[metabase.lib.schema.mbql-clause]], AND
 
-  2. expression's [[type-of]] isa? `base-type`"
-  [base-type description]
+  2. expression's [[type-of]] isa? `base-type`
+
+   Returns a zero-arg function that returns a translated string describing the expected type
+   if the expression does not match the schema. This is done to avoid premature i18n lookups at compile time."
+  [base-type type-desc-fn message]
   [:and
    ;; vector = MBQL clause, anything else = not an MBQL clause
    [:multi
-    {:dispatch vector?}
+    {:dispatch sequential?}
     [true  [:ref :metabase.lib.schema.mbql-clause/clause]]
     [false [:ref :metabase.lib.schema.literal/literal]]]
    [:fn
-    {:error/message description}
+    {:error/message message
+     :error/type-description type-desc-fn}
     #(and (not (non-expression-clause? %))
           (or *suppress-expression-type-check?*
               (type-of? % base-type)))]])
 
 (mr/def ::boolean
-  (expression-schema :type/Boolean "expression returning a boolean"))
+  (expression-schema :type/Boolean #(i18n/tru "a boolean")
+                     "an expression returning a boolean"))
 
 (mr/def ::string
-  (expression-schema :type/Text "expression returning a string"))
+  (expression-schema :type/Text #(i18n/tru "a string")
+                     "an expression returning a string"))
 
 (mr/def ::integer
-  (expression-schema :type/Integer "expression returning an integer"))
+  (expression-schema :type/Integer #(i18n/tru "an integer")
+                     "an expression returning an integer"))
 
 (mr/def ::non-integer-real
-  (expression-schema :type/Float "expression returning a non-integer real number"))
+  (expression-schema :type/Float #(i18n/tru "a non-integer real number")
+                     "an expression returning a non-integer real number"))
 
 (mr/def ::number
-  (expression-schema :type/Number "expression returning a number"))
+  (expression-schema :type/Number #(i18n/tru "a number")
+                     "an expression returning a number"))
 
 (mr/def ::date
-  (expression-schema :type/Date "expression returning a date"))
+  (expression-schema :type/Date #(i18n/tru "a date")
+                     "an expression returning a date"))
 
 (mr/def ::time
-  (expression-schema :type/Time "expression returning a time"))
+  (expression-schema :type/Time #(i18n/tru "a time")
+                     "an expression returning a time"))
 
 (mr/def ::datetime
-  (expression-schema :type/DateTime "expression returning a date time"))
+  (expression-schema :type/DateTime #(i18n/tru "a date time")
+                     "an expression returning a date time"))
 
 (mr/def ::temporal
-  (expression-schema :type/Temporal "expression returning a date, time, or date time"))
+  (expression-schema :type/Temporal #(i18n/tru "a temporal value")
+                     "an expression returning a temporal value"))
 
 (def orderable-types
   "Set of base types that are orderable."
   #{:type/Text :type/Number :type/Temporal :type/Boolean :type/MongoBSONID})
 
 (mr/def ::orderable
-  (expression-schema orderable-types
-                     "an expression that can be compared with :> or :<"))
+  (expression-schema orderable-types #(i18n/tru "an orderable type (e.g. number, string, temporal)")
+                     "an expression returning an orderable type (e.g. number, string, temporal)"))
 
 (defn comparable-expressions?
   "Returns whether expressions `x` and `y` can be compared.
@@ -166,6 +204,13 @@
               (and (types/assignable? t1 t)
                    (types/assignable? t2 t))))))
 
+(derive :type/Text        ::emptyable)
+(derive :type/MongoBSONID ::emptyable)
+
+(mr/def ::emptyable
+  (expression-schema ::emptyable #(i18n/tru "an emptyable type (e.g. string, BSON ID))")
+                     "an expression returning an emptyable type (e.g. string, BSON ID)"))
+
 (def equality-comparable-types
   "Set of base types that can be compared with equality."
   ;; TODO: Adding :type/* here was necessary to prevent type errors for queries where a field's type in the DB could not
@@ -176,28 +221,26 @@
   ;; `:type/Boolean` should fail; we can prove it's the wrong thing to do.
   #{:type/Boolean :type/Text :type/Number :type/Temporal :type/IPAddress :type/MongoBSONID :type/Array :type/*})
 
-(derive :type/Text        ::emptyable)
-(derive :type/MongoBSONID ::emptyable)
-
-(mr/def ::emptyable
-  (expression-schema ::emptyable "expression returning something emptyable (e.g. a string or BSON ID)"))
-
 (mr/def ::equality-comparable
   [:maybe
-   (expression-schema equality-comparable-types
-                      "an expression that can appear in := or :!=")])
+   (expression-schema equality-comparable-types #(i18n/tru "an equality comparable type (e.g. number, string, boolean)")
+                      "an expression returning an equality comparable type (e.g. number, string, boolean)")])
 
 ;;; any type of expression.
 (mr/def ::expression
-  [:maybe (expression-schema :type/* "any type of expression")])
+  [:maybe (expression-schema :type/* #(i18n/tru "any type")
+                             "an expression returning any type")])
 
 (mr/def ::expression.definition
   [:and
    [:ref ::expression]
    [:cat
     #_tag :any
+    ;; `::mc/default` because this only checks and normalizes the name -- the rest of the options map is validated by
+    ;; `::expression` above, and would otherwise be stripped here before it got there.
     #_opts [:map
-            [:lib/expression-name [:string {:decode/normalize common/normalize-string-key}]]]
+            [:lib/expression-name [:string {:decode/normalize common/normalize-string-key}]]
+            [::mc/default :any]]
     #_args [:* :any]]
    [:fn
     {:error/message "non-aggregation expression"}
@@ -217,7 +260,7 @@
     {:error/message "expressions must have unique names"}
     (fn [expressions]
       (or (empty? expressions)
-          (apply distinct? (map #(:lib/expression-name (lib.options/options %)) expressions))))]])
+          (apply distinct? (map (fn [[_tag opts]] (:lib/expression-name opts)) expressions))))]])
 
 (mr/def ::positive-integer-or-numeric-expression
   [:and
@@ -227,12 +270,9 @@
     #(cond
        (vector? %) ;; non-literal (checked above)
        true
-
        (not (int? %))
        false
-
        (not (pos? %))
        false
-
        :else
        true)]])

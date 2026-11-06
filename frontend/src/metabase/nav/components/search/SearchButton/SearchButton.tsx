@@ -2,13 +2,19 @@ import { VisualState, useKBar } from "kbar";
 import { useCallback } from "react";
 import { t } from "ttag";
 
-import useIsSmallScreen from "metabase/common/hooks/use-is-small-screen";
-import { METAKEY } from "metabase/lib/browser";
-import { Button, Icon, Tooltip } from "metabase/ui";
+import { useIsSmallScreen } from "metabase/common/hooks/use-is-small-screen";
+import { getSearchTextFromLocation } from "metabase/common/search";
+import { useLocation } from "metabase/router";
+import { ActionIcon, Button, type ButtonProps, Flex, Icon } from "metabase/ui";
+import { METAKEY } from "metabase/utils/browser";
 
-export const SearchButton = () => {
+import S from "./SearchButton.module.css";
+
+export const SearchButton = (props: ButtonProps) => {
+  const location = useLocation();
   const kbar = useKBar();
   const { setVisualState } = kbar.query;
+  const searchText = getSearchTextFromLocation(location);
 
   const handleClick = useCallback(() => {
     setVisualState(VisualState.showing);
@@ -18,34 +24,42 @@ export const SearchButton = () => {
 
   if (isSmallScreen) {
     return (
-      <Button
-        h="36px"
-        leftSection={<Icon name="search" />}
+      <ActionIcon
         variant="subtle"
+        size="sm"
         onClick={handleClick}
-        color="text-medium"
         aria-label="Search"
-      />
-    );
-  } else {
-    return (
-      <Tooltip label={`${t`Search...`} (${METAKEY}+k)`}>
-        <Button
-          h="36px"
-          w="240px"
-          leftSection={<Icon name="search" />}
-          onClick={handleClick}
-          // TODO: Adjust this with Mantine V7
-          styles={{
-            inner: {
-              justifyContent: "start",
-            },
-          }}
-          aria-label="Search"
-        >
-          {t`Search`}
-        </Button>
-      </Tooltip>
+      >
+        <Icon name="search" />
+      </ActionIcon>
     );
   }
+
+  return (
+    <Button
+      w="240px"
+      c={searchText ? "text-primary" : "text-disabled"}
+      leftSection={<Icon name="search" c="text-primary" />}
+      onClick={handleClick}
+      styles={{
+        inner: {
+          width: "100%",
+        },
+        label: {
+          display: "inline-flex",
+          justifyContent: "space-between",
+          width: "100%",
+        },
+      }}
+      className={S.searchTextButton}
+      aria-label="Search"
+      {...props}
+    >
+      <span>{searchText || t`Search...`}</span>
+      <Flex gap="xxs">
+        <span className={S.shortcutText}>{METAKEY}</span>
+        <span className={S.shortcutText}>{t`K`}</span>
+      </Flex>
+    </Button>
+  );
 };

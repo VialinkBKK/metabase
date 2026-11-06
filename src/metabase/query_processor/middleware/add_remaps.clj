@@ -25,35 +25,51 @@
   `name` is `:remapped_from` `:category_id`.
 
   See also [[metabase.parameters.chain-filter]] for another explanation of remapping."
+  (:refer-clojure :exclude [mapv select-keys some empty? not-empty get-in])
   (:require
-   [clojure.data :as data]
    [medley.core :as m]
-   [metabase.legacy-mbql.schema.helpers :as helpers]
-   [metabase.lib-be.metadata.jvm :as lib.metadata.jvm]
+   [metabase.lib-be.core :as lib-be]
    [metabase.lib.core :as lib]
    [metabase.lib.metadata :as lib.metadata]
    [metabase.lib.schema :as lib.schema]
    [metabase.lib.schema.common :as lib.schema.common]
    [metabase.lib.schema.id :as lib.schema.id]
    [metabase.lib.schema.join :as lib.schema.join]
+   [metabase.lib.schema.literal :as lib.schema.literal]
    [metabase.lib.schema.metadata :as lib.schema.metadata]
    [metabase.lib.schema.order-by :as lib.schema.order-by]
    [metabase.lib.schema.ref :as lib.schema.ref]
-   [metabase.lib.util :as lib.util]
    [metabase.lib.walk :as lib.walk]
    [metabase.query-processor.middleware.large-int :as large-int]
    [metabase.query-processor.schema :as qp.schema]
-   [metabase.query-processor.store :as qp.store]
+   ;; still passes state via the store's miscellaneous-value slot; general-cached-value migration pending
+   ^{:clj-kondo/ignore [:deprecated-namespace]} [metabase.query-processor.store :as qp.store]
    [metabase.util :as u]
    [metabase.util.log :as log]
    [metabase.util.malli :as mu]
-   [metabase.util.malli.registry :as mr]))
+   [metabase.util.malli.registry :as mr]
+   [metabase.util.performance :refer [mapv select-keys some empty? not-empty get-in]]))
 
 (mr/def ::simplified-ref
   [:tuple
    [:enum :field :expression :aggregation]
    [:and
-    :map
+    [:map {:closed true}
+     [:semantic-type   {:optional true} [:maybe ::lib.schema.common/semantic-or-relation-type]]
+     [:database-type   {:optional true} [:maybe ::lib.schema.common/non-blank-string]]
+     [:name            {:optional true} [:maybe ::lib.schema.common/non-blank-string]]
+     [:display-name    {:optional true} [:maybe ::lib.schema.common/non-blank-string]]
+     [:case-sensitive  {:optional true} :boolean]
+     [:include-current {:optional true} :boolean]
+     [:default         {:optional true} [:ref :metabase.lib.schema.expression/expression]]
+     [:join-alias      {:optional true} [:ref ::lib.schema.join/alias]]
+     [:source-field    {:optional true} ::lib.schema.id/field]
+     [:source-field-name       {:optional true} ::lib.schema.common/non-blank-string]
+     [:source-field-join-alias {:optional true} ::lib.schema.common/non-blank-string]
+     [:temporal-unit           {:optional true} [:ref :metabase.lib.schema.temporal-bucketing/unit]]
+     [:inherited-temporal-unit {:optional true} [:ref :metabase.lib.schema.temporal-bucketing/unit]]
+     [:original-temporal-unit  {:optional true} [:ref :metabase.lib.schema.temporal-bucketing/unit]]
+     [:binning                 {:optional true} [:ref :metabase.lib.schema.binning/binning]]]
     [:fn
      {:error/message "options map without namespaced keys and base-type/effective-type"}
      (complement (some-fn :base-type :effective-type :lib/uuid))]]
@@ -61,6 +77,7 @@
     ::lib.schema.id/field
     :string]])
 
+;;; TODO (Cam 9/16/25) -- use [[metabase.lib.schema.util/mbql-clause-distinct-key]] for this
 (mu/defn- simplify-ref-options :- ::simplified-ref
   [a-ref :- ::lib.schema.ref/ref]
   (lib/update-options a-ref (fn [opts]
@@ -71,7 +88,7 @@
 (mr/def ::external-remapping
   "Schema for the info we fetch about `external` type Dimensions that will be used for remappings in this Query. Fetched
   by the pre-processing portion of the middleware, and passed along to the post-processing portion."
-  [:map
+  [:map {:closed true}
    [:id                        ::lib.schema.id/dimension]              ; unique ID for the remapping
    [:name                      ::lib.schema.common/non-blank-string]   ; display name for the remapping
    [:field-id                  ::lib.schema.id/field]                  ; ID of the Field being remapped
@@ -89,25 +106,32 @@
    field-id              :- ::lib.schema.id/field]
   (let [col (lib.metadata/field metadata-providerable field-id)]
     (when-let [{remap-id :id, remap-name :name, remap-field-id :field-id} (:lib/external-remap col)]
-      (when-let [remap-field (lib.metadata/field metadata-providerable remap-field-id)]
-        {:id                        remap-id
-         :name                      remap-name
-         :field-id                  (:id col)
-         :field-name                (:name col)
-         :human-readable-field-id   remap-field-id
-         :human-readable-field-name (:name remap-field)}))))
+      (when-let [fk-target-field-id (:fk-target-field-id col)]
+        (when-let [fk-field (lib.metadata/field metadata-providerable fk-target-field-id)]
+          (when (not (contains? #{:sensitive :retired} (:visibility-type fk-field)))
+            (when-let [remap-field (lib.metadata/field metadata-providerable remap-field-id)]
+              (when (not (contains? #{:sensitive :retired} (:visibility-type remap-field)))
+                {:id                        remap-id
+                 :name                      remap-name
+                 :field-id                  (:id col)
+                 :field-name                (:name col)
+                 :human-readable-field-id   remap-field-id
+                 :human-readable-field-name (:name remap-field)}))))))))
 
 (mr/def ::remap-info
   [:and
-   [:map
+   [:map {:closed true}
     [:original-field-clause :mbql.clause/field]
     [:new-field-clause      [:and
                              :mbql.clause/field
                              [:tuple
                               [:= :field]
-                              [:map
-                               [::new-field-dimension-id ::lib.schema.id/dimension]]
-                              :any]]]
+                              [:map {:closed true}
+                               [::new-field-dimension-id ::lib.schema.id/dimension]
+                               [:lib/uuid      {:optional true} ::lib.schema.common/uuid]
+                               [:source-field  {:optional true} ::lib.schema.id/field]
+                               [:join-alias    {:optional true} [:ref ::lib.schema.join/alias]]]
+                              ::lib.schema.id/field]]]
     [:dimension             ::external-remapping]]
    [:fn
     {:error/message "the new field clause should have the same join alias as the original field clause"}
@@ -126,7 +150,7 @@
   ;;
   ;; TODO (Cam 7/23/25) -- this seems sorta busted, we should probably be using `:lib/desired-column-alias` here
   ;; instead.
-  (let [name-generator (lib.util/unique-name-generator)
+  (let [name-generator (lib/unique-name-generator)
         unique-name    (fn [field-id]
                          (assert (pos-int? field-id) (str "Invalid Field ID: " (pr-str field-id)))
                          (let [field (lib.metadata/field query field-id)]
@@ -139,15 +163,14 @@
             (keep (fn [{:keys [id], :as col}]
                     (when-let [dimension (when (pos-int? id)
                                            (field-id->remapping-dimension query id))]
-                      (let [original-ref (or (:lib/original-ref col)
-                                             (lib/ref col))]
+                      (let [original-ref (lib/ref col)]
                         {:original-field-clause original-ref
                          :new-field-clause      [:field
                                                  (merge
                                                   {:lib/uuid                (str (random-uuid))
                                                    :source-field            id
                                                    ::new-field-dimension-id (u/the-id dimension)}
-                                                  (when-let [join-alias (:metabase.lib.join/join-alias col)]
+                                                  (when-let [join-alias (:lib/join-alias col)]
                                                     {:join-alias join-alias}))
                                                  (u/the-id (:human-readable-field-id dimension))]
                          :dimension             (assoc dimension
@@ -155,18 +178,25 @@
                                                        :human-readable-field-name (-> dimension :human-readable-field-id unique-name))})))))
            (lib.walk/apply-f-for-stage-at-path lib/returned-columns query path)))))
 
+(mu/defn- original-fields->new-fields
+  [remap-infos :- [:maybe [:sequential ::remap-info]]]
+  (into {}
+        (mapcat (fn [{:keys [original-field-clause new-field-clause dimension]}]
+                  (let [original-with-id (assoc original-field-clause 2 (:field-id dimension))]
+                    [[(simplify-ref-options original-field-clause) new-field-clause]
+                     [(simplify-ref-options original-with-id) new-field-clause]])))
+        remap-infos))
+
 (mu/defn- add-fk-remaps-rewrite-existing-fields-add-original-field-dimension-id :- ::lib.schema/fields
   "Rewrite existing `:fields` in a query. Add `::original-field-dimension-id` to any Field clauses that are
   remapped-from."
   [infos  :- [:maybe [:sequential ::remap-info]]
    fields :- ::lib.schema/fields]
-  (let [field->remapped-col (into {}
-                                  (map (fn [{:keys [original-field-clause new-field-clause]}]
-                                         [(simplify-ref-options original-field-clause) new-field-clause]))
-                                  infos)]
+  (let [field->remapped-col (original-fields->new-fields infos)]
     (mapv
      (fn [field-ref]
-       (if-let [[_tag {::keys [new-field-dimension-id], :as _opts} _id-or-name] (field->remapped-col (simplify-ref-options field-ref))]
+       (if-let [[_tag {::keys [new-field-dimension-id], :as _opts} _id-or-name]
+                (field->remapped-col (simplify-ref-options field-ref))]
          (lib/update-options field-ref assoc ::original-field-dimension-id new-field-dimension-id)
          field-ref))
      fields)))
@@ -228,9 +258,17 @@
 
 (mr/def ::query-and-remaps
   [:map
-   [:remaps [:maybe (helpers/distinct [:sequential ::external-remapping])]]
+   [:remaps [:maybe [:and
+                     [:sequential ::external-remapping]
+                     [:fn
+                      {:error/message "empty or distinct"}
+                      (fn [remappings]
+                        (or (empty? remappings)
+                            (apply distinct? remappings)))]]]]
    [:query  ::lib.schema/query]])
 
+;; PERF: There's a ton of re-processing of the same fields lists building little indexes, I think that can be consolidated
+;; into a more pipelined thing. Not sure how much it buys us, but this is a seriously slow middleware with wide tables.
 (mu/defn- add-fk-remaps-to-fields :- [:maybe ::lib.schema/fields]
   [infos  :- [:maybe [:sequential ::remap-info]]
    fields :- [:maybe ::lib.schema/fields]]
@@ -253,10 +291,8 @@
       ;; if they do, update `:fields`, `:order-by` and `:breakout` clauses accordingly and add to the query
       (let [new-fields         (add-fk-remaps-to-fields infos fields)
             ;; make a map of field-id-clause -> fk-clause from the tuples
-            original->remapped (into {}
-                                     (map (fn [{:keys [original-field-clause new-field-clause]}]
-                                            [(simplify-ref-options original-field-clause) new-field-clause]))
-                                     infos)
+            original->remapped (original-fields->new-fields infos)
+            ;; PERF: More indexing on the same stuff! This really needs to be poured into a common context.
             new-breakout       (add-fk-remaps-rewrite-breakout original->remapped breakout)
             new-order-by       (add-fk-remaps-rewrite-order-by original->remapped order-by)
             remaps             (into []
@@ -270,46 +306,59 @@
           (seq remaps)   (assoc ::remaps remaps)))
       ;; otherwise return query as-is
       (cond-> stage
+        ;; PERF: This is an edit to the query, busting the caching unnecessarily when there's nothing to remap.
         (seq previous-stage-remaps) (assoc ::remaps previous-stage-remaps)))))
 
 (mu/defn- add-fk-remaps-to-join :- [:maybe ::lib.schema.join/join]
   "Update Join `:fields` to add entries for remapped columns. Update the join's last stage "
-  [query                       :- ::lib.schema/query
+  [original-query              :- ::lib.schema/query
+   updated-query               :- ::lib.schema/query
    path                        :- ::lib.walk/path
    {:keys [fields], :as join}  :- ::lib.schema.join/join]
-  (when (and (sequential? fields) ; `:fields :all` should have already been resolved by this point.
+  (when (and (sequential? fields)       ; `:fields :all` should have already been resolved by this point.
              (seq fields))
-    (let [join-last-stage-path (into (vec path) [:stages (dec (count (:stages join)))])]
-      (when-let [last-stage-infos (remap-column-infos query join-last-stage-path)]
+    (let [original-join-field-ids               (into #{}
+                                                      (keep :id)
+                                                      (lib.walk/apply-f-for-stage-at-path
+                                                       lib/join-fields-to-add-to-parent-stage
+                                                       original-query path join {:include-remaps? false}))
+          original-join-fields-includes-source? (fn [remap-info]
+                                                  (some (fn [path]
+                                                          (contains? original-join-field-ids (get-in remap-info path)))
+                                                        [[:dimension :field-id]
+                                                         ;; (not sure this is really something we want to support,
+                                                         ;; but [[metabase.query-processor.remapping-test/remapped-columns-in-joined-source-queries-test]]
+                                                         ;; alleges that you can include just the remapped column in
+                                                         ;; join `:fields` and it's supposed to work)
+                                                         [:dimension :human-readable-field-id]]))
+          join-last-stage-path                  (into (vec path) [:stages (dec (count (:stages join)))])]
+      (if-let [last-stage-infos (->> (remap-column-infos updated-query join-last-stage-path)
+                                     (filter original-join-fields-includes-source?)
+                                     not-empty)]
+        ;; we have remaps to add, add them to join `:fields`
         (let [infos      (for [info last-stage-infos]
                            (-> info
                                (update :original-field-clause lib/with-join-alias (:alias join))
                                (update :new-field-clause      lib/with-join-alias (:alias join))))
               new-fields (into
                           []
-                          ;; TODO (Cam 7/25/25) the join fields may already include a remap, but `:source-field` or
-                          ;; other distinguishing information doesn't get propagated in refs beyond the stage where the
-                          ;; implicit join happens; thus we should ignore any duplicates with the same `:source-field`.
-                          ;; Joins with multiple remaps to the same table still work because we switch to using name
-                          ;; refs e.g. `NAME` and `NAME_2` instead of duplicate ID refs in this situation --
-                          ;; see [[multiple-fk-remaps-test-in-joins-e2e-test]].
-                          (m/distinct-by (fn [field-ref]
-                                           (-> field-ref
-                                               simplify-ref-options
-                                               (lib/update-options dissoc :source-field))))
+                          (m/distinct-by simplify-ref-options)
                           (add-fk-remaps-to-fields infos fields))]
-          (assoc join :fields new-fields))))))
+          (assoc join :fields new-fields))
+        ;; there are no remaps to add, discard any changes that happen inside of the join (such as adding additional
+        ;; joins to power remaps that we're not using)
+        (get-in original-query path)))))
 
 (mu/defn- add-fk-remaps :- ::query-and-remaps
   "Add any Fields needed for `:external` remappings to the `:fields` clause of the query, and update `:order-by` and
   `breakout` clauses as needed. Returns a map with `:query` (the updated query) and `:remaps` (a sequence
   of [[:sequential ::external-remapping]] information maps)."
-  [query :- ::lib.schema/query]
-  (let [query' (lib.walk/walk query
+  [original-query :- ::lib.schema/query]
+  (let [query' (lib.walk/walk original-query
                               (fn [query path-type path stage-or-join]
                                 (case path-type
                                   :lib.walk/stage (add-fk-remaps-to-stage query path stage-or-join)
-                                  :lib.walk/join  (add-fk-remaps-to-join query path stage-or-join))))
+                                  :lib.walk/join  (add-fk-remaps-to-join original-query query path stage-or-join))))
         remaps (::remaps (lib/query-stage query' -1))]
     {:query  (lib.walk/walk-stages
               query'
@@ -326,15 +375,24 @@
           ;; last stage (only stage) is native
           (= (:lib/type (lib/query-stage query -1)) :mbql.stage/native))
     query
-    (let [{:keys [remaps query]} (add-fk-remaps query)]
+    (let [{:keys [remaps query]} (add-fk-remaps query)
+          returned-ids           (into #{} (keep :id) (lib/returned-columns query))
+          ;; Only retain those remappings which actually apply to returned columns.
+          ;; Otherwise, if an FK has an external remapping (say, Orders.PRODUCT_ID -> Product.TITLE) and we implicitly
+          ;; join `Product.TITLE` directly, we actually don't want to mark that column as :remapped_from anything -
+          ;; it wasn't remapped, it was explicitly referenced. So if the FK doesn't appear as a returned column, any
+          ;; remaps we might have inherited from earlier stages etc. don't apply. See #65726
+          remaps                 (into [] (comp (filter (comp returned-ids :field-id))
+                                                ;; Convert the remappings to plain maps rather than record types.
+                                                (map #(into {} %)))
+                                       remaps)]
       (cond-> query
-        ;; convert the remappings to plain maps so we don't have to look at record type nonsense everywhere
-        (seq remaps) (assoc ::external-remaps (mapv (partial into {}) remaps))))))
+        (seq remaps) (assoc ::external-remaps remaps)))))
 
 ;;;; Post-processing
 
 (mr/def ::internal-remapping-info
-  [:map
+  [:map {:closed true}
    ;; index of original column
    [:col-index      :int]
    ;; names
@@ -342,26 +400,26 @@
    ;; I'm not convinced this works if there's already a column with the same name in the results.
    [:to              ::lib.schema.common/non-blank-string]
    ;; map of original value -> human readable value
-   [:value->readable :map]
+   [:value->readable [:map-of ::lib.schema.literal/literal ::lib.schema.literal/literal]]
    ;; Info about the new column we will tack on to end of `:cols`
-   [:new-column      :map]])
+   [:new-column      ::qp.schema/result-metadata.column]])
 
 (mr/def ::internal-columns-info
-  [:map
+  [:map {:closed true}
    [:internal-only-dims [:maybe [:sequential ::internal-remapping-info]]]
    ;; this is just (map :new-column internal-only-dims)
-   [:internal-only-cols [:maybe [:sequential :map]]]])
+   [:internal-only-cols [:maybe ::qp.schema/result-metadata.columns]]])
 
 ;;;; Metadata
 
 (mu/defn- merge-metadata-for-internally-remapped-column :- [:maybe [:sequential :map]]
   "If one of the internal remapped columns says it's remapped from this column, merge in the `:remapped_to` info."
-  [columns                :- [:maybe [:sequential :map]]
+  [columns                :- [:maybe ::qp.schema/result-metadata.columns]
    {:keys [col-index to]} :- ::internal-remapping-info]
   (update (vec columns) col-index assoc :remapped_to to))
 
 (mu/defn- merge-metadata-for-internal-remaps :- [:maybe [:sequential :map]]
-  [columns                      :- [:maybe [:sequential :map]]
+  [columns                      :- [:maybe ::qp.schema/result-metadata.columns]
    {:keys [internal-only-dims]} :- [:maybe ::internal-columns-info]]
   (reduce
    merge-metadata-for-internally-remapped-column
@@ -392,15 +450,15 @@
 ;;     :name          "NAME"
 ;;     :display_name  "Sender ID"}
 (mu/defn- merge-metadata-for-externally-remapped-column* :- :map
-  [columns
+  [columns :- [:maybe ::qp.schema/result-metadata.columns]
    {{::keys [original-field-dimension-id new-field-dimension-id]} :options
-    :as                                          column} :- :map
+    :as                                          column} :- ::qp.schema/result-metadata.column
    {dimension-id      :id
-    from-name         :field_name
+    from-name         :field-name
     from-display-name :name
     to-name           :human-readable-field-name} :- ::external-remapping]
   (log/trace "Considering column\n"
-             (u/pprint-to-str 'cyan (select-keys column [:id :name :fk_field_id :display_name :options]))
+             (pr-str (select-keys column [:id :fk_field_id :options]))
              (u/colorize :magenta "\nAdd :remapped_to metadata?")
              "\n=>" '(= dimension-id original-field-dimension-id)
              "\n=>" (list '= dimension-id original-field-dimension-id)
@@ -418,31 +476,33 @@
             ;; if this is a column we're remapping FROM, we need to add information about which column we're remapping
             ;; TO
             (when (= dimension-id original-field-dimension-id)
-              {:remapped_to (or (some (fn [{{::keys [new-field-dimension-id]} :options, target-name :name}]
-                                        (when (= new-field-dimension-id dimension-id)
-                                          target-name))
+              {:remapped_to (or (some (fn [{{::keys [new-field-dimension-id]} :options, :as target-col}]
+                                        (when (and (= new-field-dimension-id dimension-id)
+                                                   (= (:lib/join-alias target-col) (:lib/join-alias column)))
+                                          (:name target-col)))
                                       columns)
                                 to-name)})
             ;; if this is a column we're remapping TO, we need to add information about which column we're remapping
             ;; FROM
             (when (= dimension-id new-field-dimension-id)
-              {:remapped_from (or (some (fn [{{::keys [original-field-dimension-id]} :options, source-name :name}]
-                                          (when (= original-field-dimension-id dimension-id)
-                                            source-name))
+              {:remapped_from (or (some (fn [{{::keys [original-field-dimension-id]} :options, :as source-col}]
+                                          (when (and (= original-field-dimension-id dimension-id)
+                                                     (= (:lib/join-alias source-col) (:lib/join-alias column)))
+                                            (:name source-col)))
                                         columns)
                                   from-name)
                :display_name  from-display-name}))
     (when (not= column <>)
-      (log/tracef "Added metadata:\n%s" (u/pprint-to-str 'green (second (data/diff column <>)))))))
+      (log/trace "Added remapping metadata to column"))))
 
 (mu/defn- merge-metadata-for-externally-remapped-column :- [:maybe [:sequential :map]]
-  [columns :- [:maybe [:sequential :map]] dimension :- ::external-remapping]
-  (log/tracef "Merging metadata for external dimension\n%s" (u/pprint-to-str 'yellow (into {} dimension)))
+  [columns :- [:maybe ::qp.schema/result-metadata.columns] dimension :- ::external-remapping]
+  (log/tracef "Merging metadata for external dimension %s" (:id dimension))
   (mapv #(merge-metadata-for-externally-remapped-column* columns % dimension)
         columns))
 
 (mu/defn- merge-metadata-for-external-remaps :- [:maybe [:sequential :map]]
-  [columns :- [:maybe [:sequential :map]] remapping-dimensions :- [:maybe [:sequential ::external-remapping]]]
+  [columns :- [:maybe ::qp.schema/result-metadata.columns] remapping-dimensions :- [:maybe [:sequential ::external-remapping]]]
   (reduce
    merge-metadata-for-externally-remapped-column
    columns
@@ -453,7 +513,7 @@
   To get this critical information, this uses the `remapping-dimensions` info saved by the pre-processing portion of
   this middleware for external remappings, and the internal-only remapped columns handled by post-processing
   middleware below for internal columns."
-  [columns              :- [:maybe [:sequential :map]]
+  [columns              :- [:maybe ::qp.schema/result-metadata.columns]
    remapping-dimensions :- [:maybe [:sequential ::external-remapping]]
    internal-cols-info   :- [:maybe ::internal-columns-info]]
   (-> columns
@@ -462,7 +522,10 @@
 
 ;;;; Transform to add additional cols to results
 
-(defn- create-remapped-col [col-name remapped-from base-type]
+(mu/defn- create-remapped-col
+  [col-name      :- :string
+   remapped-from :- :string
+   base-type     :- ::lib.schema.common/base-type]
   {:description   nil
    :id            nil
    :table_id      nil
@@ -516,12 +579,13 @@
 (mu/defn- col->dim-map :- [:maybe ::internal-remapping-info]
   "Given a `:col` map from the results, return a map of information about the `internal` dimension used for remapping
   it."
-  [idx :- ::lib.schema.common/int-greater-than-or-equal-to-zero
+  [idx :- nat-int?
    {{:keys [values human-readable-values], remap-to :name} :lib/internal-remap
     :as                                                    col} :- ::column-with-optional-base-type]
   (when (seq values)
     (let [remap-from       (:name col)
-          stringified-mask (qp.store/miscellaneous-value [::large-int/column-index-mask])]
+          ;; existing usage -- don't use going forward
+          stringified-mask #_{:clj-kondo/ignore [:deprecated-var]} (qp.store/miscellaneous-value [::large-int/column-index-mask])]
       {:col-index       idx
        :from            remap-from
        :to              remap-to
@@ -556,8 +620,7 @@
 (mu/defn- add-remapped-to-and-from-metadata
   "Add remapping info `:remapped_from` and `:remapped_to` to each existing column in the results metadata, and add
   entries for each newly added column to the end of `:cols`."
-  [metadata                                             :- [:map
-                                                            [:cols [:maybe [:sequential :map]]]]
+  [metadata                                             :- ::qp.schema/metadata
    remapping-dimensions                                 :- [:maybe [:sequential ::external-remapping]]
    {:keys [internal-only-cols], :as internal-cols-info} :- [:maybe ::internal-columns-info]]
   (update metadata :cols (fn [cols]
@@ -570,22 +633,39 @@
   added and each row flowing through needs to include the remapped data for the new column. For external remappings
   the column information needs to be updated with what it's being remapped from and the user specified name for the
   remapped column."
-  [{:keys [internal-only-dims]} :- ::internal-columns-info rf]
+  [{:keys [internal-only-dims]} :- ::internal-columns-info
+   rf                           :- fn?]
   (if-let [remap-fn (make-row-map-fn internal-only-dims)]
     ((map remap-fn) rf)
     rf))
 
+(defn- cols-internal-columns-info
+  "The [[internal-columns-info]] of the result columns `cols`."
+  [cols]
+  (internal-columns-info (map #(lib-be/instance->metadata % :metadata/column) cols)))
+
 (mu/defn remap-results :- ::qp.schema/rff
   "Post-processing middleware. Handles `::external-remaps` added by [[add-remapped-columns-middleware]]; transforms
   results and adds additional metadata based on these remaps, as well as internal (human-readable values) remaps."
-  [{::keys [external-remaps], {:keys [disable-remaps?]} :middleware, :as _query} :- :map
+  [{::keys [external-remaps], {:keys [disable-remaps?]} :middleware, :as _query} :- ::lib.schema/query
    rff                                                                           :- ::qp.schema/rff]
   (if disable-remaps?
     rff
     (fn remap-results-rff* [metadata]
-      (let [mlv2-cols          (map
-                                #(lib.metadata.jvm/instance->metadata % :metadata/column)
-                                (:cols metadata))
-            internal-cols-info (internal-columns-info mlv2-cols)
+      (let [internal-cols-info (cols-internal-columns-info (:cols metadata))
             metadata           (add-remapped-to-and-from-metadata metadata external-remaps internal-cols-info)]
         (remap-results-xform internal-cols-info (rff metadata))))))
+
+(mu/defn remap-cols :- [:maybe ::qp.schema/result-metadata.columns]
+  "The result columns `cols` of the preprocessed `query` with the remapping metadata [[remap-results]] adds to the
+  results of running it."
+  [{::keys [external-remaps], {:keys [disable-remaps?]} :middleware, :as _query} :- ::lib.schema/query
+   cols                                                                          :- [:maybe ::qp.schema/result-metadata.columns]]
+  (if (or disable-remaps? (empty? cols))
+    cols
+    (vec (:cols (add-remapped-to-and-from-metadata {:cols cols} external-remaps (cols-internal-columns-info cols))))))
+
+(defn disable-remaps
+  "Sets the value of the disable-remaps? option in this query."
+  [query]
+  (assoc-in query [:middleware :disable-remaps?] true))

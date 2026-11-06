@@ -1,33 +1,38 @@
 import { t } from "ttag";
 
-import ExternalLink from "metabase/common/components/ExternalLink";
-import { color } from "metabase/lib/colors";
+import { ExternalLink } from "metabase/common/components/ExternalLink";
+import type { Plan } from "metabase/settings";
 import { Box, Button, Flex, Icon, Text } from "metabase/ui";
+import { color } from "metabase/ui/colors";
 import type { CloudMigration } from "metabase-types/api/cloud-migration";
 
-import { LargeIconContainer, MigrationCard } from "./CloudPanel.styled";
-import { getMigrationEventTime } from "./utils";
+import { LargeIconContainer } from "./LargeIconContainer";
+import { MigrationCard } from "./MigrationCard";
+import { getMigrationEventTime, getMigrationUrl } from "./utils";
 
 interface MigrationSuccessProps {
+  storeUrl: string;
+  plan: Plan;
   migration: CloudMigration;
   restartMigration: () => void;
   isRestarting: boolean;
-  checkoutUrl: string;
 }
 
 export const MigrationSuccess = ({
+  storeUrl,
+  plan,
   migration,
   restartMigration,
   isRestarting,
-  checkoutUrl,
 }: MigrationSuccessProps) => {
   const uploadedAt = getMigrationEventTime(migration.updated_at);
+  const migrationUrl = getMigrationUrl(storeUrl, plan, migration);
 
   return (
     <>
       <MigrationCard>
-        <Flex gap="md">
-          <LargeIconContainer color={color("success")}>
+        <Flex gap="lg">
+          <LargeIconContainer color={color("feedback-positive")}>
             <Icon size="1.5rem" name="check" />
           </LargeIconContainer>
 
@@ -41,7 +46,7 @@ export const MigrationSuccess = ({
             </Text>
 
             <Box mt="1.5rem">
-              <ExternalLink href={checkoutUrl}>
+              <ExternalLink href={migrationUrl}>
                 <Button variant="filled">{t`Go to Metabase Store`}</Button>
               </ExternalLink>
             </Box>
@@ -50,10 +55,10 @@ export const MigrationSuccess = ({
       </MigrationCard>
 
       <Button
-        variant="subtle"
+        variant="transparent"
+        size="compact-md"
         onClick={restartMigration}
         disabled={isRestarting}
-        px="0"
         mt="1rem"
       >{t`Restart the process`}</Button>
     </>

@@ -16,7 +16,7 @@ Folder permissions should not be considered a security feature, but instead a fe
 
 Folders work similarly to a file system. You can add snippets to folders, and put folders inside of other folders. You can nest as many folders as your Metabase instance can handle or the laws of physics allow (whichever yields first).
 
-The **Top folder** is the snippet sidebar's default folder. It is the root folder that contains all folders and snippets.
+**SQL snippets** is the snippet sidebar's default folder. It is the root folder that contains all folders and snippets.
 
 ### Creating a new Snippet folder
 
@@ -32,11 +32,11 @@ You can create a Snippet folder from the **Snippets** menu in the [SQL editor](.
 
 ### Creating a new Snippet
 
-On [some plans](https://www.metabase.com/pricing/), when creating a Snippet, you'll also see an additional option to add that snippet to an existing folder (the **Folder this should be in** option).
+On [some plans](https://www.metabase.com/pricing), when creating a Snippet, you'll also see an additional option to add that snippet to an existing folder (the **Folder this should be in** option).
 
 ![Add a snippet enterprise modal](./images/enterprise-add-snippet.png)
 
-The default location is the **Top folder**, which is the root folder for all snippets and folders. You can add a snippet to a folder at any time (or relocate a snippet to another folder, provided you have Edit permission to both folders).
+The default location is **SQL snippets**, which is the root folder for all snippets and folders. You can add a snippet to a folder at any time (or relocate a snippet to another folder, provided you have Edit permission to both folders).
 
 Note that snippet names must be unique; folders do not affect this requirement.
 
@@ -48,7 +48,7 @@ Administrators (and only administrators) can set snippet visibility and editabil
 
 Administrators can set the permissions on a folder by clicking on the ellipsis (**...**) next to a folder, and selecting **Change permissions**.
 
-You can additionally change the currently selected folder by mousing over to the top of the Snippets sidebar, clicking on the ellipsis (**...**) to the left of the **+**, and selecting **Change permissions**. When at the **Top folder**, selecting the **...** at the top of the sidebar will give Administrators the option to set permissions for all snippets, folders, and sub-folders.
+You can additionally change the currently selected folder by mousing over to the top of the Snippets sidebar, clicking on the ellipsis (**...**) to the left of the **+**, and selecting **Change permissions**. When at the **SQL snippets** root, selecting the **...** at the top of the sidebar will give Administrators the option to set permissions for all snippets, folders, and sub-folders.
 
 When changing permissions on a folder that has sub-folders, you have an option to extend those permissions to that folder's sub-folders by toggling the **Also change sub-folders** setting.
 
@@ -84,8 +84,8 @@ In three parts:
 2. **The snippet would not show up in the Snippet sidebar**. However, just because people in that group can run the question without issue, they still don't have permission to the snippet's folder, so they wouldn't be able to see or edit that snippet (or the snippet's folder) in the Snippet sidebar.
 3. **People with SQL query access can still run the snippet if they know its name, regardless if they have permissions to the snippet's folder**. They wouldn't be able to view or edit the snippet, but they could include it in a query if they knew its name, e.g, `{% raw %}{{snippet: Example snippet I don't have permissions to but can still use }}{% endraw %}`.
 
-Because of how snippet folder permissions work, we recommend that you consider snippet folder permissions as an additional tool for snippet organization, not as method of preventing access to the SQL code those snippets contain. Use folder permissions to keep the snippet sidebar tidy by exposing teams to folders relevant to their analytical domain, and restrict editing permissions to key snippets in your organization to keep important SQL code accurate and safe from bugs introduced by unvetted edits.
+Because of how snippet folder permissions work, we recommend that you consider snippet folder permissions as an additional tool for snippet organization, not as a method of preventing access to the SQL code those snippets contain. Use folder permissions to keep the snippet sidebar tidy by exposing teams to folders relevant to their analytical domain, and restrict editing permissions to key snippets in your organization to keep important SQL code accurate and safe from bugs introduced by unvetted edits.
 
 ## Further reading
 
-- [Snippets](https://www.metabase.com/learn/metabase-basics/querying-and-dashboards/sql-in-metabase/snippets).
+- [Snippets](../questions/native-editor/snippets.md).

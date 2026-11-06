@@ -3,6 +3,7 @@
    [metabase.analytics.core :as analytics]
    [metabase.api.macros :as api.macros]
    [metabase.app-db.core :as mdb]
+   [metabase.bug-reporting.db :as bug-reporting.db]
    [metabase.config.core :as config]
    [metabase.driver :as driver]
    [metabase.permissions.core :as perms]
@@ -17,7 +18,7 @@
   "Make it easy for the user to tell us what they're using"
   []
   (merge
-   {:databases            (t2/select-fn-set :engine :model/Database)
+   {:databases            (bug-reporting.db/database-engines)
     :run-mode             (config/config-kw :mb-run-mode)
     :plan-alias           (or (premium-features/plan-alias) "")
     :version              config/mb-version-info
@@ -37,6 +38,10 @@
       :current-user-count (premium-features/active-users-count)
       :valid-thru         (:valid-thru (premium-features/token-status))})))
 
+;; TODO (Cam 2025-11-25) please add a response schema to this API endpoint, it makes it easier for our customers to
+;; use our API + we will need it when we make auto-TypeScript-signature generation happen
+;;
+#_{:clj-kondo/ignore [:metabase/validate-defendpoint-has-response-schema]}
 (api.macros/defendpoint :get "/details"
   "Returns version and system information relevant to filing a bug report against Metabase."
   []
@@ -45,6 +50,10 @@
     (not (premium-features/is-hosted?))
     (assoc :system-info (u.system-info/system-info))))
 
+;; TODO (Cam 2025-11-25) please add a response schema to this API endpoint, it makes it easier for our customers to
+;; use our API + we will need it when we make auto-TypeScript-signature generation happen
+;;
+#_{:clj-kondo/ignore [:metabase/validate-defendpoint-has-response-schema]}
 (api.macros/defendpoint :get "/connection-pool-details"
   "Returns database connection pool info for the current Metabase instance."
   []
