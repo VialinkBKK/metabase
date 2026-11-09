@@ -15,9 +15,10 @@
 (def ^:private end-reasons
   "Why a session can end (`core_session.end_reason`), one value per path that ends sessions: an admin's revocation,
   the user's own logout, a password change, the user's or their tenant's deactivation, an SSO logout, a support-access
-  grant's revocation, expiry (its own `expires_at` or `max-session-age`, one reason), or the idle timeout."
+  grant's revocation, expiry (its own `expires_at` or `max-session-age`, one reason), the idle timeout, or a handoff
+  to a browser session."
   ["admin" "logout" "password-change" "user-deactivated" "tenant-deactivated" "sso-logout" "support-grant-revoked"
-   "expired" "timed-out"])
+   "expired" "timed-out" "handoff"])
 
 (mr/def ::end-reason
   (into [:enum] end-reasons))

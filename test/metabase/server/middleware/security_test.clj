@@ -25,6 +25,11 @@
       (get "Content-Security-Policy")
       (header->directive directive)))
 
+(deftest referrer-policy-test
+  (testing "URLs do not leak to other sites through the Referer header"
+    (is (= "strict-origin"
+           (get (mw.security/security-headers) "Referrer-Policy")))))
+
 (defn- csp-directive-from-response
   [response directive]
   (-> (get-in response [:headers "Content-Security-Policy"])

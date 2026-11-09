@@ -283,6 +283,48 @@
                                        [(login-throttlers :ip-address) ip-address]]
                                       do-login)))))
 
+(api.macros/defendpoint :post "/handoff" :- [:map {:closed true} [:code ms/NonBlankString]]
+  "Trade the current session for a short-lived, single-use code that is safe to put in a URL. A browser turns the code
+  in to `POST /api/session/handoff/exchange` to get a session of its own; doing so ends the session used here."
+  [_route-params _query-params _body {:keys [metabase-session-key], :as _request}]
+  ;; `metabase-session-key` is present for any cookie or header; `*current-user-id*` says the session is really live
+  (let [source   (when (and api/*current-user-id* metabase-session-key)
+                   (session.db/handoff-source (session/hash-session-key metabase-session-key)))
+        provider (some-> (:auth_identity_id source) session.db/auth-identity-provider :provider)]
+    (when-not provider
+      (throw (ex-info (tru "Unauthenticated") {:status-code 401})))
+    {:code (session.challenge/issue-handoff-code api/*current-user-id*
+                                                 provider
+                                                 (:id source)
+                                                 (:mfa_auth_identity_id source))}))
+
+;; No response schema: the success path returns a full ring response (session cookies must be set), which the
+;; response-schema machinery would validate as the body. Unlike `POST /api/session`, the body does not repeat the
+;; session key, which only ever reaches the browser in an HttpOnly cookie.
+#_{:clj-kondo/ignore [:metabase/validate-defendpoint-has-response-schema]}
+(api.macros/defendpoint :post "/handoff/exchange"
+  "Exchange a code from `POST /api/session/handoff` for a new session, set in HttpOnly cookies. Codes work once."
+  [_route-params
+   _query-params
+   {:keys [code]} :- [:map {:closed true} [:code ms/NonBlankString]]
+   request]
+  (let [invalid      #(ex-info (tru "This link has expired. Please try again.") {:status-code 401})
+        claims       (or (session.challenge/verify-handoff-code code) (throw (invalid)))
+        ;; Ending the source session is what makes the code single-use: of any concurrent exchanges only one can end
+        ;; it, and a session ended meanwhile by a logout or password change rejects the code too.
+        _            (when-not (= 1 (session.db/end-sessions! {:id [(:session-id claims)]} "handoff" :self))
+                       (throw (invalid)))
+        user         (session.db/user-login-status (:user-id claims))
+        _            (when-not (:is_active user)
+                       (throw (invalid)))
+        new-session  (auth-identity/create-session-with-auth-tracking!
+                      user
+                      (request/device-info request)
+                      (auth-identity/provider-string->keyword (:provider claims))
+                      (:mfa-auth-identity-id claims))
+        response     (vary-meta {:success true} assoc :metabase-user-id (:user_id new-session))]
+    (request/set-session-cookies request response new-session (t/zoned-date-time (t/zone-id "GMT")))))
+
 ;; TODO (Cam 2025-11-25) please add a response schema to this API endpoint, it makes it easier for our customers to
 ;; use our API + we will need it when we make auto-TypeScript-signature generation happen
 ;;

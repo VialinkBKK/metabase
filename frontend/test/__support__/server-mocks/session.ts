@@ -19,6 +19,14 @@ export function setupLoginEndpoint() {
   fetchMock.post("path:/api/session", 204, { name: "session-login" });
 }
 
+export function setupSessionHandoffExchangeEndpoint({
+  status = 200,
+}: { status?: number } = {}) {
+  fetchMock.post("path:/api/session/handoff/exchange", status, {
+    name: "session-handoff-exchange",
+  });
+}
+
 export function setupLogoutEndpoint() {
   fetchMock.delete("path:/api/session", 204, { name: "session-logout" });
 }
