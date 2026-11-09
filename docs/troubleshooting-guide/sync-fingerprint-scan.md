@@ -18,8 +18,8 @@ Once you've confirmed that you're looking at a non-cached view of your tables an
 
 ## Syncing
 
-1. Make sure your database driver is up to date.
-2. Go to **Admin** > **Troubleshooting** > **Logs** to check the status of the sync.
+1. If you are self-hosting Metabase, make sure your [Metabase instance](../installation-and-operation/upgrading-metabase.md) and any [community database drivers](../developers-guide/community-drivers.md) are up to date.
+2. Go to **Admin** > **Tools** > **Logs** to check the status of the sync.
 3. Run a query against your database from the Metabase SQL editor to check for database connection or database privilege errors that aren't listed in the logs:
 
    ```sql
@@ -66,7 +66,7 @@ If the [connection is failing](./db-connection.md) or the database privileges ar
 
 **Explanation**
 
-Metabase will try to unfold JSON and JSONB records during the sync process, which can take up a decent chunk of query execution time. If you have a lot of JSON records, try disabling the automatic unfolding option to pull the sync out of slow-motion. Remember that you can follow the status of the sync from **Admin** > **Troubleshooting** > **Logs**.
+Metabase will try to unfold JSON and JSONB records during the sync process, which can take up a decent chunk of query execution time. If you have a lot of JSON records, try disabling the automatic unfolding option to pull the sync out of slow-motion. Remember that you can follow the status of the sync from **Admin** > **Tools** > **Logs**.
 
 ## Scanning
 
@@ -75,11 +75,11 @@ Metabase will try to unfold JSON and JSONB records during the sync process, whic
 3. Go to the column you want to update, and click the **gear** icon.
 4. Click **Discard cached field values**.
 5. Click **Re-scan this field**.
-6. Go to **Admin** > **Troubleshooting** > **Logs** to follow the status of the scan and debug errors from there.
+6. Go to **Admin** > **Tools** > **Logs** to follow the status of the scan and debug errors from there.
 
 ### Special cases
 
-If you're waiting for the initial scan to run after connecting a database, make sure the initial sync has completed first (remember you can check the status from **Admin** > **Troubleshooting** > **Logs**).
+If you're waiting for the initial scan to run after connecting a database, make sure the initial sync has completed first (remember you can check the status from **Admin** > **Tools** > **Logs**).
 
 **Explanation**
 
@@ -99,7 +99,7 @@ LIMIT 1000
 
 A failed scan is caused by a failed scan query---you can look at the logs to debug the query similar to other queries you'd run directly against your database.
 
-Note that when you [change a search box filter to a dropdown filter](../data-modeling/metadata-editing.md#changing-a-search-box-filter-to-a-dropdown-filter) from the Table Metadata, you'll trigger a scan query for that field. If you have a dropdown filter that isn't picking up all the values in a field, remember that Metabase only samples the first 1,000 unique values per field, and stores a maximum of 100 kilobytes of text. If you've got more than 1,000 unique values in a column, or a lot of text-heavy data (like long URLs or survey responses), you can:
+Note that when you [change a search box filter to a dropdown filter](../data-modeling/metadata/metadata-editing.md#changing-a-search-box-filter-to-a-dropdown-filter) from the Table Metadata, you'll trigger a scan query for that field. If you have a dropdown filter that isn't picking up all the values in a field, remember that Metabase only samples the first 1,000 unique values per field, and stores a maximum of 100 kilobytes of text. If you've got more than 1,000 unique values in a column, or a lot of text-heavy data (like long URLs or survey responses), you can:
 
 - Use a search box filter for that field.
 - Clean up the data further in your [ETL or ELT](https://www.metabase.com/learn/grow-your-data-skills/data-landscape/etl-landscape) process.
@@ -119,7 +119,7 @@ To manually re-trigger a fingerprinting query for a given column:
 
 ### Special cases
 
-If you're waiting for the initial fingerprinting query to run after connecting a database, make sure the initial sync has completed first (remember you can check the status from **Admin** > **Troubleshooting** > **Logs**).
+If you're waiting for the initial fingerprinting query to run after connecting a database, make sure the initial sync has completed first (remember you can check the status from **Admin** > **Tools** > **Logs**).
 
 If you're using MongoDB, Metabase fingerprints the first 10,000 documents per collection. If you're not seeing all of your fields, it's because those fields might not exist in those first 10,000 documents. For more info, see our [MongoDB reference doc](../databases/connections/mongodb.md#i-added-fields-to-my-database-but-dont-see-them-in-metabase).
 

@@ -3,12 +3,18 @@ import userEvent from "@testing-library/user-event";
 import { renderWithProviders, screen } from "__support__/ui";
 import * as Lib from "metabase-lib";
 import {
+  DEFAULT_TEST_QUERY,
   SAMPLE_METADATA,
-  createQuery,
-  createQueryWithClauses,
+  SAMPLE_PROVIDER,
 } from "metabase-lib/test-helpers";
 import Question from "metabase-lib/v1/Question";
+import type { TestBreakoutSpec } from "metabase-types/api";
 import { createMockCard } from "metabase-types/api/mocks";
+import {
+  ORDERS,
+  ORDERS_ID,
+  PRODUCTS_ID,
+} from "metabase-types/api/mocks/presets";
 
 import { TimeseriesChrome } from "./TimeseriesChrome";
 
@@ -16,7 +22,9 @@ interface SetupOpts {
   query?: Lib.Query;
 }
 
-function setup({ query = createQuery() }: SetupOpts = {}) {
+function setup({
+  query = Lib.createTestQuery(SAMPLE_PROVIDER, DEFAULT_TEST_QUERY),
+}: SetupOpts = {}) {
   const question = new Question(createMockCard(), SAMPLE_METADATA).setQuery(
     query,
   );
@@ -45,20 +53,93 @@ describe("TimeseriesChrome", () => {
   });
 
   it("should not render the chrome if there are no breakouts on a temporal column", () => {
-    const query = createQueryWithClauses({
-      breakouts: [{ tableName: "PRODUCTS", columnName: "CATEGORY" }],
+    const query = Lib.createTestQuery(SAMPLE_PROVIDER, {
+      stages: [
+        {
+          source: {
+            type: "table",
+            id: ORDERS_ID,
+          },
+          breakouts: [
+            {
+              type: "column",
+              name: "CATEGORY",
+              sourceFieldId: ORDERS.PRODUCT_ID,
+            },
+          ],
+        },
+      ],
     });
     setup({ query });
     expect(screen.queryByText("View")).not.toBeInTheDocument();
   });
 
-  it("should allow to change the temporal unit for a breakout", async () => {
-    const query = createQueryWithClauses({
+  it.each<{ title: string; breakouts: TestBreakoutSpec[] }>([
+    {
+      title: "before",
       breakouts: [
+        { type: "column", name: "Custom column" },
+        { type: "column", name: "CREATED_AT", unit: "month" },
+      ],
+    },
+    {
+      title: "after",
+      breakouts: [
+        { type: "column", name: "CREATED_AT", unit: "month" },
+        { type: "column", name: "Custom column" },
+      ],
+    },
+  ])(
+    "should render the chrome with a custom column breakout $title the temporal one (metabase#34688, metabase#34690)",
+    ({ breakouts }) => {
+      const query = Lib.createTestQuery(SAMPLE_PROVIDER, {
+        stages: [
+          {
+            source: { type: "table", id: PRODUCTS_ID },
+            expressions: [
+              {
+                name: "Custom column",
+                value: {
+                  type: "operator",
+                  operator: "concat",
+                  args: [
+                    { type: "column", name: "TITLE" },
+                    { type: "literal", value: "!" },
+                  ],
+                },
+              },
+            ],
+            aggregations: [{ type: "operator", operator: "count", args: [] }],
+            breakouts,
+          },
+        ],
+      });
+      setup({ query });
+
+      expect(
+        screen.getByTestId("timeseries-filter-button"),
+      ).toBeInTheDocument();
+      expect(screen.getByTestId("timeseries-bucket-button")).toHaveTextContent(
+        "Month",
+      );
+    },
+  );
+
+  it("should allow to change the temporal unit for a breakout", async () => {
+    const query = Lib.createTestQuery(SAMPLE_PROVIDER, {
+      stages: [
         {
-          tableName: "PRODUCTS",
-          columnName: "CREATED_AT",
-          temporalBucketName: "Month",
+          source: {
+            type: "table",
+            id: ORDERS_ID,
+          },
+          breakouts: [
+            {
+              type: "column",
+              name: "CREATED_AT",
+              unit: "month",
+            },
+          ],
         },
       ],
     });
@@ -73,17 +154,25 @@ describe("TimeseriesChrome", () => {
   });
 
   it("should allow to change the temporal unit for a breakout when there are multiple breakouts of the same column", async () => {
-    const query = createQueryWithClauses({
-      breakouts: [
+    const query = Lib.createTestQuery(SAMPLE_PROVIDER, {
+      stages: [
         {
-          tableName: "PRODUCTS",
-          columnName: "CREATED_AT",
-          temporalBucketName: "Month",
-        },
-        {
-          tableName: "PRODUCTS",
-          columnName: "CREATED_AT",
-          temporalBucketName: "Year",
+          source: {
+            type: "table",
+            id: ORDERS_ID,
+          },
+          breakouts: [
+            {
+              type: "column",
+              name: "CREATED_AT",
+              unit: "month",
+            },
+            {
+              type: "column",
+              name: "CREATED_AT",
+              unit: "year",
+            },
+          ],
         },
       ],
     });

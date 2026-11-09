@@ -1,53 +1,53 @@
 import { t } from "ttag";
 
-import { BUY_STORAGE_URL } from "metabase/admin/upsells";
 import { skipToken, useGetDatabaseQuery } from "metabase/api";
-import ExternalLink from "metabase/common/components/ExternalLink";
-import { useSetting } from "metabase/common/hooks";
-import { useSelector } from "metabase/lib/redux";
-import { getUserIsAdmin } from "metabase/selectors/user";
+import { ExternalLink } from "metabase/common/components/ExternalLink";
+import { useStoreUrl } from "metabase/common/hooks";
+import { getUserIsAdmin } from "metabase/current-user";
+import { useSelector } from "metabase/redux";
+import { useSetting } from "metabase/settings";
 import { _FileUploadErrorModal } from "metabase/status/components/FileUploadStatusLarge/FileUploadErrorModal";
-import { Box, Button, Modal, Stack, Text } from "metabase/ui";
+import { Box, Button, Modal, Text } from "metabase/ui";
 
 import databaseError from "./database-error.svg?component";
 
 function PausedModal({ onClose }: { onClose: () => void }) {
+  const storeUrl = useStoreUrl("account/storage");
   const isAdmin = useSelector(getUserIsAdmin);
 
   return (
-    <Modal opened onClose={onClose} padding="xl" withCloseButton={false}>
-      <Stack gap="md" pt="lg" ta="center">
-        <Box component={databaseError} mx="auto" />
-        <Text size="lg" fw="bold">
-          {t`Couldn't upload the file, storage is full`}
-        </Text>
-        <Text c="text-medium">
-          {isAdmin
-            ? // eslint-disable-next-line no-literal-metabase-strings -- admin only
-              t`Add more storage to your Metabase or connect a database to store the uploaded files.`
-            : t`Please contact your admin to add more storage.`}
-        </Text>
-
-        <Stack w="50%" my="lg" mx="auto">
-          {isAdmin ? (
-            <>
-              <Button
-                variant="filled"
-                component={ExternalLink}
-                href={BUY_STORAGE_URL}
-                target="_blank"
-              >
-                {t`Add more storage`}
-              </Button>
-              <Button onClick={onClose}>{t`Cancel`}</Button>
-            </>
-          ) : (
-            <Button variant="filled" onClick={onClose}>
-              {t`OK`}
+    <Modal
+      opened
+      onClose={onClose}
+      layout="centered"
+      illustration={<Box component={databaseError} />}
+      title={t`Couldn't upload the file, storage is full`}
+    >
+      <Text c="text-secondary">
+        {isAdmin
+          ? // eslint-disable-next-line metabase/no-literal-metabase-strings -- admin only
+            t`Add more storage to your Metabase or connect a database to store the uploaded files.`
+          : t`Please contact your admin to add more storage.`}
+      </Text>
+      <Modal.Footer>
+        {isAdmin ? (
+          <>
+            <Button onClick={onClose}>{t`Cancel`}</Button>
+            <Button
+              variant="filled"
+              component={ExternalLink}
+              href={storeUrl}
+              target="_blank"
+            >
+              {t`Add more storage`}
             </Button>
-          )}
-        </Stack>
-      </Stack>
+          </>
+        ) : (
+          <Button variant="filled" onClick={onClose}>
+            {t`OK`}
+          </Button>
+        )}
+      </Modal.Footer>
     </Modal>
   );
 }

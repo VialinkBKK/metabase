@@ -1,14 +1,12 @@
-import { type ReactElement, useMemo } from "react";
+import type { ReactElement } from "react";
 
 import { skipToken, useGetCardQuery } from "metabase/api";
-import { useSelector } from "metabase/lib/redux";
-import { getMetadata } from "metabase/selectors/metadata";
+import { useQuestionFromCard } from "metabase/metadata-store";
 import * as Lib from "metabase-lib";
-import Question from "metabase-lib/v1/Question";
+import type Question from "metabase-lib/v1/Question";
 import { getQuestionIdFromVirtualTableId } from "metabase-lib/v1/metadata/utils/saved-questions";
 
-import { DataSourceCrumbs } from "./DataSourceCrumbs";
-import { SourceDatasetBreadcrumbs } from "./SourceDatasetBreadcrumbs";
+import { SourceModelBreadcrumbs } from "./SourceModelBreadcrumbs";
 
 interface Props {
   divider?: ReactElement | string;
@@ -28,24 +26,17 @@ export function SourceQuestionBreadcrumbs({
   const { data: sourceCard } = useGetCardQuery(
     sourceQuestionId != null ? { id: sourceQuestionId } : skipToken,
   );
-  const metadata = useSelector(getMetadata);
-  const sourceQuestion = useMemo(() => {
-    return sourceCard ? new Question(sourceCard, metadata) : undefined;
-  }, [sourceCard, metadata]);
+  const sourceQuestion = useQuestionFromCard(sourceCard);
 
   if (!sourceQuestion) {
     return null;
   }
 
-  if (sourceQuestion.type() === "model" || sourceQuestion.type() === "metric") {
-    return (
-      <SourceDatasetBreadcrumbs
-        question={sourceQuestion}
-        variant={variant}
-        {...props}
-      />
-    );
-  }
-
-  return <DataSourceCrumbs question={question} variant={variant} {...props} />;
+  return (
+    <SourceModelBreadcrumbs
+      question={sourceQuestion}
+      variant={variant}
+      {...props}
+    />
+  );
 }

@@ -1,9 +1,9 @@
 (ns metabase.query-processor.middleware.fetch-source-query-test
+  {:clj-kondo/config '{:linters {:deprecated-var {:exclude {metabase.test.data/mbql-query {:namespaces [metabase.query-processor.middleware.fetch-source-query-test]}}}}}}
   (:require
    [clojure.test :refer :all]
    [medley.core :as m]
    [metabase.lib-be.core :as lib-be]
-   [metabase.lib-be.metadata.jvm :as lib.metadata.jvm]
    [metabase.lib.convert :as lib.convert]
    [metabase.lib.core :as lib]
    [metabase.lib.metadata :as lib.metadata]
@@ -12,18 +12,19 @@
    [metabase.lib.test-metadata :as meta]
    [metabase.lib.test-util :as lib.tu]
    [metabase.lib.test-util.macros :as lib.tu.macros]
-   [metabase.query-processor :as qp]
    [metabase.query-processor.middleware.fetch-source-query :as fetch-source-query]
    [metabase.query-processor.preprocess :as qp.preprocess]
-   [metabase.query-processor.store :as qp.store]
+   ;; binds mock metadata providers via the ambient store, which the code under test reads
+   ^{:clj-kondo/ignore [:deprecated-namespace]} [metabase.query-processor.store :as qp.store]
+   [metabase.query-processor.test :as qp]
    [metabase.query-processor.test-util :as qp.test-util]
    [metabase.test :as mt]))
 
 (defn resolve-source-cards* [query]
-  ;; Handle old tests written with legacy queries. Convert legacy query to pMBQL and then convert results
+  ;; Handle old tests written with legacy queries. Convert legacy query to MBQL 5 and then convert results
   ;; back. That way we don't need to update all the tests immediately and can do so at our leisure.
-  (letfn [(thunk [] (let [mlv2-query (lib.query/query (qp.store/metadata-provider) query)
-                          resolved   (fetch-source-query/resolve-source-cards mlv2-query)]
+  (letfn [(thunk [] (let [mbql5-query (lib.query/query (qp.store/metadata-provider) query)
+                          resolved    (fetch-source-query/resolve-source-cards mbql5-query)]
                       (cond-> resolved
                         (not (:lib/type query)) lib.convert/->legacy-MBQL)))]
     (if (qp.store/initialized?)
@@ -44,7 +45,7 @@
 
 (defn- remove-irrelevant-keys [col]
   (as-> col col
-    (dissoc col :field_ref)
+    (dissoc col :field_ref :source)
     (m/filter-keys simple-keyword? col)))
 
 (defn- default-result-with-inner-query
@@ -63,7 +64,7 @@
        result-metadata
        (assoc-in [:query :source-metadata] result-metadata)))))
 
-(def ^:private mock-metadata-provider
+(defn- mock-metadata-provider []
   (qp.test-util/metadata-provider-with-cards-with-metadata-for-queries
    meta/metadata-provider
    [(lib.tu.macros/mbql-query venues)
@@ -71,7 +72,7 @@
 
 (deftest ^:parallel resolve-mbql-queries-test
   (testing "make sure that the `resolve-source-cards` middleware correctly resolves MBQL queries"
-    (qp.store/with-metadata-provider mock-metadata-provider
+    (qp.store/with-metadata-provider (mock-metadata-provider)
       (is (=? (assoc (default-result-with-inner-query
                       {:source-query {:source-table (meta/id :venues)}}
                       (qp.preprocess/query->expected-cols (lib.tu.macros/mbql-query venues)))
@@ -83,7 +84,7 @@
 
 (deftest ^:parallel resolve-mbql-queries-test-2
   (testing "make sure that the `resolve-source-cards` middleware correctly resolves MBQL queries"
-    (qp.store/with-metadata-provider mock-metadata-provider
+    (qp.store/with-metadata-provider (mock-metadata-provider)
       (testing "with aggregations/breakouts"
         (is (=? (assoc (default-result-with-inner-query
                         {:aggregation  [[:count]]
@@ -100,7 +101,7 @@
 
 (deftest ^:parallel resolve-mbql-queries-test-3
   (testing "make sure that the `resolve-source-cards` middleware correctly resolves MBQL queries"
-    (qp.store/with-metadata-provider mock-metadata-provider
+    (qp.store/with-metadata-provider (mock-metadata-provider)
       (testing "with filters"
         (is (=? (assoc (default-result-with-inner-query
                         {:source-query {:source-table (meta/id :checkins)}
@@ -118,7 +119,7 @@
 
 (deftest resolve-mbql-queries-test-4
   (testing "respects `enable-nested-queries` server setting when true"
-    (qp.store/with-metadata-provider mock-metadata-provider
+    (qp.store/with-metadata-provider (mock-metadata-provider)
       ;; by default nested queries are enabled:
       (is (true? (lib-be/enable-nested-queries)))
       (is (some? (resolve-source-cards (lib.tu.macros/mbql-query nil {:source-table "card__1"})))))))
@@ -128,9 +129,8 @@
     ;; if the env var is set, the setting respects it:
     (mt/with-temp-env-var-value! ["MB_ENABLE_NESTED_QUERIES" "false"]
       (is (false? (lib-be/enable-nested-queries))))
-    (qp.store/with-metadata-provider mock-metadata-provider
-
-;; resolve-source-cards doesn't respect [[mt/with-temp-env-var-value!]], so set it inside the thunk:
+    (qp.store/with-metadata-provider (mock-metadata-provider)
+      ;; resolve-source-cards doesn't respect [[mt/with-temp-env-var-value!]], so set it inside the thunk:
       (is (thrown-with-msg? Exception
                             #"Nested queries are disabled"
                             (resolve-source-cards
@@ -185,7 +185,7 @@
                 {:source-table "card__2", :limit 25})))))))
 
 (defn- nested-nested-app-db-provider []
-  (let [base     (-> (lib.metadata.jvm/application-database-metadata-provider (mt/id))
+  (let [base     (-> (mt/metadata-provider)
                      (qp.test-util/metadata-provider-with-cards-with-metadata-for-queries
                       [(mt/mbql-query venues {:limit 100})
                        {:database lib.schema.id/saved-questions-virtual-database-id
@@ -375,7 +375,7 @@
 
 (deftest ^:parallel dont-overwrite-existing-card-id-test
   (testing "Don't overwrite existing values of `[:info :card-id]`"
-    (qp.store/with-metadata-provider mock-metadata-provider
+    (qp.store/with-metadata-provider (mock-metadata-provider)
       (let [query (assoc (lib.tu.macros/mbql-query nil {:source-table "card__1"})
                          :info {:card-id Integer/MAX_VALUE})]
         (is (=? (assoc (lib.tu.macros/mbql-query nil
@@ -388,7 +388,6 @@
 
 ;;; this is a proof-of-concept to make sure this stuff works for non-SQL drivers, that's why we're hardcoding `:mongo`
 ;;; below.
-#_{:clj-kondo/ignore [:metabase/disallow-hardcoded-driver-names-in-tests]}
 (deftest ^:parallel card-id->source-query-and-metadata-test
   (testing "card-id->source-query-and-metadata-test should preserve non-SQL native queries"
     (let [query {:type     :native
@@ -401,6 +400,8 @@
       ;; this doesn't actually need to load Mongo code, there is special casing for `:mongo`
       ;; in [[metabase.query-processor.middleware.fetch-source-query/source-query]]
       (qp.store/with-metadata-provider (-> meta/metadata-provider
+                                           ;; [kondo-keep] suppresses a warning :redundant-ignore can't see; --audit rechecks
+                                           #_{:clj-kondo/ignore [:metabase/disallow-hardcoded-driver-names-in-tests]}
                                            (lib.tu/merged-mock-metadata-provider {:database {:engine :mongo}})
                                            (lib.tu/metadata-provider-with-cards-for-queries [query]))
         (is (=? {:stages            [{:lib/type                     :mbql.stage/native
@@ -417,7 +418,6 @@
 
 ;;; this is a proof-of-concept to make sure this stuff works for non-SQL drivers, that's why we're hardcoding `:mongo`
 ;;; below.
-#_{:clj-kondo/ignore [:metabase/disallow-hardcoded-driver-names-in-tests]}
 (deftest ^:parallel card-id->source-query-and-metadata-test-2
   (testing "card-id->source-query-and-metadata-test should preserve mongodb native queries in string format (#30112)"
     (let [query-str (str "[{\"$project\":\n"
@@ -430,6 +430,8 @@
                                 :collection "checkins"}
                      :database (meta/id)}]
       (qp.store/with-metadata-provider (-> meta/metadata-provider
+                                           ;; [kondo-keep] suppresses a warning :redundant-ignore can't see; --audit rechecks
+                                           #_{:clj-kondo/ignore [:metabase/disallow-hardcoded-driver-names-in-tests]}
                                            (lib.tu/merged-mock-metadata-provider {:database {:engine :mongo}})
                                            (lib.tu/metadata-provider-with-cards-for-queries [query]))
         (is (=? {:stages [{:lib/type   :mbql.stage/native

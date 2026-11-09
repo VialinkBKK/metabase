@@ -372,7 +372,7 @@ describe("MultiAutocomplete", () => {
     expect(queryOption("Two")).not.toBeInTheDocument();
     expect(queryOption("Three")).not.toBeInTheDocument();
 
-    await userEvent.type(input, "t");
+    await userEvent.type(input, "{backspace}{backspace}t");
     expect(queryOption("One")).not.toBeInTheDocument();
     expect(getOption("Two")).toBeInTheDocument();
     expect(getOption("Three")).toBeInTheDocument();
@@ -380,8 +380,9 @@ describe("MultiAutocomplete", () => {
     await userEvent.click(getOption("Two"));
     expect(queryOption("One")).not.toBeInTheDocument();
     expect(queryOption("Two")).not.toBeInTheDocument();
-    expect(queryOption("Three")).not.toBeInTheDocument();
+    expect(queryOption("Three")).toBeInTheDocument();
 
+    await userEvent.type(input, "{backspace}");
     await userEvent.paste("three");
     expect(queryOption("One")).not.toBeInTheDocument();
     expect(queryOption("Two")).not.toBeInTheDocument();
@@ -464,6 +465,23 @@ describe("MultiAutocomplete", () => {
 
     await userEvent.type(input, "on");
     expect(getOption("One")).toBeInTheDocument();
+  });
+
+  it("should not let escape reach other keydown listeners while the dropdown is open", async () => {
+    const onWindowKeyDown = jest.fn<void, [KeyboardEvent]>();
+    window.addEventListener("keydown", onWindowKeyDown);
+    const { input } = setup({ data: REMAPPED_DATA });
+
+    await userEvent.click(input);
+    expect(getOption("One")).toBeInTheDocument();
+
+    await userEvent.keyboard("{Escape}");
+    expect(queryOption("One")).not.toBeInTheDocument();
+    expect(onWindowKeyDown).not.toHaveBeenCalled();
+
+    await userEvent.keyboard("{Escape}");
+    expect(onWindowKeyDown).toHaveBeenCalledTimes(1);
+    window.removeEventListener("keydown", onWindowKeyDown);
   });
 
   it("should not submit the input value during a keyboard composition session (metabase#60630)", async () => {

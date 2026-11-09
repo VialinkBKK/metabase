@@ -1,25 +1,30 @@
 import { t } from "ttag";
 
-import {
-  SettingsPageWrapper,
-  SettingsSection,
-} from "metabase/admin/components/SettingsSection";
 import { GoogleAuthCard } from "metabase/admin/settings/auth/containers/GoogleAuthCard";
 import { LdapAuthCard } from "metabase/admin/settings/auth/containers/LdapAuthCard";
 import { ManageApiKeys } from "metabase/admin/settings/components/ApiKeys/ManageApiKeys";
-import { AdminSettingInput } from "metabase/admin/settings/components/widgets/AdminSettingInput";
 import { useHasTokenFeature } from "metabase/common/hooks";
-import { PLUGIN_AUTH_PROVIDERS } from "metabase/plugins";
+import {
+  type AuthSettingsPageProps,
+  PLUGIN_AUTH_PROVIDERS,
+} from "metabase/plugins";
+import {
+  AdminSettingInput,
+  SettingsPageWrapper,
+  SettingsSection,
+} from "metabase/settings-components";
+import { AdminAuthCard } from "metabase-enterprise/multi_factor_auth/components/AdminAuthCard";
 
 import { JwtAuthCard } from "../containers/JwtAuthCard";
+import { OidcAuthCard } from "../containers/OidcAuthCard";
 import { SamlAuthCard } from "../containers/SamlAuthCard";
 import { useHasSsoEnabled } from "../utils";
 
 import { SessionTimeoutSetting } from "./SessionTimeoutSetting";
 
-type Tabs = "authentication" | "user-provisioning" | "api-keys";
-
-export function AuthSettingsPage({ tab = "authentication" }: { tab?: Tabs }) {
+export function AuthSettingsPage({
+  tab = "authentication",
+}: AuthSettingsPageProps) {
   if (tab === "api-keys") {
     return <ManageApiKeys />;
   }
@@ -40,6 +45,8 @@ function AuthenticationTab() {
       <LdapAuthCard />
       <SamlAuthCard />
       <JwtAuthCard />
+      <OidcAuthCard />
+      <AdminAuthCard />
 
       <SettingsSection>
         <AdminSettingInput

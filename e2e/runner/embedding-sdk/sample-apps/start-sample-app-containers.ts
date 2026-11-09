@@ -3,7 +3,6 @@ import { printBold } from "../../cypress-runner-utils";
 import { setupAppCleanup } from "../shared/helpers/setup-app-cleanup";
 
 import { SAMPLE_APP_SETUP_CONFIGS } from "./constants/sample-app-setup-configs";
-import { copyShoppyMetabaseAppDBDump } from "./helpers/copy-shoppy-metabase-app-db-dump";
 import { fetchApp } from "./helpers/fetch-app";
 import {
   copyExampleEnvFile,
@@ -19,7 +18,7 @@ const userOptions = {
   ...process.env,
 } as const;
 
-printBold(`Running Cypress Sample App Tests with options:
+printBold(`Setting up the Sample App environment with options:
   - EMBEDDING_SDK_VERSION      : ${userOptions.EMBEDDING_SDK_VERSION}
   - SAMPLE_APP_BRANCH_NAME     : ${userOptions.SAMPLE_APP_BRANCH_NAME}
 `);
@@ -28,6 +27,7 @@ export async function startSampleAppContainers(
   testSuite: SampleAppTestSuiteName,
 ) {
   const embeddingSdkVersion =
+    // Unjustified type cast. FIXME
     userOptions.EMBEDDING_SDK_VERSION as EmbeddingSdkVersion;
   const setupConfig = SAMPLE_APP_SETUP_CONFIGS[testSuite];
 
@@ -64,13 +64,10 @@ export async function startSampleAppContainers(
       copyLocalEmbeddingSdkPackage(rootPath);
     }
 
-    if (testSuite === "shoppy-e2e") {
-      copyShoppyMetabaseAppDBDump(rootPath);
-    }
-
     await startContainers({
       cwd: rootPath,
       env,
+      appName,
       dockerUpCommand,
       dockerDownCommand,
       healthcheckPorts,

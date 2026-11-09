@@ -1,8 +1,12 @@
-import dayjs from "dayjs";
-import { useMemo } from "react";
+import { type JSX, useCallback, useMemo } from "react";
 import { t } from "ttag";
 import * as Yup from "yup";
 
+import {
+  getTimelineIcons,
+  getTimelineName,
+} from "metabase/common/utils/timelines";
+import { dayjs } from "metabase/dayjs";
 import {
   Form,
   FormDateInput,
@@ -13,25 +17,31 @@ import {
   FormTextInput,
   FormTextarea,
 } from "metabase/forms";
-import * as Errors from "metabase/lib/errors";
-import { parseTimestamp } from "metabase/lib/time-dayjs";
-import { getTimelineIcons, getTimelineName } from "metabase/lib/timelines";
 import {
+  ActionIcon,
   Button,
   Flex,
   Group,
   Icon,
-  type IconName,
+  Modal,
   Stack,
   TimeInput,
 } from "metabase/ui";
+import * as Errors from "metabase/utils/errors";
 import type {
   FormattingSettings,
+  IconName,
   Timeline,
   TimelineEventData,
 } from "metabase-types/api";
 
 import FormArchiveButton from "../FormArchiveButton";
+
+import {
+  getTimeInputValue,
+  getTimestampWithDate,
+  getTimestampWithTime,
+} from "./utils";
 
 const EVENT_SCHEMA = Yup.object({
   name: Yup.string().required(Errors.required).max(255, Errors.maxLength),
@@ -39,8 +49,12 @@ const EVENT_SCHEMA = Yup.object({
   timestamp: Yup.string().required(Errors.required),
   time_matters: Yup.boolean(),
   icon: Yup.string().required(Errors.required),
-  timeline_id: Yup.number(),
+  timeline_id: Yup.string(),
 });
+
+type TimelineEventFormData = Omit<TimelineEventData, "timeline_id"> & {
+  timeline_id: string | undefined;
+};
 
 export interface EventFormOwnProps {
   initialValues: TimelineEventData;
@@ -78,53 +92,93 @@ const EventForm = ({
     }));
   }, [timelines]);
 
+  const preparedInitialValues: TimelineEventFormData = {
+    ...initialValues,
+    timestamp: initialValues.timestamp || dayjs().utc(true).toISOString(),
+    timeline_id: initialValues.timeline_id
+      ? String(initialValues.timeline_id)
+      : undefined,
+  };
+
+  const handleSubmit = useCallback(
+    (values: TimelineEventFormData) => {
+      return onSubmit({
+        ...values,
+        timeline_id: values.timeline_id
+          ? parseInt(values.timeline_id, 10)
+          : undefined,
+      });
+    },
+    [onSubmit],
+  );
+
   return (
     <FormProvider
-      initialValues={initialValues}
+      initialValues={preparedInitialValues}
       validationSchema={EVENT_SCHEMA}
-      onSubmit={onSubmit}
+      onSubmit={handleSubmit}
     >
       {({ dirty, values, setFieldValue }) => (
         <Form disabled={!dirty} data-testid="event-form">
-          <Stack>
+          <Stack gap="xl">
             <FormTextInput
               name="name"
               label={t`Event name`}
               placeholder={t`Product launch`}
+              // The form can mount after the modal opens (while loading), when the
+              // modal no longer looks for `data-autofocus`
               autoFocus
+              data-autofocus
             />
-            <Flex align="end" gap="md">
+            <Flex align="end" gap="lg">
               <FormDateInput
                 name="timestamp"
                 title={t`Date`}
                 flex={1}
                 valueFormat={dateSettings?.date_style}
+                onChange={(date) => {
+                  if (date) {
+                    setFieldValue(
+                      "timestamp",
+                      getTimestampWithDate(
+                        values.timestamp,
+                        date,
+                        values.time_matters,
+                      ),
+                    );
+                  }
+                }}
               />
               {values.time_matters ? (
-                <Flex gap="xs" align="end">
+                <Flex gap="xxs" align="end">
                   <TimeInput
-                    value={dayjs.tz(values.timestamp).toDate()}
+                    value={getTimeInputValue(values.timestamp)}
                     name="date"
                     label={t`Time`}
                     fw="bold"
                     flex={1}
                     onChange={(time) => {
-                      const timePart = dayjs.tz(time);
-                      const date = parseTimestamp(values.timestamp)
-                        .set("hour", timePart.hour())
-                        .set("minute", timePart.minute());
-                      setFieldValue("timestamp", date.toISOString());
+                      if (time) {
+                        setFieldValue(
+                          "timestamp",
+                          getTimestampWithTime(values.timestamp, time),
+                        );
+                      }
                     }}
                   />
-                  <Button
+                  <ActionIcon
+                    size="sm"
+                    mb="sm"
                     onClick={() => setFieldValue("time_matters", false)}
                     aria-label={t`Remove time`}
                     variant="subtle"
-                    leftSection={<Icon name="close" />}
-                  />
+                  >
+                    <Icon name="close" />
+                  </ActionIcon>
                 </Flex>
               ) : (
                 <Button
+                  size="lg"
                   onClick={() => setFieldValue("time_matters", true)}
                 >{t`Add time`}</Button>
               )}
@@ -144,35 +198,36 @@ const EventForm = ({
               leftSection={values.icon ? <Icon name={values.icon} /> : null}
               renderOption={({ option }) => (
                 <Group p="sm" fw="bold">
+                  {/* Unjustified type cast. FIXME */}
                   {option.value && <Icon name={option.value as IconName} />}
                   <span>{option.label}</span>
                 </Group>
               )}
             />
-            {timelines.length > 1 && (
+            {timelines?.length > 1 && (
               <FormSelect
                 name="timeline_id"
-                title={t`Timeline`}
+                label={t`Timeline`}
                 data={timelineOptions}
               />
             )}
-            <Flex gap="md" justify="end">
-              <FormErrorMessage inline />
-              {!isNew && (
-                <FormArchiveButton onClick={onArchive}>
-                  {t`Archive event`}
-                </FormArchiveButton>
-              )}
-              <Button type="button" onClick={onCancel}>
-                {t`Cancel`}
-              </Button>
-              <FormSubmitButton
-                variant="filled"
-                disabled={!dirty}
-                label={isNew ? t`Create` : t`Update`}
-              />
-            </Flex>
           </Stack>
+          <Modal.Footer>
+            <FormErrorMessage inline flex={1} />
+            {!isNew && (
+              <FormArchiveButton onClick={onArchive}>
+                {t`Archive event`}
+              </FormArchiveButton>
+            )}
+            <Button type="button" onClick={onCancel}>
+              {t`Cancel`}
+            </Button>
+            <FormSubmitButton
+              variant="filled"
+              disabled={!dirty}
+              label={isNew ? t`Create` : t`Update`}
+            />
+          </Modal.Footer>
         </Form>
       )}
     </FormProvider>

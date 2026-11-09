@@ -26,13 +26,13 @@ If a dashboard filter is giving you no results or the wrong results:
 If a question filter is giving you no results or the wrong results:
 
 1. Make sure the question includes the column you want to filter on.
-2. Check that the column actually contains the value(s) you're filtering on. You can do this by:
+2. Check that the column contains the value(s) you're filtering on. You can do this by:
    - sorting number or date columns,
    - creating a "contains" filter for string columns, or
    - asking your database admin.
 3. Ask your Metabase admin to help you check if:
    - Metabase is [up to date](../databases/sync-scan.md) with your database,
-   - the column is [visible](../data-modeling/metadata-editing.md#field-visibility) in Metabase,
+   - the column is [visible](../data-modeling/metadata/metadata-editing.md#field-visibility) in Metabase,
    - you have the correct [data permissions](../permissions/data.md) to access the column.
 
 ### Special cases
@@ -62,17 +62,17 @@ To debug dashboard and question filters that involve timestamps, UUIDs, or numer
 
 1. Find the [data type](https://www.metabase.com/learn/grow-your-data-skills/data-fundamentals/data-types-overview) of the column that you want to filter on. You can find this info from:
    - the [Data reference](../exploration-and-organization/data-model-reference.md),
-   - the [Table Metadata page](../data-modeling/metadata-editing.md) (admins only), or
+   - the [Table Metadata page](../data-modeling/metadata/metadata-editing.md) (admins only), or
    - directly from the database.
 2. Cast the column to a data type that matches the desired [filter type](../questions/query-builder/filters.md#filter-types). You can:
-   - [cast strings or numbers to dates](../data-modeling/metadata-editing.md#cast-to-a-specific-data-type) from the Table Metadata page, or
+   - [cast strings or numbers to dates](../data-modeling/metadata/metadata-editing.md#cast-to-a-specific-data-type) from the Table Metadata page, or
    - change the data type of the column in your database, and [re-sync](../databases/sync-scan.md#manually-syncing-tables-and-columns) the database schema.
 
 If you're not a Metabase admin, you might have to ask your admin to help you with some of these steps.
 
 **Explanation**
 
-Metabase needs to know the data type of a column in order to present you with a curated selection of filter types. Sometimes these columns are mistyped---if a column stores your numbers as strings, Metabase will only show you text or category filters (with options like "is", "is not") instead of number filters (with options like "greater than", "less than").
+Metabase needs to know the data type of a column to present you with a curated selection of filter types. Sometimes these columns are mistyped---if a column stores your numbers as strings, Metabase will only show you text or category filters (with options like "is", "is not") instead of number filters (with options like "greater than", "less than").
 
 Timestamps, in particular, are the root of all evil, so please be patient with your Metabase admin (or yourself!) when trying to get the data type right.
 
@@ -84,7 +84,7 @@ If you are getting an error when using field filters with BigQuery or Oracle, ma
 
 If your filter dropdown menu displays the wrong values for a column:
 
-1. Go to **Admin settings** > **Table Metadata**.
+1. Go to **Admin** > **Table Metadata**.
 2. Find your database, table, and column.
 3. Click the **gear** icon at the right of a column's settings box.
 4. Scroll to **Cached field values**.
@@ -100,7 +100,7 @@ Metabase [scans](../databases/sync-scan.md#how-database-scans-work) get the valu
 - [Troubleshooting linked filters](./linked-filters.md)
 - [Troubleshooting SQL variables and field filters](./sql.md#sql-variables-and-field-filters)
 - [Troubleshooting dates and times](./timezones.md)
-- [Creating dropdown filters](../data-modeling/metadata-editing.md#changing-a-search-box-filter-to-a-dropdown-filter)
+- [Creating dropdown filters](../data-modeling/metadata/metadata-editing.md#changing-a-search-box-filter-to-a-dropdown-filter)
 - [Creating SQL filters](../questions/native-editor/sql-parameters.md)
 
 ## Are you still stuck?

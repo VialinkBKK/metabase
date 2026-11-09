@@ -57,6 +57,7 @@ For an introduction to expressions, check out the [overview of custom expression
     - [concat](./expressions/concat.md)
     - [contains](#contains)
     - [date](#date)
+    - [datetime](#datetime)
     - [doesNotContain](#doesnotcontain)
     - [domain](#domain)
     - [endsWith](#endswith)
@@ -100,6 +101,8 @@ For an introduction to expressions, check out the [overview of custom expression
     - [quarterName](#quartername)
     - [relativeDateTime](#relativedatetime)
     - [second](#second)
+    - [timeSpan](#timespan)
+    - [today](#today)
     - [week](#week)
     - [weekday](#weekday)
     - [year](#year)
@@ -123,7 +126,7 @@ For an introduction to expressions, check out the [overview of custom expression
 
 ## Aggregations
 
-Aggregation expressions take into account all values in a field. They can only be used in the **Summarize** section of the query builder.
+Aggregation expressions consider all values in a field. They can only be used in the **Summarize** section of the query builder.
 
 ### Average
 
@@ -147,7 +150,7 @@ Only counts rows where the condition is true.
 
 Syntax: `CountIf(condition)`
 
-Example: `CountIf([Subtotal] > 100)` would return the number of rows where the subtotal were greater than 100.
+Example: `CountIf([Subtotal] > 100)` would return the number of rows where the subtotal was greater than 100.
 
 ### Distinct
 
@@ -183,7 +186,9 @@ Syntax: `Median(column)`
 
 Example: `Median([Age])` would find the midpoint age where half of the ages are older, and half of the ages are younger.
 
-Databases that don't support `median`: Druid, MariaDB, MongoDB, MySQL, SQLite, Vertica, and SQL Server. Presto only provides approximate results.
+Databases that don't support `median`: Druid, MariaDB, MongoDB, MySQL, SQLite, Vertica, and SQL Server.
+
+Presto only provides approximate results. BigQuery uses the lower of the middle 2 values, rather than their mean, when there is an even number of values.
 
 Related: [Min](#min), [Max](#max), [Average](#average).
 
@@ -205,7 +210,7 @@ Syntax: `Percentile(column, percentile-value)`
 
 Example: `Percentile([Score], 0.9)` would return the value at the 90th percentile for all values in that column.
 
-Databases that don't support `percentile`: Druid, H2, MariaDB, MySQL, MongoDB, SQL Server, SQLite, Vertica. Presto only provides approximate results.
+Databases that don't support `percentile`: Druid, MariaDB, MySQL, MongoDB, SQL Server, SQLite, Vertica. Presto only provides approximate results.
 
 ### Share
 
@@ -427,7 +432,7 @@ Example: `sqrt([Hypotenuse])`.
 
 Databases that don't support `sqrt`: SQLite.
 
-Related: [Power](#power).
+Related: [power](#power).
 
 ## String functions
 
@@ -494,9 +499,12 @@ Related: [datetime](#datetime)
 
 > Available on PostgreSQL, MySQL/MariaDB, BigQuery, Redshift, ClickHouse, and Snowflake
 
-Converts a datetime string to a datetime.
+Converts a datetime string or bytes to a datetime.
 
-Syntax: `datetime(column)`
+Syntax: `datetime(value, mode)`
+
+- `value`: The string, bytes, or number to convert to a datetime.
+- `mode`: Optional. The mode indicating the format. One of: `"simple"`, `"iso"`, `"simpleBytes"`, `"isoBytes"`, `"unixSeconds"`, `"unixMilliseconds"`, `"unixMicroseconds"`, `"unixNanoseconds"`. Default is `"iso"`.
 
 Example: `datetime("2025-03-20 12:45:04")`
 
@@ -583,7 +591,7 @@ Related: [notEmpty](#notempty), [isNull](#isnull).
 
 ### integer
 
->  Only available for BigQuery, ClickHouse, MySQL, PostgreSQL, Amazon Redshift, and Snowflake.
+> Only available for BigQuery, ClickHouse, MySQL, PostgreSQL, Amazon Redshift, and Snowflake.
 
 - Converts a string to an integer value. Useful if you want to do some math on numbers, but your data is stored as strings.
 - Converts a floating point value by rounding it to an integer.
@@ -654,7 +662,7 @@ Syntax: `regexExtract(text, regular_expression)`
 
 Example: `regexExtract([Address], "[0-9]+")`
 
-Databases that don't support `regexExtract`: H2, SQL Server, SQLite.
+Databases that don't support `regexExtract`: SQL Server, SQLite.
 
 Related: [contains](#contains), [doesNotContain](#doesnotcontain), [substring](#substring).
 
@@ -873,7 +881,7 @@ Related: [dayName](#dayname), [quarterName](#quartername).
 
 ### [now](./expressions/now.md)
 
-Returns the current date and time using your Metabase [report timezone](../../configuring-metabase/localization.md#report-timezone).
+Returns the current date and time using your Metabase [instance default report timezone](../../configuring-metabase/localization.md#set-default-instance-report-timezone).
 
 Syntax: `now()`
 
@@ -930,6 +938,16 @@ Syntax: `timeSpan(number, text)`
 `text`: Type of interval like `"day"`, `"month"`, `"year"`
 
 Example: `[Orders → Created At] + timeSpan(7, "day")` will return the date 7 days after the `Created At` date.
+
+### today
+
+Returns the current date (without time).
+
+Syntax: `today()`
+
+Example: `today()` would return the current date, such as `2025-05-04`.
+
+Related: [now](#now).
 
 ### [week](./expressions/week.md)
 
@@ -1030,11 +1048,11 @@ Example: `Offset(Sum([Total]), -1)` would get the `Sum([Total])` value from the 
 
 ## Database limitations
 
-Limitations are noted for each aggregation and function above, and here there are in summary:
-
-**H2** (including Metabase Sample Database): `Median`, `Percentile`, `convertTimezone`, `regexExtract`, `datetime`, `float`, `splitPart`.
+Limitations are noted for each aggregation and function above, and here they are in summary:
 
 **Athena**: `convertTimezone`, `datetime`, `float`, `splitPart`.
+
+**BigQuery**: `Median`.
 
 **Databricks**: `convertTimezone`, `datetime`, `float`, `splitPart`.
 
@@ -1054,7 +1072,7 @@ Limitations are noted for each aggregation and function above, and here there ar
 
 **SQL Server**: `Median`, `Percentile`, `regexExtract`, `datetime`, `float`, `splitPart`.
 
-**SQLite**: `exp`, `log`, `Median`, `Percentile`, `power`, `regexExtract`, `StandardDeviation`, `sqrt`, `Variance`, `datetime`, `float`, `splitPart`.
+**SQLite** (including Metabase Sample Database): `exp`, `log`, `Median`, `Percentile`, `power`, `regexExtract`, `StandardDeviation`, `sqrt`, `Variance`, `datetime`, `float`, `splitPart`.
 
 **Vertica**: `Median`, `Percentile`, `datetime`, `float`, `splitPart`.
 

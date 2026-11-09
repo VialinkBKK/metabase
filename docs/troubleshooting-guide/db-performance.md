@@ -32,7 +32,7 @@ To fix problems with your Metabase [application database](../installation-and-op
 
 ## Resetting a database connection
 
-1. Go to **Settings** > **Admin settings** > **Databases** > your database.
+1. Go to **Admin** > **Databases** > your database.
 2. Click **Save changes** (without making changes) to reset Metabase's connections to your database.
 3. Alternatively: kill the connection(s) directly from your database.
 
@@ -44,7 +44,7 @@ In general, Metabase will try to close hanging connections to your database afte
 
 ## Clearing queued queries
 
-1. Stop the process (e.g., a script, or a dashboard with [too many cards](./my-dashboard-is-slow.md#dashboard-has-over-10-cards) that's launching a lot of queries at once.
+1. Stop the process (e.g., a script, or a dashboard with [too many cards](./my-dashboard-is-slow.md#dashboard-has-over-10-cards) that's launching a lot of queries at once).
 2. Go to your database server and stop all queries (from Metabase) that are in progress.
 3. Optional: Increase the [number of connections to your database](../configuring-metabase/environment-variables.md#mb_jdbc_data_warehouse_max_connection_pool_size).
 
@@ -58,7 +58,7 @@ If someone or something creates 100 queries at the same time, this stampede of q
 
 **Explanation**
 
-By default, Metabase makes regular sync and scan queries against your database to keep your tables up to date, get fresh values for filter dropdowns, and make helpful suggestions. If you've got a very large database, you can choose to trigger these queries manually instead of on a schedule.
+By default, Metabase makes regular sync and scan queries against your database to keep your tables up to date, get fresh values for filter dropdowns, and make helpful suggestions. If you've got a large database, you can choose to trigger these queries manually instead of on a schedule.
 
 ## Questions that use number, date, or timestamp columns
 

@@ -1,19 +1,23 @@
 (ns metabase.lib.temporal-bucket
   "TODO (Cam 6/13/25) -- decide whether things are `unit` or `bucket` and rename functions and args for consistency.
   Confusing to use both as synonyms."
+  (:refer-clojure :exclude [mapv select-keys some])
   (:require
    [clojure.string :as str]
    [medley.core :as m]
    [metabase.lib.dispatch :as lib.dispatch]
+   [metabase.lib.display-name :as lib.display-name]
    [metabase.lib.hierarchy :as lib.hierarchy]
    [metabase.lib.metadata.calculation :as lib.metadata.calculation]
    [metabase.lib.schema :as lib.schema]
    [metabase.lib.schema.common :as lib.schema.common]
+   [metabase.lib.schema.mbql-clause :as lib.schema.mbql-clause]
+   [metabase.lib.schema.metadata :as lib.schema.metadata]
    [metabase.lib.schema.temporal-bucketing :as lib.schema.temporal-bucketing]
-   [metabase.lib.util :as lib.util]
    [metabase.util :as u]
    [metabase.util.i18n :as i18n]
    [metabase.util.malli :as mu]
+   [metabase.util.performance :refer [mapv select-keys some]]
    [metabase.util.time :as u.time]))
 
 (mu/defn describe-temporal-unit :- :string
@@ -21,7 +25,7 @@
   ([]
    (describe-temporal-unit 1 nil))
 
-  ([unit]
+  ([unit :- [:maybe :keyword]]
    (describe-temporal-unit 1 unit))
 
   ([n    :- :int
@@ -55,6 +59,14 @@
 (def ^:private TemporalIntervalAmount
   [:or [:enum :current :last :next] :int])
 
+(def ^:private Bucketable
+  "Something that can have a temporal bucket added to or read from it: an MBQL clause, a column, or a temporal
+  bucketing option."
+  [:or
+   ::lib.schema.mbql-clause/clause
+   ::lib.schema.metadata/column
+   ::lib.schema.temporal-bucketing/option])
+
 (defn- interval-n->int [n]
   (if (number? n)
     n
@@ -87,7 +99,7 @@
    (describe-temporal-interval n unit nil))
   ([n    :- TemporalIntervalAmount
     unit :- [:maybe :keyword]
-    opts :- [:maybe [:map [:include-current {:optional true} :boolean]]]]
+    opts :- [:maybe [:map {:closed true} [:include-current {:optional true} :boolean]]]]
    (let [n                (interval-n->int n)
          unit             (or unit :day)
          include-current? (:include-current opts)]
@@ -303,9 +315,10 @@
     [:field 1 {:temporal-unit :day}]
 
   Pass a `nil` `unit` to remove the temporal bucket."
-  [x option-or-unit :- [:maybe [:or
-                                ::lib.schema.temporal-bucketing/option
-                                ::lib.schema.temporal-bucketing/unit]]]
+  [x :- Bucketable
+   option-or-unit :- [:maybe [:or
+                              ::lib.schema.temporal-bucketing/option
+                              ::lib.schema.temporal-bucketing/unit]]]
   (with-temporal-bucket-method x (cond-> option-or-unit
                                    (not (keyword? option-or-unit)) :unit)))
 
@@ -325,12 +338,12 @@
 
 (mu/defn raw-temporal-bucket :- [:maybe ::lib.schema.temporal-bucketing/unit]
   "Get the raw temporal bucketing `unit` associated with something e.g. a `:field` ref or a ColumnMetadata."
-  [x]
+  [x :- Bucketable]
   (temporal-bucket-method x))
 
 (mu/defn temporal-bucket :- [:maybe ::lib.schema.temporal-bucketing/option]
   "Get the current temporal bucketing option associated with something, if any."
-  [x]
+  [x :- Bucketable]
   (when-let [unit (raw-temporal-bucket x)]
     {:lib/type :option/temporal-bucketing
      :unit     unit}))
@@ -387,11 +400,8 @@
   [query stage-number option]
   (merge {:display-name (lib.metadata.calculation/display-name query stage-number option)
           :short-name (u/qualified-name (raw-temporal-bucket option))
-          :is-temporal-extraction (let [bucket (raw-temporal-bucket option)]
-                                    (and (contains? lib.schema.temporal-bucketing/datetime-extraction-units
-                                                    bucket)
-                                         (not (contains? lib.schema.temporal-bucketing/datetime-truncation-units
-                                                         bucket))))}
+          :is-temporal-extraction (contains? lib.schema.temporal-bucketing/datetime-integer-extraction-units
+                                             (raw-temporal-bucket option))}
          (select-keys option [:default :selected])))
 
 (defmulti available-temporal-buckets-method
@@ -433,20 +443,22 @@
 
 (mu/defn available-temporal-buckets :- [:sequential [:ref ::lib.schema.temporal-bucketing/option]]
   "Get a set of available temporal bucketing units for `x`. Returns nil if no units are available."
-  ([query x]
+  ([query :- ::lib.schema/query
+    x     :- Bucketable]
    (available-temporal-buckets query -1 x))
 
   ([query        :- ::lib.schema/query
     stage-number :- :int
-    x]
+    x            :- Bucketable]
    (available-temporal-buckets-method query stage-number x)))
 
 (mu/defn describe-temporal-pair :- :string
   "Return a string describing the temporal pair.
    Used when comparing temporal values like `[:!= ... [:field {:temporal-unit :day-of-week} ...] \"2022-01-01\"]`"
-  [temporal-column
+  [time-config    :- ::lib.schema.common/time-config
+   temporal-column :- Bucketable
    temporal-value :- [:or :int :string]]
-  (u.time/format-unit temporal-value (:unit (temporal-bucket temporal-column))))
+  (u.time/format-unit time-config temporal-value (:unit (temporal-bucket temporal-column))))
 
 (defn add-temporal-bucket-to-ref
   "Internal helper shared between a few implementations of [[with-temporal-bucket-method]].
@@ -456,36 +468,31 @@
   ;; if `unit` is an extraction unit like `:month-of-year`, then the `:effective-type` of the ref changes to
   ;; `:type/Integer` (month of year returns an int). We need to record the ORIGINAL effective type somewhere in case
   ;; we need to refer back to it, e.g. to see what temporal buckets are available if we want to change the unit, or if
-  ;; we want to remove it later. We will record this with the key `::original-effective-type`. Note that changing the
-  ;; unit multiple times should keep the original first value of `::original-effective-type`.
+  ;; we want to remove it later. We will record this with the key `:lib/original-effective-type`. Note that changing the
+  ;; unit multiple times should keep the original first value of `:lib/original-effective-type`.
   (if unit
-    (let [original-temporal-unit  ((some-fn :metabase.lib.field/original-temporal-unit :temporal-unit) options)
-          extraction-unit?        (contains? lib.schema.temporal-bucketing/datetime-extraction-units unit)
-          original-effective-type ((some-fn :metabase.lib.field/original-effective-type :effective-type :base-type)
+    (let [extraction-unit?        (contains? lib.schema.temporal-bucketing/datetime-integer-extraction-units unit)
+          original-effective-type ((some-fn :lib/original-effective-type :effective-type :base-type)
                                    options)
           new-effective-type      (if extraction-unit?
                                     :type/Integer
                                     original-effective-type)
           options                 (-> options
                                       (assoc :temporal-unit unit
-                                             :effective-type new-effective-type
-                                             :metabase.lib.field/original-effective-type original-effective-type)
-                                      (m/assoc-some :metabase.lib.field/original-temporal-unit original-temporal-unit))]
+                                             :effective-type new-effective-type)
+                                      (m/assoc-some :lib/original-effective-type original-effective-type))]
       [tag options id-or-name])
-    ;; `unit` is `nil`: remove the temporal bucket and remember it :metabase.lib.field/original-temporal-unit.
-    (let [original-effective-type (:metabase.lib.field/original-effective-type options)
-          original-temporal-unit ((some-fn :metabase.lib.field/original-temporal-unit :temporal-unit) options)
+    ;; `unit` is `nil`: remove the temporal bucket.
+    (let [original-effective-type (:lib/original-effective-type options)
           options (cond-> (dissoc options :temporal-unit)
                     original-effective-type
                     (-> (assoc :effective-type original-effective-type)
-                        (dissoc :metabase.lib.field/original-effective-type))
-                    original-temporal-unit
-                    (assoc :metabase.lib.field/original-temporal-unit original-temporal-unit))]
+                        (dissoc :lib/original-effective-type)))]
       [tag options id-or-name])))
 
 (defn- ends-with-temporal-unit?
   [s temporal-unit]
-  (str/ends-with? s (str ": " (describe-temporal-unit temporal-unit))))
+  (str/ends-with? s (str lib.display-name/column-display-name-separator (describe-temporal-unit temporal-unit))))
 
 (defn ensure-ends-with-temporal-unit
   "Append `temporal-unit` into a string `s` if appropriate.
@@ -497,7 +504,7 @@
           (= :default temporal-unit)
           (ends-with-temporal-unit? s temporal-unit))
     s
-    (lib.util/format "%s: %s" s (describe-temporal-unit temporal-unit))))
+    (str s lib.display-name/column-display-name-separator (describe-temporal-unit temporal-unit))))
 
 ;;; TODO (Cam 6/13/25) -- only used outside of Lib; Lib doesn't use `snake_cased` keys. We should reconsider if this
 ;;; belongs in Lib in its current shape.
@@ -506,7 +513,30 @@
 
   This is expected to be called after `:unit` is added into column metadata, ie. in terms of annotate middleware, after
   the column metadata coming from a driver are merged with result of `column-info`."
+  {:deprecated "0.57.0"}
   [column-metadata]
   (if-some [temporal-unit (:unit column-metadata)]
     (update column-metadata :display_name ensure-ends-with-temporal-unit temporal-unit)
     column-metadata))
+
+(def ^:private valid-units-for-date     (conj lib.schema.temporal-bucketing/date-bucketing-units :default))
+(def ^:private valid-units-for-time     (conj lib.schema.temporal-bucketing/time-bucketing-units :default))
+(def ^:private valid-units-for-datetime lib.schema.temporal-bucketing/temporal-bucketing-units)
+
+(defmulti valid-units-for-type
+  "Returns valid temporal units for `a-type`."
+  {:arglists '([a-type])}
+  keyword)
+
+(defmethod valid-units-for-type :type/*        [_] valid-units-for-datetime)
+(defmethod valid-units-for-type :type/Date     [_] valid-units-for-date)
+(defmethod valid-units-for-type :type/Time     [_] valid-units-for-time)
+(defmethod valid-units-for-type :type/DateTime [_] valid-units-for-datetime)
+
+(mu/defn compatible-temporal-unit?
+  "Check whether some column of `a-type` can be bucketted by the`temporal-unit`. Any column can be bucketed by `nil`
+  temporal unit."
+  [a-type        :- ::lib.schema.common/base-type
+   temporal-unit :- [:maybe ::lib.schema.temporal-bucketing/unit]]
+  (or (nil? temporal-unit)
+      (contains? (valid-units-for-type a-type) temporal-unit)))

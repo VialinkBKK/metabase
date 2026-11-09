@@ -1,5 +1,6 @@
-import { setupEnterprisePlugins } from "__support__/enterprise";
+import { setupEnterpriseOnlyPlugin } from "__support__/enterprise";
 import { mockSettings } from "__support__/settings";
+import { createMockState } from "__support__/state";
 import {
   type RenderWithProvidersOptions,
   renderWithProviders,
@@ -9,18 +10,17 @@ import {
   createMockDashboard,
   createMockTokenFeatures,
 } from "metabase-types/api/mocks";
-import { createMockState } from "metabase-types/store/mocks";
 
 import { DashboardEntityIdCard } from "../DashboardEntityIdCard";
 
 export const setup = ({
   dashboard = createMockDashboard(),
-  hasEnterprisePlugins,
+  enterprisePlugins,
   enableSerialization = false,
   ...renderOptions
 }: {
   dashboard?: Dashboard;
-  hasEnterprisePlugins?: boolean;
+  enterprisePlugins?: Parameters<typeof setupEnterpriseOnlyPlugin>[0][];
   enableSerialization?: boolean;
 } & RenderWithProvidersOptions = {}) => {
   const state = createMockState({
@@ -30,8 +30,8 @@ export const setup = ({
       }),
     }),
   });
-  if (hasEnterprisePlugins) {
-    setupEnterprisePlugins();
+  if (enterprisePlugins) {
+    enterprisePlugins.forEach(setupEnterpriseOnlyPlugin);
   }
   return renderWithProviders(<DashboardEntityIdCard dashboard={dashboard} />, {
     ...renderOptions,

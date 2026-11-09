@@ -1,36 +1,38 @@
-import { forwardRef } from "react";
+import { type HTMLAttributes, forwardRef } from "react";
 
-import { formatDateTimeWithUnit } from "metabase/lib/formatting";
-import MetabaseSettings from "metabase/lib/settings";
-import type { DatetimeUnit } from "metabase-types/api";
+import MetabaseSettings from "metabase/utils/settings";
+import { formatDateTimeWithUnit } from "metabase/value-formatting";
+import type { ColumnSettings, DatetimeUnit } from "metabase-types/api";
 
-type DateTimeProps = {
+type DateTimeProps = HTMLAttributes<HTMLSpanElement> & {
   value: string | Date | number;
-  componentProps?: React.ComponentProps<"span">;
   unit?: DatetimeUnit;
+};
+
+export const getFormattedTime = (
+  value: string | Date | number,
+  unit?: DatetimeUnit,
+  options: Pick<ColumnSettings, "local"> = {},
+) => {
+  const settingsOptions = MetabaseSettings.formattingOptions();
+  return formatDateTimeWithUnit(value, unit ?? "default", {
+    ...options,
+    ...settingsOptions,
+  });
 };
 
 /**
  * note: this component intentionally doesn't let you pick a custom date format
  * because that is an instance setting and should be respected globally
  */
-const DateTime = forwardRef<HTMLSpanElement, DateTimeProps>(function DateTime(
-  { value, unit = "default", ...props }: DateTimeProps,
-  ref,
-) {
-  const options = MetabaseSettings.formattingOptions();
-  const formattedTime = formatDateTimeWithUnit(
-    value,
-    unit ?? "default",
-    options,
-  );
+export const DateTime = forwardRef<HTMLSpanElement, DateTimeProps>(
+  function DateTime({ value, unit = "default", ...props }: DateTimeProps, ref) {
+    const formattedTime = getFormattedTime(value, unit);
 
-  return (
-    <span ref={ref} {...props}>
-      {formattedTime}
-    </span>
-  );
-});
-
-// eslint-disable-next-line import/no-default-export -- legacy usage
-export default DateTime;
+    return (
+      <span ref={ref} {...props}>
+        {formattedTime}
+      </span>
+    );
+  },
+);

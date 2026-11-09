@@ -1,20 +1,18 @@
 import { USER_GROUPS } from "e2e/support/cypress_data";
 import { SAMPLE_DATABASE } from "e2e/support/cypress_sample_database";
-import { checkNotNull } from "metabase/lib/types";
 import type { CollectionItem, Dashboard } from "metabase-types/api";
 
 import {
   assertAllResultsAndValuesAreSandboxed,
   assertNoResultsOrValuesAreSandboxed,
-  assertResponseFailsClosed,
   assignAttributeToUser,
   configureSandboxPolicy,
   createSandboxingDashboardAndQuestions,
-  getFieldValuesForProductCategories,
-  getParameterValuesForProductCategories,
+  getDashcardResponses,
   gizmoViewer,
   modelCustomView,
   questionCustomView,
+  rowsShouldContainOnlyOneCategory,
   signInAs,
   widgetViewer,
 } from "./helpers/e2e-sandboxing-helpers";
@@ -41,8 +39,6 @@ describe(
     const customViews: CollectionItem[] = [];
 
     before(() => {
-      cy.intercept("/api/card/*/query").as("cardQuery");
-
       H.restore("postgres-12");
 
       cy.signInAsAdmin();
@@ -52,6 +48,7 @@ describe(
         const { data } = result.body;
         for (const item of data) {
           if (/Dashboard/i.test(item.name)) {
+            // Unjustified type cast. FIXME
             dashboard = item as unknown as Dashboard;
           } else if (/Question|Model/i.test(item.name)) {
             sandboxableQuestions.push(item);
@@ -72,18 +69,21 @@ describe(
     });
 
     beforeEach(() => {
-      cy.intercept("/api/card/*/query").as("cardQuery");
-
       cy.intercept("/api/dashboard/*/dashcard/*/card/*/query").as(
         "dashcardQuery",
       );
-      cy.intercept("POST", "/api/dataset").as("datasetQuery");
+      // Unjustified type cast. FIXME
       H.restore("sandboxing-snapshot" as any);
     });
 
-    it("shows all data before sandboxing policy is applied", () => {
+    it("shows all data before sandboxing policy is applied - gizmoViewer", () => {
       signInAs(gizmoViewer);
       assertNoResultsOrValuesAreSandboxed(dashboard, sandboxableQuestions);
+    });
+
+    // this test looks like it could be merged with the previous one,
+    // but then it flakes at a very high rate
+    it("shows all data before sandboxing policy is applied - widgetViewer", () => {
       signInAs(widgetViewer);
       assertNoResultsOrValuesAreSandboxed(dashboard, sandboxableQuestions);
     });
@@ -161,8 +161,8 @@ describe(
       });
     });
 
-    // Custom columns currently don't work. These tests ensure that the sandboxing policy fails closed.
-    describe("we expect an error - and no data to be shown - when applying a sandbox policy...", () => {
+    // Custom columns currently DO work.
+    describe("should work when applying a sandbox policy...", () => {
       (
         [
           ["Question", "booleanExpr", "true"],
@@ -192,24 +192,38 @@ describe(
             filterColumn: `my_${customColumnType}`,
           });
           signInAs(gizmoViewer);
-          H.visitDashboard(checkNotNull(dashboard).id);
 
-          cy.log("Should not return any data, and return an error");
-          cy.wait(
-            new Array(sandboxableQuestions.length).fill("@dashcardQuery"),
-          ).then((interceptions) => {
-            interceptions.forEach(({ response }) => {
-              assertResponseFailsClosed(response);
+          getDashcardResponses(dashboard, sandboxableQuestions).then(
+            ({ questions, responses }) => {
+              if (customColumnType.endsWith("Literal")) {
+                // A literal column matches every row, so results stay mixed
+                responses.forEach((response) => {
+                  expect(JSON.stringify(response.body)).not.to.contain(
+                    "stacktrace",
+                  );
+                  expect(response.body.data.is_sandboxed).to.be.true;
+                });
+              } else {
+                rowsShouldContainOnlyOneCategory({
+                  questions,
+                  responses,
+                  productCategory: "Gizmo",
+                });
+              }
+            },
+          );
+
+          H.getDashboardCard(0).within(() => {
+            cy.findByText("Question showing all products").should("be.visible");
+            cy.findByText("20 rows").should("be.visible");
+          });
+
+          H.getDashboardCard(1)
+            .scrollIntoView()
+            .within(() => {
+              cy.findByText("Model showing all products").should("be.visible");
+              cy.findByText("20 rows").should("be.visible");
             });
-          });
-
-          getFieldValuesForProductCategories().then((response) => {
-            expect(response.body.values).to.have.length(0);
-          });
-
-          getParameterValuesForProductCategories().then((response) => {
-            expect(response.body.values).to.have.length(0);
-          });
         });
       });
     });
@@ -339,6 +353,7 @@ describe(
           cy.findByLabelText("WA").should("not.exist");
           cy.findByLabelText("Add filter").click();
         });
+        cy.location("search").should("contain", "Location=CA");
 
         signInAs(users["Washington"]);
         H.visitDashboard(dashboard_id);

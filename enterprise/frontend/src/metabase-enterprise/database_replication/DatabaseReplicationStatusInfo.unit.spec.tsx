@@ -1,8 +1,5 @@
+import { createMockSettingsState, createMockState } from "__support__/state";
 import { renderWithProviders, screen } from "__support__/ui";
-import {
-  createMockSettingsState,
-  createMockState,
-} from "metabase-types/store/mocks";
 
 import { DatabaseReplicationStatusInfo } from "./DatabaseReplicationStatusInfo";
 
@@ -26,7 +23,9 @@ describe("DatabaseReplicationStatusInfo", () => {
       it("should show 'Not replicating' status", () => {
         setup({ databaseId: 1 });
 
-        expect(screen.getByText("Not replicating")).toBeInTheDocument();
+        expect(
+          screen.getByText("Not replicating to Metabase Cloud Storage"),
+        ).toBeInTheDocument();
       });
 
       it("should show 'Not replicating' status when database ID is not in connections", () => {
@@ -39,7 +38,9 @@ describe("DatabaseReplicationStatusInfo", () => {
           },
         });
 
-        expect(screen.getByText("Not replicating")).toBeInTheDocument();
+        expect(
+          screen.getByText("Not replicating to Metabase Cloud Storage"),
+        ).toBeInTheDocument();
       });
     });
 
@@ -54,7 +55,9 @@ describe("DatabaseReplicationStatusInfo", () => {
           },
         });
 
-        expect(screen.getByText("Replicating")).toBeInTheDocument();
+        expect(
+          screen.getByText("Replicating to Metabase Cloud Storage"),
+        ).toBeInTheDocument();
       });
 
       it("should render a badge/indicator element", () => {
@@ -78,7 +81,9 @@ describe("DatabaseReplicationStatusInfo", () => {
           },
         });
 
-        expect(screen.getByText("Replicating")).toBeInTheDocument();
+        expect(
+          screen.getByText("Replicating to Metabase Cloud Storage"),
+        ).toBeInTheDocument();
       });
     });
   });

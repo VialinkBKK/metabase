@@ -4,34 +4,38 @@
    [clojure.set :as set]
    [medley.core :as m]
    [metabase.api.common :as api]
-   [metabase.legacy-mbql.normalize :as mbql.normalize]
+   [metabase.lib.core :as lib]
+   [metabase.lib.schema.util :as lib.schema.util]
    [metabase.models.interface :as mi]
    [metabase.query-processor.util :as qp.util]
+   [metabase.segments.schema :as segments.schema]
+   [metabase.util.log :as log]
+   [metabase.util.malli :as mu]
    [metabase.util.malli.registry :as mr]
-   [toucan2.core :as t2]))
+   [metabase.xrays.automagic-dashboards.schema :as ads]
+   [metabase.xrays.db :as xrays.db]))
 
 (def ^:private ^Long max-best-matches        3)
 (def ^:private ^Long max-serendipity-matches 2)
 (def ^:private ^Long max-matches             (+ max-best-matches
                                                 max-serendipity-matches))
 
-(def ^:private ContextBearingForm
+(mr/def ::context-bearing-form
   [:cat
    [:and
     [:or :string :keyword]
     [:fn
      {:error/message "field, metric, or segment"}
      (comp #{:field :metric :segment}
-           qp.util/normalize-token)]]
+           keyword)]]
    [:* :any]])
 
 (defn- collect-context-bearing-forms
   [form]
-  (let [form (mbql.normalize/normalize-fragment [:query :filter] form)]
-    (into #{}
-          (comp (filter (mr/validator ContextBearingForm))
-                (map #(update % 0 qp.util/normalize-token)))
-          (tree-seq sequential? identity form))))
+  (into #{}
+        (comp (filter (mr/validator ::context-bearing-form))
+              (map #(update % 0 qp.util/normalize-token)))
+        (tree-seq sequential? identity form)))
 
 (defmulti definition
   "Return the relevant parts of a given entity's definition. Relevant parts are those that carry semantic meaning, and
@@ -39,37 +43,44 @@
   {:arglists '([instance])}
   mi/model)
 
-(defmethod definition :xrays/Metric
-  [metric]
-  (-> metric :definition ((juxt :aggregation :filter))))
+(mu/defmethod definition :xrays/Metric
+  [metric :- ::ads/metric]
+  (-> metric :xrays/aggregation))
 
 (defmethod definition :model/Card
   [card]
-  (-> card
-      :dataset_query
-      :query
-      ((juxt :breakout :aggregation :expressions :fields))))
+  ;; The schema permits an empty or otherwise unparseable stored `dataset_query`. Treat such a Card as having
+  ;; no context-bearing forms so it does not break related-entity computation for every Card and x-ray.
+  (try
+    (-> card
+        :dataset_query
+        ((juxt lib/breakouts lib/aggregations lib/expressions lib/fields)))
+    (catch Exception e
+      ;; Runs for every candidate Card while ranking, so keep it quiet.
+      (log/debugf "Ignoring Card %s while finding related entities because its query could not be parsed: %s"
+                  (:id card) (ex-message e))
+      nil)))
 
-(defmethod definition :model/Segment
-  [segment]
-  (-> segment :definition :filter))
+(mu/defmethod definition :model/Segment
+  [segment :- [:map [:definition [:maybe ::segments.schema/definition]]]]
+  (-> segment :definition :stages first :filters not-empty))
 
 (defmethod definition :model/Field
   [field]
-  [[:field-id (:id field)]])
+  [[:field {:lib/uuid (str (random-uuid))} (:id field)]])
 
 (defn- similarity
   "How similar are entities `a` and `b` based on a structural comparison of their
    definition (MBQL).
-   For the purposes of finding related entites we are only interested in
+   For the purposes of finding related entities we are only interested in
    context-bearing subforms (field, segment, and metric references). We also
    don't care about generalizations (less context-bearing forms) and refinements
-   (more context-bearing forms), so we just check if the less specifc form is a
+   (more context-bearing forms), so we just check if the less specific form is a
    subset of the more specific one."
   [a b]
-  (let [context-a (-> a definition collect-context-bearing-forms)
-        context-b (-> b definition collect-context-bearing-forms)
-        overlap (set/intersection context-a context-b)
+  (let [context-a (-> a definition collect-context-bearing-forms lib.schema.util/remove-lib-uuids)
+        context-b (-> b definition collect-context-bearing-forms lib.schema.util/remove-lib-uuids)
+        overlap (set/intersection (set context-a) (set context-b))
         min-overlap (min (count context-a) (count context-b))]
     (/ (count overlap)
        (max min-overlap 1))))
@@ -100,102 +111,74 @@
 
 (defn- metrics-for-table
   [table]
-  (filter-visible (t2/select :model/Card
-                             :table_id (:id table)
-                             :type :metric
-                             :archived false)))
+  (filter-visible (xrays.db/unarchived-metrics-for-table (:id table))))
 
 (defn- segments-for-table
   [table]
-  (filter-visible (t2/select :model/Segment
-                             :table_id (:id table)
-                             :archived false)))
+  (filter-visible (xrays.db/unarchived-segments-for-table (:id table))))
 
 (defn- linking-to
   [table]
-  (->> (t2/select-fn-set :fk_target_field_id :model/Field
-                         :table_id           (:id table)
-                         :fk_target_field_id [:not= nil]
-                         :active             true)
-       (map (comp (partial t2/select-one :model/Table :id)
+  (->> (xrays.db/fk-target-field-ids-for-table (:id table))
+       (map (comp xrays.db/table
                   :table_id
-                  (partial t2/select-one :model/Field :id)))
+                  xrays.db/field))
        distinct
        filter-visible
        (take max-matches)))
 
 (defn- linked-from
   [table]
-  (if-let [fields (not-empty (t2/select-fn-set :id :model/Field
-                                               :table_id (:id table)
-                                               :active   true))]
-    (->> (t2/select-fn-set :table_id :model/Field
-                           :fk_target_field_id [:in fields]
-                           :active             true)
-         (map (partial t2/select-one :model/Table :id))
+  (if-let [fields (not-empty (xrays.db/active-field-ids-for-table (:id table)))]
+    (->> (xrays.db/table-ids-of-fields-targeting fields)
+         (map xrays.db/table)
          filter-visible
          (take max-matches))
     []))
 
 (defn- cards-sharing-dashboard
   [card]
-  (if-let [dashboards (not-empty (t2/select-fn-set :dashboard_id :model/DashboardCard
-                                                   :card_id (:id card)))]
-    (->> (t2/select-fn-set :card_id :model/DashboardCard
-                           :dashboard_id [:in dashboards]
-                           :card_id      [:not= (:id card)])
-         (map (partial t2/select-one :model/Card :id))
+  (if-let [dashboards (some-> (:id card) xrays.db/dashboard-ids-for-card not-empty)]
+    (->> (xrays.db/other-card-ids-on-dashboards dashboards (:id card))
+         (map xrays.db/card)
          filter-visible
          (take max-matches))
     []))
 
 (defn- similar-questions
   [card]
-  (->> (t2/select :model/Card
-                  :table_id (:table_id card)
-                  :type [:in [:model :question]]
-                  :archived false)
+  (->> (xrays.db/unarchived-cards-for-table-of-types (:table_id card) [:model :question])
        filter-visible
        (rank-by-similarity card)
        (filter (comp pos? :similarity))))
 
 (defn- similar-metrics
   [card]
-  (->> (t2/select :model/Card
-                  :table_id (:table_id card)
-                  :type :metric
-                  :archived false)
+  (->> (xrays.db/unarchived-cards-for-table-of-types (:table_id card) [:metric])
        filter-visible
        (rank-by-similarity card)
        (filter (comp pos? :similarity))))
 
 (defn- recently-modified-dashboards
   []
-  (when-let [dashboard-ids (not-empty (t2/select-fn-set :model_id :model/Revision
-                                                        :model     "Dashboard"
-                                                        :user_id   api/*current-user-id*
-                                                        {:order-by [[:timestamp :desc]]}))]
-    (->> (t2/select :model/Dashboard :id [:in dashboard-ids])
+  (when-let [dashboard-ids (not-empty (xrays.db/recently-edited-dashboard-ids-for-user api/*current-user-id*))]
+    (->> (xrays.db/dashboards dashboard-ids)
          filter-visible
          (take max-serendipity-matches))))
 
 (defn- recommended-dashboards
   [cards]
   (let [recent                   (recently-modified-dashboards)
-        card-id->dashboard-cards (->> (apply t2/select [:model/DashboardCard :card_id :dashboard_id]
-                                             (cond-> []
-                                               (seq cards)
-                                               (concat [:card_id [:in (map :id cards)]])
-
-                                               (seq recent)
-                                               (concat [:dashboard_id [:not-in (map :id recent)]])))
+        card-id->dashboard-cards (->> (xrays.db/dashcard-card-and-dashboard-ids
+                                       (map :id cards)
+                                       (map :id recent))
                                       (group-by :card_id))
         dashboard-ids (->> (map :id cards)
                            (mapcat card-id->dashboard-cards)
                            (map :dashboard_id)
                            distinct)
         best          (when (seq dashboard-ids)
-                        (->> (t2/select :model/Dashboard :id [:in dashboard-ids])
+                        (->> (xrays.db/dashboards dashboard-ids)
                              filter-visible
                              (take max-best-matches)))]
     (concat best recent)))
@@ -205,7 +188,7 @@
   (->> cards
        (m/distinct-by :collection_id)
        interesting-mix
-       (keep (comp (partial t2/select-one :model/Collection :id) :collection_id))
+       (keep (comp xrays.db/collection :collection_id))
        filter-visible))
 
 (defmulti related
@@ -215,7 +198,7 @@
 
 (defmethod related :model/Card
   [card]
-  (let [table             (t2/select-one :model/Table :id (:table_id card))
+  (let [table             (xrays.db/table (:table_id card))
         similar-questions (similar-questions card)
         similar-metrics   (similar-metrics card)]
     {:table             table
@@ -234,7 +217,7 @@
 
 (defmethod related :xrays/Metric
   [metric]
-  (let [table (t2/select-one :model/Table :id (:table_id metric))]
+  (let [table (xrays.db/table (:table_id metric))]
     {:table    table
      :segments (->> table
                     segments-for-table
@@ -243,7 +226,7 @@
 
 (defmethod related :model/Segment
   [segment]
-  (let [table (t2/select-one :model/Table :id (:table_id segment))]
+  (let [table (xrays.db/table (:table_id segment))]
     {:table       table
      :metrics     (metrics-for-table table)
      :segments    (->> table
@@ -260,19 +243,14 @@
      :metrics     (metrics-for-table table)
      :linking-to  linking-to
      :linked-from linked-from
-     :tables      (->> (t2/select :model/Table
-                                  :db_id           (:db_id table)
-                                  :schema          (:schema table)
-                                  :id              [:not= (:id table)]
-                                  :visibility_type nil
-                                  :active          true)
+     :tables      (->> (xrays.db/sibling-tables (:db_id table) (:schema table) (:id table))
                        (remove (set (concat linking-to linked-from)))
                        filter-visible
                        interesting-mix)}))
 
 (defmethod related :model/Field
   [field]
-  (let [table (t2/select-one :model/Table :id (:table_id field))]
+  (let [table (xrays.db/table (:table_id field))]
     {:table    table
      :segments (->> table
                     segments-for-table
@@ -283,18 +261,13 @@
                     (rank-by-similarity field)
                     (filter (comp pos? :similarity))
                     interesting-mix)
-     :fields   (->> (t2/select :model/Field
-                               :table_id        (:id table)
-                               :id              [:not= (:id field)]
-                               :visibility_type "normal"
-                               :active          true)
+     :fields   (->> (xrays.db/other-visible-fields-in-table (:id table) (:id field))
                     filter-visible
                     interesting-mix)}))
 
 (defmethod related :model/Dashboard
   [dashboard]
-  (let [cards (map (partial t2/select-one :model/Card :id) (t2/select-fn-set :card_id :model/DashboardCard
-                                                                             :dashboard_id (:id dashboard)))]
+  (let [cards (map xrays.db/card (xrays.db/card-ids-for-dashboard (:id dashboard)))]
     {:cards (->> cards
                  (mapcat similar-questions)
                  (remove (set cards))

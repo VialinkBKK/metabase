@@ -1,6 +1,6 @@
 const { H } = cy;
 
-H.describeWithSnowplow("scenarios > question > snowplow", () => {
+describe("scenarios > question > snowplow", () => {
   describe("chart_generated", () => {
     const generateNonTableVisualization = () => {
       cy.visit("/");
@@ -12,6 +12,7 @@ H.describeWithSnowplow("scenarios > question > snowplow", () => {
         cy.findByText("Quantity").click();
         cy.button("Done").click();
       });
+      H.echartsContainer().findByText("Count").should("be.visible");
     };
 
     beforeEach(() => {

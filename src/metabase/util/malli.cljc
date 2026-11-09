@@ -2,7 +2,8 @@
   (:refer-clojure :exclude [fn defn defn- defmethod])
   (:require
    #?@(:clj
-       ([metabase.util.malli.fn :as mu.fn]
+       ([metabase.util.malli.closed-schemas]
+        [metabase.util.malli.fn :as mu.fn]
         [metabase.util.malli.defn :as mu.defn]
         [net.cgrand.macrovich :as macros]
         [potemkin :as p]))
@@ -11,7 +12,6 @@
    [malli.destructure]
    [malli.error :as me]
    [malli.util :as mut]
-   [metabase.util :as u]
    [metabase.util.i18n :as i18n]
    [metabase.util.malli.registry :as mr])
   #?(:cljs (:require-macros [metabase.util.malli])))
@@ -39,16 +39,37 @@
 
 (def localized-string-schema
   "Schema for localized string."
-  #?(:clj  [:fn {:error/message "must be a localized string"}
+  #?(:clj  [:fn {:error/message "must be a localized string", :json-schema {:type "string"}}
             i18n/localized-string?]
      ;; TODO Is there a way to check if a string is being localized in CLJS, by the `ttag`?
      ;; The compiler seems to just inline the translated strings with no annotation or wrapping.
      :cljs :string))
 
+(mr/def ::json-schema-doc
+  "A hand-authored JSON Schema document: only ever echoed to an LLM or OpenAPI consumer, never read by key."
+  [:map {:closed true}
+   [:type        {:optional true} :string]
+   [:const       {:optional true} :string]
+   [:description {:optional true} :string]
+   [:required    {:optional true} [:sequential :string]]
+   [:minItems    {:optional true} :int]
+   [:maxItems    {:optional true} :int]
+   [:items       {:optional true} [:ref ::json-schema-doc]]
+   [:properties  {:optional true} [:map-of :string [:ref ::json-schema-doc]]]])
+
+(def ^:private SchemaProperties
+  "The malli schema properties [[with]] is actually asked to attach."
+  [:map {:closed true}
+   [:description          {:optional true} [:or :string localized-string-schema]]
+   [:decode/api           {:optional true} ifn?]
+   [:json-schema          {:optional true} ::json-schema-doc]
+   [::mr/deliberately-open {:optional true} :boolean]])
+
 (metabase.util.malli/defn with
   "Update a malli schema with an arbitrary map of properties"
   {:style/indent [:form]}
-  [mschema props]
+  [mschema :- Schema
+   props   :- SchemaProperties]
   (mut/update-properties (mc/schema mschema) merge props))
 
 ;; Kondo gets confused by :refer [defn] on this, so it's referenced fully qualified.
@@ -63,7 +84,7 @@
   {:style/indent [:form]}
   ([mschema :- Schema error-message :- localized-string-schema]
    (with-api-error-message mschema error-message error-message))
-  ([mschema                :- :any
+  ([mschema                :- Schema
     description-message    :- localized-string-schema
     specific-error-message :- localized-string-schema]
    (mut/update-properties (mc/schema mschema) assoc
@@ -79,7 +100,7 @@
      {:style/indent 0}
      [& body]
      (macros/case
-      :clj
+       :clj
        `(binding [mu.fn/*enforce* false]
           ~@body)
 
@@ -98,8 +119,8 @@
                                                           (symbol multifn))
                                     :dispatch-value ~dispatch-value-symb}
               f#                   ~(if instrument?
-                                      (mu.fn/instrumented-fn-form error-context-symb (mu.fn/parse-fn-tail fn-tail))
-                                      (mu.fn/deparameterized-fn-form (mu.fn/parse-fn-tail fn-tail)))]
+                                      (mu.fn/instrumented-fn-form error-context-symb :clj (mu.fn/parse-fn-tail fn-tail))
+                                      (mu.fn/deparameterized-fn-form :clj (mu.fn/parse-fn-tail fn-tail)))]
           (.addMethod ~(vary-meta multifn assoc :tag 'clojure.lang.MultiFn)
                       ~dispatch-value-symb
                       f#)))))
@@ -108,18 +129,18 @@
      "Impl for [[defmethod]] for ClojureScript."
      [multifn dispatch-value & fn-tail]
      `(core/defmethod ~multifn ~dispatch-value
-        ~@(mu.fn/deparameterized-fn-tail (mu.fn/parse-fn-tail fn-tail)))))
+        ~@(mu.fn/deparameterized-fn-tail :cljs (mu.fn/parse-fn-tail fn-tail)))))
 
 #?(:clj
    (defmacro defmethod
      "Like [[schema.core/defmethod]], but for Malli."
      [multifn dispatch-value & fn-tail]
      (macros/case
-      :clj  `(-defmethod-clj ~multifn ~dispatch-value ~@fn-tail)
-      :cljs `(-defmethod-cljs ~multifn ~dispatch-value ~@fn-tail))))
+       :clj  `(-defmethod-clj ~multifn ~dispatch-value ~@fn-tail)
+       :cljs `(-defmethod-cljs ~multifn ~dispatch-value ~@fn-tail))))
 
 #?(:clj
-   (defn validate-throw
+   (core/defn validate-throw
      "Returns the value if it matches the schema, else throw an exception."
      [schema-or-validator value]
      (let [is-validator? (fn? schema-or-validator)]
@@ -131,45 +152,36 @@
                                                          {:error (explain schema-or-validator value)})))
          value))))
 
-(core/defn map-schema-assoc
-  "Returns a new schema that is the same as map-schema, but with the key k associated with the value v.
-   If kvs are provided, they are also associated with the schema."
-  [map-schema & kvs]
-  (if kvs
-    (if (next kvs)
-      (let [key (first kvs)
-            val (first (next kvs))
-            ret (mut/assoc map-schema key val)]
-        (recur ret (nnext kvs)))
-      (throw (ex-info "map-schema-assoc expects even number of arguments after schema-map, found odd number" {})))
-    map-schema))
+(core/defn map-schema-keys
+  "Return a set of keys specified in a map `schema`. Resolves refs in the registry and handles maps wrapped in `:and`
+  or combined with `:merge`.
 
-(core/defn require-all-keys
-  "Ensure maps has no optional keys, maybe is required."
+    (map-schema-keys :metabase.lib.metadata.calculation/visible-columns.options)
+    ;; => #{:include-joined?
+            :include-expressions?
+            :include-implicitly-joinable-for-source-card?
+            :include-implicitly-joinable?
+            :include-remaps?}"
   [schema]
-  (mc/walk
-   schema
-   (mc/schema-walker
-    (fn [schema]
-      (case (mc/type schema)
-        :map
-        (mc/-set-children schema
-                          (mapv (fn [[k p s]]
-                                  [k (dissoc p :optional) s]) (mc/children schema)))
-        :maybe
-        (first (mc/children schema))
+  ;;   TODO (Cam 8/7/25) -- there's probably a better way to do this but I don't know what it is.
+  (let [schema (mr/resolve-schema schema)]
+    (case (mc/type schema)
+      :map (into
+            #{}
+            (map first)
+            (mc/children schema))
+      :and (some map-schema-keys (mc/children schema))
+      nil)))
 
-        schema)))))
+(core/defn never
+  "A schema that never validates, with `properties` such as its `:error/message`, and whose JSON Schema accepts nothing."
+  ([]
+   (never {}))
+  ([properties]
+   [:fn (merge {:json-schema {:not {}}} properties) (constantly false)]))
 
-(core/defn snake-keyed-schema
-  "Ensure all maps has snake key schemas"
-  [schema]
-  (mc/walk
-   schema
-   (mc/schema-walker (fn [schema]
-                       (if (= :map (mc/type schema))
-                         (mc/-set-children schema
-                                           (mapv (fn [[k p s]]
-                                                   [(u/->snake_case_en k) p s]) (mc/children schema)))
-
-                         schema)))))
+(core/defn refuse
+  "A schema that never validates; its `:decode/api` throws a 400 with `(message-fn)`. Intended as the last branch of
+  an `[:or ...]`."
+  [message-fn]
+  (never {:decode/api (core/fn [_] (throw (ex-info (message-fn) {:status-code 400})))}))

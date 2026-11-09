@@ -1,10 +1,10 @@
 import { t } from "ttag";
 
 import { useRegisterShortcut } from "metabase/palette/hooks/useRegisterShortcut";
+import type { DatasetEditorTab, QueryBuilderMode } from "metabase/redux/store";
 import { Button, Icon } from "metabase/ui";
 import * as Lib from "metabase-lib";
 import type Question from "metabase-lib/v1/Question";
-import type { DatasetEditorTab, QueryBuilderMode } from "metabase-types/store";
 
 import ViewTitleHeaderS from "../../ViewTitleHeader.module.css";
 
@@ -23,20 +23,21 @@ export function QuestionNotebookButton({
   isShowingNotebook,
   setQueryBuilderMode,
 }: QuestionNotebookButtonProps) {
-  useRegisterShortcut(
-    [
-      {
-        id: "query-builder-toggle-notebook-editor",
-        perform: () =>
-          setQueryBuilderMode(isShowingNotebook ? "view" : "notebook"),
-      },
-    ],
-    [isShowingNotebook],
-  );
+  useRegisterShortcut([
+    {
+      id: "query-builder-toggle-notebook-editor",
+      perform: () =>
+        setQueryBuilderMode(isShowingNotebook ? "view" : "notebook"),
+    },
+  ]);
   return (
     <Button
       data-testid="notebook-button"
-      className={ViewTitleHeaderS.NotebookButton}
+      classNames={{
+        root: ViewTitleHeaderS.ActionButtonRoot,
+        label: ViewTitleHeaderS.ActionButtonLabel,
+        section: ViewTitleHeaderS.ActionButtonSection,
+      }}
       leftSection={
         isShowingNotebook ? (
           <Icon name="lineandbar" />

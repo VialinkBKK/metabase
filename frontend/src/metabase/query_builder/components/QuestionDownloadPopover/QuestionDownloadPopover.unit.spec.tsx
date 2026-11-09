@@ -1,13 +1,14 @@
 import userEvent from "@testing-library/user-event";
 
+import { createMockMetadataFromState } from "__support__/metadata";
 import {
   setupCardQueryDownloadEndpoint,
   setupLastDownloadFormatEndpoints,
 } from "__support__/server-mocks";
+import { createMockState } from "__support__/state";
 import { createMockEntitiesState } from "__support__/store";
 import { getIcon, renderWithProviders, screen } from "__support__/ui";
-import { checkNotNull } from "metabase/lib/types";
-import { getMetadata } from "metabase/selectors/metadata";
+import { checkNotNull } from "metabase/utils/types";
 import type { Card, Dataset } from "metabase-types/api";
 import {
   createMockCard,
@@ -15,9 +16,8 @@ import {
   createMockStructuredDatasetQuery,
 } from "metabase-types/api/mocks";
 import { ORDERS_ID, SAMPLE_DB_ID } from "metabase-types/api/mocks/presets";
-import { createMockState } from "metabase-types/store/mocks";
 
-import QuestionDownloadPopover from "./QuestionDownloadPopover";
+import { QuestionDownloadPopover } from "./QuestionDownloadPopover";
 
 const TEST_CARD = createMockCard({
   dataset_query: createMockStructuredDatasetQuery({
@@ -42,7 +42,7 @@ const setup = ({ card = TEST_CARD, result = TEST_RESULT }: SetupOpts = {}) => {
     }),
   });
 
-  const metadata = getMetadata(state);
+  const metadata = createMockMetadataFromState(state);
   const question = checkNotNull(metadata.question(card.id));
 
   setupCardQueryDownloadEndpoint(card, "json");

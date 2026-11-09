@@ -1,22 +1,25 @@
+import cx from "classnames";
 import type { KeyboardEvent } from "react";
 import { forwardRef, useCallback, useEffect, useRef } from "react";
 import { usePrevious } from "react-use";
 
-import CollectionDropTarget from "metabase/common/components/dnd/CollectionDropTarget";
+import { getCollectionIcon } from "metabase/common/collections/utils";
+import { ForwardRefLink } from "metabase/common/components/Link";
+import { CollectionDropTarget } from "metabase/common/components/dnd/CollectionDropTarget";
 import { TreeNode } from "metabase/common/components/tree/TreeNode";
-import type { TreeNodeProps } from "metabase/common/components/tree/types";
-import { getCollectionIcon } from "metabase/entities/collections/utils";
-import * as Urls from "metabase/lib/urls";
-import { PLUGIN_COLLECTIONS } from "metabase/plugins";
+import type {
+  ITreeNodeItem,
+  TreeNodeProps,
+} from "metabase/common/components/tree/types";
+import CS from "metabase/css/core/index.css";
+import { getIsTenantUser } from "metabase/current-user";
+import { useSelector } from "metabase/redux";
+import { Flex, Icon } from "metabase/ui";
+import * as Urls from "metabase/urls";
 import type { Collection } from "metabase-types/api";
 
-import {
-  CollectionNodeRoot,
-  ExpandToggleButton,
-  FullWidthLink,
-  NameContainer,
-  SidebarIcon,
-} from "./SidebarItems.styled";
+import { LongItemNameTooltip, SidebarItemName } from "./SidebarItemName";
+import S from "./SidebarItems.module.css";
 
 type DroppableProps = {
   hovered: boolean;
@@ -25,6 +28,7 @@ type DroppableProps = {
 
 type Props = DroppableProps &
   Omit<TreeNodeProps, "item"> & {
+    nonNavigable?: boolean;
     collection: Collection;
   };
 
@@ -34,6 +38,7 @@ const SidebarCollectionLink = forwardRef<HTMLLIElement, Props>(
   function SidebarCollectionLink(
     {
       collection,
+      nonNavigable,
       hovered: isHovered,
       depth,
       onSelect,
@@ -41,11 +46,13 @@ const SidebarCollectionLink = forwardRef<HTMLLIElement, Props>(
       isSelected,
       hasChildren,
       onToggleExpand,
+      rightSection,
     }: Props,
     ref,
   ) {
     const wasHovered = usePrevious(isHovered);
-    const timeoutId = useRef<number>();
+    const timeoutId = useRef<number>(undefined);
+    const isTenantUser = useSelector(getIsTenantUser);
 
     useEffect(() => {
       const justHovered = !wasHovered && isHovered;
@@ -70,72 +77,122 @@ const SidebarCollectionLink = forwardRef<HTMLLIElement, Props>(
         }
         switch (event.key) {
           case "ArrowRight":
-            !isExpanded && onToggleExpand();
+            if (!isExpanded) {
+              onToggleExpand();
+            }
             break;
           case "ArrowLeft":
-            isExpanded && onToggleExpand();
+            if (isExpanded) {
+              onToggleExpand();
+            }
             break;
         }
       },
       [isExpanded, hasChildren, onToggleExpand],
     );
 
-    const icon = getCollectionIcon(collection);
-    const isRegularCollection = PLUGIN_COLLECTIONS.isRegularCollection(
-      collection as unknown as Collection,
+    const icon = getCollectionIcon(collection, { isTenantUser });
+
+    const content = (
+      <>
+        <TreeNode.IconContainer transparent={false} c="core-brand">
+          <Icon {...icon} />
+        </TreeNode.IconContainer>
+        <SidebarItemName>{collection.name}</SidebarItemName>
+        {/* Unjustified type cast. FIXME */}
+        {rightSection?.(collection as unknown as ITreeNodeItem)}
+      </>
     );
 
     return (
-      <CollectionNodeRoot
+      <TreeNode.Root
         role="treeitem"
         depth={depth}
-        aria-selected={isSelected}
         isSelected={isSelected}
-        hovered={isHovered}
-        onClick={onToggleExpand}
-        hasDefaultIconStyle={isRegularCollection}
+        className={cx(S.nodeRoot, {
+          [S.selected]: isSelected,
+          [S.dropTarget]: isHovered,
+        })}
+        bdrs="xxs"
+        aria-selected={isSelected}
+        onClick={isSelected ? onToggleExpand : undefined}
         ref={ref}
       >
-        <ExpandToggleButton hidden={!hasChildren}>
+        <TreeNode.ExpandToggleButton
+          c="core-brand"
+          py="xxs"
+          pl="xxxs"
+          pr={0}
+          hidden={!hasChildren}
+          onClick={onToggleExpand}
+        >
           <TreeNode.ExpandToggleIcon
             isExpanded={isExpanded}
             name="chevronright"
             size={12}
           />
-        </ExpandToggleButton>
-        <FullWidthLink to={url} onClick={onSelect} onKeyDown={onKeyDown}>
-          <TreeNode.IconContainer transparent={false}>
-            <SidebarIcon {...icon} isSelected={isSelected} />
-          </TreeNode.IconContainer>
-          <NameContainer>{collection.name}</NameContainer>
-        </FullWidthLink>
-      </CollectionNodeRoot>
-    );
-  },
-);
-
-const DroppableSidebarCollectionLink = forwardRef<HTMLLIElement, TreeNodeProps>(
-  function DroppableSidebarCollectionLink(
-    { item, ...props }: TreeNodeProps,
-    ref,
-  ) {
-    const collection = item as unknown as Collection;
-    return (
-      <div data-testid="sidebar-collection-link-root">
-        <CollectionDropTarget collection={collection}>
-          {(droppableProps: DroppableProps) => (
-            <SidebarCollectionLink
-              {...props}
-              {...droppableProps}
-              collection={collection}
-              ref={ref}
-            />
+        </TreeNode.ExpandToggleButton>
+        <LongItemNameTooltip itemName={collection.name}>
+          {nonNavigable ? (
+            <Flex
+              className={CS.cursorPointer}
+              align="center"
+              w="100%"
+              miw={0}
+              onKeyDown={onKeyDown}
+            >
+              {content}
+            </Flex>
+          ) : (
+            <Flex
+              component={ForwardRefLink}
+              className={S.link}
+              align="center"
+              w="100%"
+              miw={0}
+              to={url}
+              onClick={onSelect}
+              onKeyDown={onKeyDown}
+            >
+              {content}
+            </Flex>
           )}
-        </CollectionDropTarget>
-      </div>
+        </LongItemNameTooltip>
+      </TreeNode.Root>
     );
   },
 );
 
-// eslint-disable-next-line import/no-default-export -- deprecated usage
-export default DroppableSidebarCollectionLink;
+export const DroppableSidebarCollectionLink = forwardRef<
+  HTMLLIElement,
+  TreeNodeProps
+>(function DroppableSidebarCollectionLink(
+  { item, ...props }: TreeNodeProps,
+  ref,
+) {
+  // Unjustified type cast. FIXME
+  const collection = item as unknown as Collection;
+
+  const link = (droppableProps?: DroppableProps) => (
+    <SidebarCollectionLink
+      {...props}
+      hovered={droppableProps?.hovered ?? false}
+      highlighted={droppableProps?.highlighted ?? false}
+      collection={collection}
+      nonNavigable={item.nonNavigable}
+      ref={ref}
+    />
+  );
+
+  return (
+    <div data-testid="sidebar-collection-link-root">
+      {item.nonNavigable ? (
+        link()
+      ) : (
+        <CollectionDropTarget collection={collection}>
+          {(droppableProps: DroppableProps) => link(droppableProps)}
+        </CollectionDropTarget>
+      )}
+    </div>
+  );
+});

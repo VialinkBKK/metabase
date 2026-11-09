@@ -1,6 +1,14 @@
+import { useState } from "react";
 import _ from "underscore";
 
-import { PLUGIN_CONTENT_VERIFICATION } from "metabase/plugins";
+import { useShowOtherUsersCollections } from "metabase/common/hooks/use-show-other-users-collections";
+import { SearchFilterKeys } from "metabase/common/search/constants";
+import type {
+  FilterTypeKeys,
+  SearchFilterComponent,
+  SearchQueryParamValue,
+  URLSearchFilterQueryParams,
+} from "metabase/common/search/types";
 import { DropdownSidebarFilter } from "metabase/search/components/DropdownSidebarFilter";
 import { ToggleSidebarFilter } from "metabase/search/components/ToggleSidebarFilter";
 import { CreatedAtFilter } from "metabase/search/components/filters/CreatedAtFilter";
@@ -8,15 +16,10 @@ import { CreatedByFilter } from "metabase/search/components/filters/CreatedByFil
 import { LastEditedAtFilter } from "metabase/search/components/filters/LastEditedAtFilter";
 import { LastEditedByFilter } from "metabase/search/components/filters/LastEditedByFilter";
 import { NativeQueryFilter } from "metabase/search/components/filters/NativeQueryFilter";
+import { PersonalCollectionsFilter } from "metabase/search/components/filters/PersonalCollectionsFilter";
 import { SearchTrashedItemsFilter } from "metabase/search/components/filters/SearchTrashedItemsFilter";
 import { TypeFilter } from "metabase/search/components/filters/TypeFilter";
-import { SearchFilterKeys } from "metabase/search/constants";
-import type {
-  FilterTypeKeys,
-  SearchFilterComponent,
-  SearchQueryParamValue,
-  URLSearchFilterQueryParams,
-} from "metabase/search/types";
+import { PLUGIN_SEARCH_FILTERS } from "metabase/search/plugins";
 import { Stack } from "metabase/ui";
 
 type SearchSidebarProps = {
@@ -25,15 +28,20 @@ type SearchSidebarProps = {
 };
 
 export const SearchSidebar = ({ value, onChange }: SearchSidebarProps) => {
+  const [openFilterKey, setOpenFilterKey] = useState<FilterTypeKeys | null>(
+    null,
+  );
+
   const filterMap: Record<FilterTypeKeys, SearchFilterComponent> = {
     [SearchFilterKeys.Type]: TypeFilter,
     [SearchFilterKeys.CreatedBy]: CreatedByFilter,
     [SearchFilterKeys.CreatedAt]: CreatedAtFilter,
     [SearchFilterKeys.LastEditedBy]: LastEditedByFilter,
     [SearchFilterKeys.LastEditedAt]: LastEditedAtFilter,
-    [SearchFilterKeys.Verified]: PLUGIN_CONTENT_VERIFICATION.VerifiedFilter,
+    [SearchFilterKeys.Verified]: PLUGIN_SEARCH_FILTERS.VerifiedFilter,
     [SearchFilterKeys.NativeQuery]: NativeQueryFilter,
     [SearchFilterKeys.SearchTrashedItems]: SearchTrashedItemsFilter,
+    [SearchFilterKeys.PersonalCollections]: PersonalCollectionsFilter,
   };
 
   const onOutputChange = (key: FilterTypeKeys, val?: SearchQueryParamValue) => {
@@ -72,14 +80,26 @@ export const SearchSidebar = ({ value, onChange }: SearchSidebarProps) => {
           data-testid={`${key}-search-filter`}
           value={filterValue}
           onChange={(value) => onOutputChange(key, Filter.toUrl(value))}
+          isOpen={openFilterKey === key}
+          onOpenChange={(isOpen) => {
+            if (isOpen) {
+              setOpenFilterKey(key);
+            } else if (openFilterKey === key) {
+              // Only close if this filter is still the one that's open
+              // This prevents race condition when clicking another filter
+              setOpenFilterKey(null);
+            }
+          }}
         />
       );
     }
     return null;
   };
 
+  const showOtherUsersCollections = useShowOtherUsersCollections();
+
   return (
-    <Stack gap="lg">
+    <Stack gap="xl">
       {getFilter(SearchFilterKeys.Type)}
       <Stack gap="sm">
         {getFilter(SearchFilterKeys.CreatedBy)}
@@ -92,6 +112,8 @@ export const SearchSidebar = ({ value, onChange }: SearchSidebarProps) => {
       {getFilter(SearchFilterKeys.Verified)}
       {getFilter(SearchFilterKeys.NativeQuery)}
       {getFilter(SearchFilterKeys.SearchTrashedItems)}
+      {showOtherUsersCollections &&
+        getFilter(SearchFilterKeys.PersonalCollections)}
     </Stack>
   );
 };

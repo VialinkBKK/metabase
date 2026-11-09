@@ -6,20 +6,28 @@
   (:require
    [clojure.string :as str]
    [malli.core :as mc]
-   [malli.json-schema :as mjs]
    [medley.core :as m]
    [metabase.api.open-api]
    [metabase.util :as u]
    [metabase.util.malli :as mu]
-   [metabase.util.malli.describe :as umd]
+   [metabase.util.malli.json-schema :as mu.json-schema]
    [metabase.util.malli.registry :as mr]
    [metabase.util.malli.schema :as ms]))
 
+#_{:clj-kondo/ignore [:metabase/discourage-dynamic-vars]}
 (def ^:private ^:dynamic *definitions* nil)
 
-(mu/defn- merge-required :- :metabase.api.open-api/parameter.schema.object
-  [schema]
-  (let [optional? (set (keep (fn [[k v]] (when (:optional v) k))
+(defn- path->operation-id
+  "Generate an operationId from method and path, e.g. :get + '/api/action/{id}' -> 'get-api-action-id'"
+  [method full-path]
+  (str (name method)
+       (-> full-path
+           (str/replace #"[{}]" "")
+           (str/replace #"/" "-"))))
+
+(mu/defn- merge-required :- :metabase.api.open-api/parameter.schema
+  [schema :- :metabase.api.open-api/parameter.schema]
+  (let [optional? (set (keep (fn [[k v]] (when (or (:optional v) (contains? v :default)) k))
                              (:properties schema)))]
     (-> schema
         (m/update-existing :required #(into []
@@ -28,7 +36,8 @@
                                             %))
         (m/update-existing :properties #(update-vals % (fn [v] (dissoc v :optional)))))))
 
-(def ^:private file-schema (mjs/transform ms/File {::mjs/definitions-path "#/components/schemas/"}))
+(def ^:private file-schema
+  (dissoc (mu.json-schema/transform ms/File {:definitions-path "#/components/schemas/"}) :definitions))
 
 (mu/defn- fix-json-schema :- :metabase.api.open-api/parameter.schema
   "Clean-up JSON schema to make it more understandable for OpenAPI tools.
@@ -37,27 +46,23 @@
 
   NOTE: maybe instead of fixing it up later we should re-work Malli's json-schema transformation into a way we want it
   to be?"
-  [schema :- :map]
+  [schema :- :metabase.api.open-api/parameter.schema]
   (try
-    (let [schema (-> schema
+    ;; Helper to recursively fix nested schemas and strip :optional (which is only
+    ;; meaningful at the top level for parameter detection, not inside oneOf/anyOf/allOf)
+    (let [fix-nested #(dissoc (fix-json-schema %) :optional)
+          schema (-> schema
                      (m/update-existing :description str)
                      (m/update-existing :type keyword)
-                     (m/update-existing :definitions #(update-vals % fix-json-schema))
-                     (m/update-existing :oneOf #(mapv fix-json-schema %))
-                     (m/update-existing :anyOf #(mapv fix-json-schema %))
-                     (m/update-existing :allOf #(mapv fix-json-schema %))
+                     (m/update-existing :definitions #(update-vals % fix-nested))
+                     (m/update-existing :oneOf #(mapv fix-nested %))
+                     (m/update-existing :anyOf #(mapv fix-nested %))
+                     (m/update-existing :allOf #(mapv fix-nested %))
+                     (m/update-existing :not fix-nested)
                      (m/update-existing :additionalProperties (fn [additional-properties]
                                                                 (cond-> additional-properties
-                                                                  (map? additional-properties) fix-json-schema))))]
+                                                                  (map? additional-properties) fix-nested))))]
       (cond
-        ;; we're using `[:maybe ...]` a lot, and it generates `{:oneOf [... {:type "null"}]}`
-        ;; it needs to be cleaned up to be presented in OpenAPI viewers
-        (and (:oneOf schema)
-             (= (second (:oneOf schema)) {:type :null}))
-        (fix-json-schema (merge (first (:oneOf schema))
-                                (select-keys schema [:description :default])
-                                {:optional true}))
-
         ;; this happens when we use `[:and ... [:fn ...]]`, the `:fn` schema gets converted into an empty object
         (:allOf schema)
         (let [schema (update schema :allOf (partial remove (partial = {})))]
@@ -98,38 +103,63 @@
                       {:schema schema}
                       e)))))
 
+(defn- normalize-raw-json-schema
+  "`malli.json-schema/transform`'s raw output has `:type` as a JSON Schema string and `:properties`/`:required`/
+  `:definitions` keyed by the original schema's own (keyword) keys; normalize both up front so the rest of this
+  namespace can treat every JSON Schema node as [[:metabase.api.open-api/parameter.schema]] throughout."
+  [schema]
+  (if-not (map? schema)
+    schema
+    (cond-> schema
+      (:type schema)                 (update :type keyword)
+      (:format schema)               (update :format keyword)
+      (:description schema)          (update :description str)
+      (:properties schema)           (update :properties (fn [props]
+                                                           (into {}
+                                                                 (map (fn [[k v]] [(u/qualified-name k) (normalize-raw-json-schema v)]))
+                                                                 props)))
+      (:definitions schema)          (update :definitions (fn [defs]
+                                                            (into {}
+                                                                  (map (fn [[k v]] [(u/qualified-name k) (normalize-raw-json-schema v)]))
+                                                                  defs)))
+      (:required schema)             (update :required (partial mapv u/qualified-name))
+      (:items schema)                (update :items (fn [items]
+                                                      (if (sequential? items)
+                                                        (mapv normalize-raw-json-schema items)
+                                                        (normalize-raw-json-schema items))))
+      (:prefixItems schema)          (update :prefixItems (partial mapv normalize-raw-json-schema))
+      (map? (:additionalProperties schema)) (update :additionalProperties normalize-raw-json-schema)
+      (:oneOf schema)                 (update :oneOf (partial mapv normalize-raw-json-schema))
+      (:anyOf schema)                 (update :anyOf (partial mapv normalize-raw-json-schema))
+      (:allOf schema)                 (update :allOf (partial mapv normalize-raw-json-schema))
+      (:not schema)                   (update :not normalize-raw-json-schema))))
+
 (defn- mjs-collect-definitions
-  "We transform json-schema in a few different places, but we need to collect all defitions in a single one."
+  "We transform json-schema in a few different places, but we need to collect all definitions in a single one."
   [malli-schema]
-  (let [jss (mjs/transform malli-schema {::mjs/definitions-path "#/components/schemas/"})]
+  (let [jss (normalize-raw-json-schema (mu.json-schema/transform malli-schema {:definitions-path "#/components/schemas/"}))]
     (when *definitions*
       (swap! *definitions* merge (:definitions (fix-json-schema jss))))
     (dissoc jss :definitions)))
 
 (mu/defn- schema->params* :- [:sequential :metabase.api.open-api/parameter]
-  [schema in-fn renames]
+  [schema  :- :metabase.api.macros/schema-form-or-instance
+   in-fn   :- ifn?
+   renames :- [:maybe [:map-of :string :string]]]
   (let [{:keys [properties required]} (mjs-collect-definitions schema)
         required                      (set required)]
     (for [[k param-schema] properties
           :let             [k (get renames k k)]
           :when            (in-fn k)
           :let             [schema    (fix-json-schema param-schema)
-                            ;; if schema does not indicate it's optional, it's not :)
-                            optional? (:optional schema)]]
+                            ;; optional if flagged so, or if it carries a `:default` (a defaulted param is
+                            ;; safe to omit, so it shouldn't be advertised as required)
+                            optional? (or (:optional schema) (contains? schema :default))]]
       (cond-> {:in          (in-fn k)
                :name        (u/qualified-name k)
                :required    (and (contains? required k) (not optional?))
                :schema      (dissoc schema :optional :description)}
         (:description schema) (assoc :description (str (:description schema)))))))
-
-(mu/defn- multipart-schema [form :- :metabase.api.macros/parsed-args]
-  (when-let [request-schema (get-in form [:params :request :schema])]
-    (let [schema (-> request-schema mr/resolve-schema mc/schema)]
-      (when (= (mc/type schema) :map)
-        (some (fn [[k _opts schema]]
-                (when (= k :multipart-params)
-                  schema))
-              (mc/children schema))))))
 
 (def ^:private default-response-schema
   "Default response schema for OpenAPI endpoints. This is used when the endpoint does not specify a response schema."
@@ -140,10 +170,18 @@
 (mu/defn- schema->response-obj :- [:maybe :metabase.api.open-api/path-item.responses]
   "Convert a Malli schema to an OpenAPI response schema.
 
-  This is used to convert the `:response-schema` in [[metabase.api.macros/defendpoint]] to an OpenAPI response schema."
-  [schema]
-  (let [jss-schema (mjs-collect-definitions schema)]
-    {"2XX" (-> {:description (or (:description jss-schema) (umd/describe schema))}
+  This is used to convert the `:response-schema` in [[metabase.api.macros/defendpoint]] to an OpenAPI response schema.
+
+  If the schema has `:openapi/response-schema` in its properties (e.g., for streaming responses), that schema
+  is used for documentation instead of the actual schema. This allows streaming endpoints to document the
+  JSON content they return while validating that the return value is a StreamingResponse instance."
+  [schema :- :metabase.api.macros/schema-form-or-instance]
+  (let [resolved-schema (mr/resolve-schema schema)
+        ;; Check for :openapi/response-schema in the schema properties - used by server/streaming-response-schema
+        content-schema  (or (-> resolved-schema mc/properties :openapi/response-schema)
+                            schema)
+        jss-schema      (mjs-collect-definitions content-schema)]
+    {"2XX" (-> {:description (or (:description jss-schema) "Successful response")}
                (assoc :content {"application/json" {:schema (fix-json-schema jss-schema)}}))}))
 
 (comment
@@ -170,19 +208,20 @@
           ctype           (if (get-in form [:metadata :multipart])
                             "multipart/form-data"
                             "application/json")
-          body-schema     (some-> (if (= ctype "multipart/form-data")
-                                    (multipart-schema form)
-                                    (get-in form [:params :body :schema]))
+          body-schema     (some-> (get-in form [:params :body :schema])
                                   mjs-collect-definitions
                                   fix-json-schema)
-          response-schema (:response-schema form)]
+          response-schema (:response-schema form)
+          deprecated?     (get-in form [:metadata :deprecated])]
       ;; summary is the string in the sidebar of Scalar
-      (cond-> {:summary     (str (u/upper-case-en (name method)) " " full-path)
+      (cond-> {:operationId (path->operation-id method full-path)
+               :summary     (str (u/upper-case-en (name method)) " " full-path)
                :description (some-> (:docstr form) str)
                :parameters params
                :responses  default-response-schema}
         body-schema     (assoc :requestBody {:content {ctype {:schema body-schema}}})
-        response-schema (update :responses merge (schema->response-obj response-schema))))
+        response-schema (update :responses merge (schema->response-obj response-schema))
+        deprecated?     (assoc :deprecated true)))
     (catch Throwable e
       (throw (ex-info (str (format "Error creating OpenAPI spec for endpoint %s %s: %s"
                                    (:method form)
@@ -200,6 +239,11 @@
                       {:full-path full-path, :form form, :definitions @*definitions*}
                       e)))))
 
+(defn- strip-trailing-slash
+  "Remove trailing slash from a string, but keep root paths like '/api' unchanged."
+  [s]
+  (str/replace s #"/$" ""))
+
 (mu/defn open-api-spec :- :metabase.api.open-api/spec
   "Create an OpenAPI spec for then `endpoints` in a namespace. Note this returns an incomplete OpenAPI object;
   use [[metabase.api.open-api/root-open-api-object]] to get something complete."
@@ -210,7 +254,8 @@
              (map (fn [endpoint]
                     (let [local-path (-> (get-in endpoint [:form :route :path])
                                          (str/replace #"/:([^/]+)" "/{$1}"))
-                          full-path  (str prefix local-path)
+                          full-path  (-> (str prefix local-path)
+                                         strip-trailing-slash)
                           method     (get-in endpoint [:form :method])]
                       {full-path {method (assoc (path-item full-path (:form endpoint))
                                                 :tags [prefix])}})))
@@ -219,13 +264,14 @@
              (vals endpoints))
      :components {:schemas @*definitions*}}))
 
-#_:clj-kondo/ignore
 (comment
-  (open-api-spec (metabase.api.macros/ns-routes 'metabase.geojson.api) "/api/geojson")
+  (require '[metabase.api.macros])
+
+  (open-api-spec (metabase.api.macros/ns-routes 'metabase.geojson.rest.api) "/api/geojson")
 
   (metabase.api.macros.defendpoint.open-api/path-item
    "/api/card/:id/series"
-   (:form (metabase.api.macros/find-route 'metabase.queries.api.card :get "/:id/series")))
+   (:form (metabase.api.macros/find-route 'metabase.queries-rest.api.card :get "/:id/series")))
 
-  (-> (mjs/transform :metabase.util.cron/CronScheduleString {::mjs/definitions-path "#/components/schemas/"})
+  (-> (mu.json-schema/transform :metabase.util.cron/CronScheduleString {:definitions-path "#/components/schemas/"})
       fix-json-schema))

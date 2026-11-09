@@ -1,20 +1,19 @@
 import cx from "classnames";
 import { t } from "ttag";
 
-import ButtonGroup from "metabase/common/components/ButtonGroup";
 import CS from "metabase/css/core/index.css";
-import { useDispatch, useSelector } from "metabase/lib/redux";
 import { useRegisterShortcut } from "metabase/palette/hooks/useRegisterShortcut";
+import { useDispatch, useSelector } from "metabase/redux";
+import type { QueryBuilderUIControls } from "metabase/redux/store";
+import { Button, Group, Icon } from "metabase/ui";
+
 import {
   onCloseChartSettings,
   onCloseChartType,
   onOpenChartSettings,
   onOpenChartType,
-} from "metabase/query_builder/actions";
-import ViewButton from "metabase/query_builder/components/view/ViewButton";
-import { getUiControls } from "metabase/query_builder/selectors";
-import { Group } from "metabase/ui";
-import type { QueryBuilderUIControls } from "metabase-types/store";
+} from "../../../store/actions";
+import { getQuestion, getUiControls } from "../../../store/selectors";
 
 import S from "./LeftViewFooterButtonGroup.module.css";
 
@@ -23,6 +22,7 @@ export const LeftViewFooterButtonGroup = () => {
     isShowingChartSettingsSidebar,
     isShowingChartTypeSidebar,
   }: QueryBuilderUIControls = useSelector(getUiControls);
+  const question = useSelector(getQuestion);
 
   const dispatch = useDispatch();
 
@@ -34,49 +34,37 @@ export const LeftViewFooterButtonGroup = () => {
     ? () => dispatch(onCloseChartSettings())
     : () => dispatch(onOpenChartSettings());
 
-  useRegisterShortcut(
-    [
-      {
-        id: "query-builder-toggle-viz-types",
-        perform: handleVizTypeClick,
-      },
-      {
-        id: "query-builder-toggle-viz-settings",
-        perform: handleVizSettingClick,
-      },
-    ],
-    [isShowingChartTypeSidebar, isShowingChartSettingsSidebar],
-  );
+  useRegisterShortcut([
+    {
+      id: "query-builder-toggle-viz-types",
+      perform: handleVizTypeClick,
+    },
+    {
+      id: "query-builder-toggle-viz-settings",
+      perform: handleVizSettingClick,
+    },
+  ]);
 
   return (
     <Group className={cx(CS.flex1, S.Root)}>
-      <ButtonGroup className={S.FooterButtonGroup}>
-        <ViewButton
-          medium
-          labelBreakpoint="sm"
+      <Button.Group>
+        <Button
+          variant="light"
           data-testid="viz-type-button"
-          active={isShowingChartTypeSidebar}
-          className={S.Button}
+          aria-pressed={isShowingChartTypeSidebar}
           onClick={handleVizTypeClick}
         >
           {t`Visualization`}
-        </ViewButton>
-        <ViewButton
-          className={S.Button}
-          active={isShowingChartSettingsSidebar}
-          icon="gear"
-          iconSize={16}
-          medium
-          onlyIcon
-          labelBreakpoint="sm"
+        </Button>
+        <Button
+          variant="light"
+          disabled={question?.display() === "list"}
           data-testid="viz-settings-button"
-          onClick={
-            isShowingChartSettingsSidebar
-              ? () => dispatch(onCloseChartSettings())
-              : () => dispatch(onOpenChartSettings())
-          }
+          aria-pressed={isShowingChartSettingsSidebar}
+          leftSection={<Icon name="gear" />}
+          onClick={handleVizSettingClick}
         />
-      </ButtonGroup>
+      </Button.Group>
     </Group>
   );
 };

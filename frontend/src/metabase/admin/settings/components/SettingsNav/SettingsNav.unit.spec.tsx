@@ -1,31 +1,56 @@
 import userEvent from "@testing-library/user-event";
-import { Route } from "react-router";
+import fetchMock from "fetch-mock";
 
 import { setupSettingEndpoint } from "__support__/server-mocks";
-import { renderWithProviders, screen } from "__support__/ui";
-import { createMockVersionInfo } from "metabase-types/api/mocks";
+import { createMockSettingsState } from "__support__/state";
+import { renderWithProviders, screen, within } from "__support__/ui";
+import { Route } from "metabase/router";
+import type { TokenFeatures } from "metabase-types/api";
 import {
-  createMockLocation,
-  createMockRoutingState,
-} from "metabase-types/store/mocks";
+  createMockSettings,
+  createMockTokenFeatures,
+  createMockUser,
+  createMockVersionInfo,
+} from "metabase-types/api/mocks";
 
 import { SettingsNav } from "./SettingsNav";
 
-const setup = async ({ initialRoute }: { initialRoute: string }) => {
-  setupSettingEndpoint({
-    settingKey: "version-info",
-    settingValue: createMockVersionInfo(),
+const setup = async ({
+  initialRoute,
+  isAdmin = true,
+  isHosted,
+  customVizDevModeEnabled,
+  tokenFeatures,
+}: {
+  initialRoute: string;
+  isAdmin?: boolean;
+  isHosted?: boolean;
+  customVizDevModeEnabled?: boolean;
+  tokenFeatures?: Partial<TokenFeatures>;
+}) => {
+  const versionInfo = createMockVersionInfo();
+  const settings = createMockSettings({
+    "version-info": versionInfo,
+    "custom-viz-plugin-dev-mode-enabled": Boolean(customVizDevModeEnabled),
+    "token-features": createMockTokenFeatures({
+      hosting: Boolean(isHosted),
+      "custom-viz": true,
+      "custom-viz-available": true,
+      ...tokenFeatures,
+    }),
   });
 
-  renderWithProviders(<Route path="*" component={SettingsNav} />, {
+  setupSettingEndpoint({
+    settingKey: "version-info",
+    settingValue: versionInfo,
+  });
+
+  renderWithProviders(<Route path="*" element={<SettingsNav />} />, {
     withRouter: true,
     initialRoute,
     storeInitialState: {
-      routing: createMockRoutingState({
-        locationBeforeTransitions: createMockLocation({
-          pathname: initialRoute,
-        }),
-      }),
+      currentUser: createMockUser({ is_superuser: isAdmin }),
+      settings: createMockSettingsState(settings),
     },
   });
 };
@@ -36,6 +61,24 @@ describe("SettingsNav", () => {
 
     expect(await screen.findByText("General")).toBeInTheDocument();
     expect(await screen.findByText("Authentication")).toBeInTheDocument();
+  });
+
+  it("should show Remote sync upsell nav item for non-pro plans", async () => {
+    await setup({
+      initialRoute: "/admin/settings/general",
+      tokenFeatures: {
+        "custom-viz": false,
+        "custom-viz-available": false,
+      },
+    });
+
+    expect(await screen.findByText("Remote sync")).toBeInTheDocument();
+  });
+
+  it("should hide Remote sync upsell nav item for pro plans", async () => {
+    await setup({ initialRoute: "/admin/settings/general" });
+
+    expect(screen.queryByText("Remote sync")).not.toBeInTheDocument();
   });
 
   it("should highlight the active nav item", async () => {
@@ -97,5 +140,136 @@ describe("SettingsNav", () => {
     await userEvent.click(authNavItem);
     expect(authNavItem).not.toHaveAttribute("data-expanded");
     expect(authNavItem).toHaveAttribute("data-active", "true");
+  });
+
+  it("should only show Updates nav item when hosted", async () => {
+    await setup({ initialRoute: "/admin/settings/general", isHosted: true });
+    expect(screen.queryByText("Updates")).not.toBeInTheDocument();
+  });
+
+  it("should show only allowlisted pages to settings managers", async () => {
+    await setup({
+      initialRoute: "/admin/settings/general",
+      isAdmin: false,
+      tokenFeatures: {
+        "custom-viz": false,
+        "custom-viz-available": false,
+      },
+    });
+
+    expect(await screen.findByText("General")).toBeInTheDocument();
+    expect(screen.getByText("Domains")).toBeInTheDocument();
+    expect(screen.getByText("Email")).toBeInTheDocument();
+    expect(screen.getByText("Slack")).toBeInTheDocument();
+    expect(screen.getByText("Webhooks")).toBeInTheDocument();
+    expect(screen.getByText("Localization")).toBeInTheDocument();
+    expect(screen.getByText("Maps")).toBeInTheDocument();
+    expect(screen.getByText("Appearance")).toBeInTheDocument();
+    expect(screen.getByText("Uploads")).toBeInTheDocument();
+    expect(screen.getByText("Public sharing")).toBeInTheDocument();
+
+    expect(screen.queryByText("Authentication")).not.toBeInTheDocument();
+    expect(screen.queryByText("License")).not.toBeInTheDocument();
+    expect(screen.queryByText("Updates")).not.toBeInTheDocument();
+    expect(screen.queryByText("Cloud")).not.toBeInTheDocument();
+    expect(screen.queryByText("Remote sync")).not.toBeInTheDocument();
+    expect(screen.queryByText("Custom visualizations")).not.toBeInTheDocument();
+    expect(screen.queryByText("Data apps")).not.toBeInTheDocument();
+    expect(screen.queryByText("Python Runner")).not.toBeInTheDocument();
+    expect(screen.queryByText("Branding")).not.toBeInTheDocument();
+  });
+
+  it("should show the Appearance folder to settings managers when whitelabel is enabled", async () => {
+    await setup({
+      initialRoute: "/admin/settings/whitelabel/branding",
+      isAdmin: false,
+      tokenFeatures: { whitelabel: true },
+    });
+
+    expect(await screen.findByText("Appearance")).toBeInTheDocument();
+    expect(screen.getByText("Branding")).toBeInTheDocument();
+    expect(screen.getByText("Conceal Metabase")).toBeInTheDocument();
+  });
+
+  it.each([
+    { whitelabel: true, hasGem: false },
+    { whitelabel: false, hasGem: true },
+  ])(
+    "should show the upsell gem on the Appearance link only without the whitelabel feature (whitelabel: $whitelabel)",
+    async ({ whitelabel, hasGem }) => {
+      await setup({
+        initialRoute: "/admin/settings/general",
+        tokenFeatures: { whitelabel },
+      });
+
+      const appearanceLink = await screen.findByRole("link", {
+        name: /Appearance/,
+      });
+      expect(appearanceLink).toHaveTextContent(/^Appearance$/);
+      expect(within(appearanceLink).queryByTestId("upsell-gem") !== null).toBe(
+        hasGem,
+      );
+    },
+  );
+
+  it("should hide Authentication and Python Runner from settings managers even with related tokens", async () => {
+    await setup({
+      initialRoute: "/admin/settings/general",
+      isAdmin: false,
+      tokenFeatures: {
+        scim: true,
+        sso_saml: true,
+        "transforms-python": true,
+      },
+    });
+
+    expect(await screen.findByText("General")).toBeInTheDocument();
+    expect(screen.queryByText("Authentication")).not.toBeInTheDocument();
+    expect(screen.queryByText("Python Runner")).not.toBeInTheDocument();
+  });
+
+  it("should not request version-info for settings managers", async () => {
+    await setup({ initialRoute: "/admin/settings/general", isAdmin: false });
+
+    expect(await screen.findByText("General")).toBeInTheDocument();
+    expect(fetchMock.callHistory.called("path:/api/setting/version-info")).toBe(
+      false,
+    );
+  });
+
+  it("should show License and Updates to admins", async () => {
+    await setup({ initialRoute: "/admin/settings/general" });
+
+    expect(await screen.findByText("License")).toBeInTheDocument();
+    expect(screen.getByText("Updates")).toBeInTheDocument();
+  });
+
+  it("should show Development nav item when custom viz dev mode is enabled", async () => {
+    await setup({
+      initialRoute: "/admin/settings/custom-visualizations",
+      customVizDevModeEnabled: true,
+    });
+
+    const customVizNavItem = await screen.findByRole("link", {
+      name: /Custom visualizations/,
+    });
+    await userEvent.click(customVizNavItem);
+
+    expect(screen.getByText("Development")).toBeInTheDocument();
+  });
+
+  it("should hide Development nav item when custom viz dev mode is disabled", async () => {
+    await setup({
+      initialRoute: "/admin/settings/custom-visualizations",
+      customVizDevModeEnabled: false,
+    });
+
+    const customVizNavItem = await screen.findByRole("link", {
+      name: /Custom visualizations/,
+    });
+    await userEvent.click(customVizNavItem);
+
+    expect(screen.queryByText("Manage visualizations")).not.toBeInTheDocument();
+    expect(screen.queryByText("Development")).not.toBeInTheDocument();
   });
 });

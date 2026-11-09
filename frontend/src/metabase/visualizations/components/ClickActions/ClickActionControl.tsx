@@ -1,22 +1,15 @@
-import { useDispatch } from "metabase/lib/redux";
-import { Button, Icon, Tooltip } from "metabase/ui";
+import type { JSX } from "react";
+
+import { useDispatch } from "metabase/redux";
+import { Box, Button, Icon, Text, Tooltip } from "metabase/ui";
 import {
   type ClickAction,
   isCustomClickAction,
   isCustomClickActionWithView,
+  isRegularClickAction,
 } from "metabase/visualizations/types";
-import { isRegularClickAction } from "metabase/visualizations/types";
 
 import S from "./ClickActionControl.module.css";
-import {
-  ClickActionButtonTextIcon,
-  FormattingControl,
-  InfoControl,
-  SortControl,
-  Subtitle,
-  TokenActionButton,
-  TokenFilterActionButton,
-} from "./ClickActionControl.styled";
 
 interface Props {
   action: ClickAction;
@@ -57,59 +50,77 @@ export const ClickActionControl = ({
   switch (buttonType) {
     case "token-filter":
       return (
-        <TokenFilterActionButton
-          small
-          icon={
+        <Button
+          variant="subtle"
+          size="sm"
+          onClick={handleClick}
+          className={S.tokenFilterActionButton}
+          leftSection={
             typeof action.icon === "string" && (
-              <Icon className={S.ClickActionButtonIcon} name={action.icon} />
+              <Icon
+                className={S.clickActionButtonIcon}
+                name={action.icon}
+                m={0}
+              />
             )
           }
-          onClick={handleClick}
         >
           {action.title}
-        </TokenFilterActionButton>
+        </Button>
       );
 
     case "token":
       return (
-        <TokenActionButton small onClick={handleClick}>
+        <Button
+          variant="subtle"
+          size="sm"
+          className={S.tokenFilterActionTokenButton}
+          onClick={handleClick}
+        >
           {action.title}
-        </TokenActionButton>
+        </Button>
       );
 
     case "sort":
       return (
         <Tooltip label={action.tooltip}>
-          <SortControl
-            onlyIcon
-            onClick={handleClick}
+          <Button
+            variant="subtle"
+            size="sm"
+            className={S.tokenFilterActionButton}
             data-testid={`click-actions-sort-control-${action.name}`}
-          >
-            {typeof action.icon === "string" && (
-              <Icon size={14} name={action.icon} />
-            )}
-          </SortControl>
+            leftSection={
+              typeof action.icon === "string" ? (
+                <Icon size={14} name={action.icon} />
+              ) : undefined
+            }
+            onClick={handleClick}
+          />
         </Tooltip>
       );
 
     case "formatting":
       return (
         <Tooltip label={action.tooltip}>
-          <FormattingControl onlyIcon onClick={handleClick}>
-            {typeof action.icon === "string" && (
-              <Icon size={16} name={action.icon} />
-            )}
-          </FormattingControl>
+          <Button
+            size="sm"
+            leftSection={
+              typeof action.icon === "string" ? (
+                <Icon name={action.icon} />
+              ) : undefined
+            }
+            onClick={handleClick}
+          />
         </Tooltip>
       );
 
     case "horizontal":
       return (
         <Button
-          size="xs"
           p="0.5rem"
           mx="-0.5rem"
-          variant="inverse"
+          variant="subtle"
+          color="neutral"
           classNames={{
             root: S.horizontalButton,
             label: S.label,
@@ -117,23 +128,29 @@ export const ClickActionControl = ({
           }}
           leftSection={
             action.iconText ? (
-              <ClickActionButtonTextIcon>
+              <Box className={S.clickActionButtonTextIcon}>
                 {action.iconText}
-              </ClickActionButtonTextIcon>
+              </Box>
             ) : action.icon ? (
-              <Icon className={S.ClickActionButtonIcon} name={action.icon} />
+              <Icon
+                className={S.clickActionButtonIcon}
+                name={action.icon}
+                m={0}
+              />
             ) : null
           }
           onClick={handleClick}
         >
           {action.title}
-          {action.subTitle && (
-            <Subtitle className={S.nested}>{action.subTitle}</Subtitle>
-          )}
+          {action.subTitle && <Box>{action.subTitle}</Box>}
         </Button>
       );
 
     case "info":
-      return <InfoControl>{action.title}</InfoControl>;
+      return (
+        <Text c="text-primary" fw="bold" lh="1.5rem" maw="10.75rem">
+          {action.title}
+        </Text>
+      );
   }
 };

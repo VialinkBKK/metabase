@@ -1,5 +1,4 @@
-import { useSelector } from "metabase/lib/redux";
-import { getMetadataUnfiltered } from "metabase/selectors/metadata";
+import { useMetadataProviderUnfiltered } from "metabase/metadata-store";
 import * as Lib from "metabase-lib";
 import type Question from "metabase-lib/v1/Question";
 
@@ -7,17 +6,8 @@ export function useHiddenSourceTables(
   question: Question,
 ): Lib.TableDisplayInfo[] {
   const datasetQuery = question.datasetQuery();
-  const metadata = useSelector(getMetadataUnfiltered);
-  const metadataProvider = Lib.metadataProvider(
-    datasetQuery.database,
-    metadata,
-  );
-  const query = Lib.fromLegacyQuery(
-    datasetQuery.database,
-    metadataProvider,
-    datasetQuery,
-  );
-
+  const metadataProvider = useMetadataProviderUnfiltered(datasetQuery.database);
+  const query = Lib.fromJsQuery(metadataProvider, datasetQuery);
   const sourceTableId = Lib.sourceTableOrCardId(query);
 
   const joinTablesInfo = Lib.stageIndexes(query).flatMap((stageIndex) =>
@@ -40,8 +30,6 @@ export function useHiddenSourceTables(
 
   return joinTablesInfo.filter(
     (tableInfo) =>
-      !tableInfo.isSourceTable ||
-      (tableInfo.visibilityType !== null &&
-        tableInfo.visibilityType !== "normal"),
+      !tableInfo.isSourceTable || tableInfo.visibilityType !== null,
   );
 }

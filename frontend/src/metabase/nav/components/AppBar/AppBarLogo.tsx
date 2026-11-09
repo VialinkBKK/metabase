@@ -1,14 +1,17 @@
-import type { MouseEvent } from "react";
+import cx from "classnames";
+import type { JSX, MouseEvent } from "react";
 
-import LogoIcon from "metabase/common/components/LogoIcon";
+import { Link } from "metabase/common/components/Link";
+import { LogoIcon } from "metabase/common/components/LogoIcon";
 import { useIsAtHomepageDashboard } from "metabase/common/hooks/use-is-at-homepage-dashboard";
 
-import { LogoLink } from "./AppBarLogo.styled";
+import S from "./AppBar.module.css";
 
 export interface AppBarLogoProps {
   isSmallAppBar?: boolean;
   isLogoVisible?: boolean;
   isNavBarEnabled?: boolean;
+  isGitSyncVisible?: boolean;
   onLogoClick?: () => void;
 }
 
@@ -16,6 +19,7 @@ export function AppBarLogo({
   isLogoVisible,
   isSmallAppBar,
   isNavBarEnabled,
+  isGitSyncVisible,
   onLogoClick,
 }: AppBarLogoProps): JSX.Element | null {
   const isAtHomepageDashboard = useIsAtHomepageDashboard();
@@ -34,14 +38,17 @@ export function AppBarLogo({
   };
 
   return (
-    <LogoLink
+    <Link
       to="/"
-      isSmallAppBar={Boolean(isSmallAppBar)}
+      className={cx(S.logoLink, {
+        [S.logoLinkSpaced]: !isSmallAppBar && !isGitSyncVisible,
+        [S.logoLinkSpacedGitSync]: !isSmallAppBar && isGitSyncVisible,
+      })}
       onClick={handleClick}
       disabled={!isNavBarEnabled}
       data-testid="main-logo-link"
     >
       <LogoIcon height={32} />
-    </LogoLink>
+    </Link>
   );
 }

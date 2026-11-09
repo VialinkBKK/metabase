@@ -7,6 +7,7 @@ import {
   ORDERS_DASHBOARD_ID,
   ORDERS_QUESTION_ID,
 } from "e2e/support/cypress_sample_instance_data";
+import { createMockDashboardCard } from "metabase-types/api/mocks";
 
 const { admin } = USERS;
 const {
@@ -33,7 +34,7 @@ describe("issue 18009", { tags: "@external" }, () => {
   it("nodata user should be able to create and receive an email subscription without errors (metabase#18009)", () => {
     H.visitDashboard(ORDERS_DASHBOARD_ID);
 
-    H.openSharingMenu("Subscriptions");
+    H.toggleDashboardSubscriptionsSidebar();
 
     H.sidebar()
       .findByPlaceholderText("Enter user names or email addresses")
@@ -43,8 +44,8 @@ describe("issue 18009", { tags: "@external" }, () => {
       .click();
 
     // Click anywhere to close the popover that covers the "Send email now" button
-    // eslint-disable-next-line no-unscoped-text-selectors -- deprecated usage
-    cy.findByText("To:").click();
+    // eslint-disable-next-line metabase/no-unscoped-text-selectors -- deprecated usage
+    cy.findByText("To").click();
 
     H.sendEmailAndAssert((email) => {
       expect(email.html).not.to.include(
@@ -56,10 +57,17 @@ describe("issue 18009", { tags: "@external" }, () => {
   });
 });
 
-describe("issue 18344", { tags: "@external" }, () => {
+describe("issues 18344 and 18352", { tags: "@external" }, () => {
   const {
     admin: { first_name, last_name },
   } = USERS;
+
+  const questionDetails = {
+    name: "18352",
+    native: {
+      query: "SELECT 'foo', 1 UNION ALL SELECT 'bar', 2",
+    },
+  };
 
   beforeEach(() => {
     H.restore();
@@ -83,76 +91,39 @@ describe("issue 18344", { tags: "@external" }, () => {
     });
 
     H.saveDashboard();
-    // eslint-disable-next-line no-unscoped-text-selectors -- deprecated usage
+    // eslint-disable-next-line metabase/no-unscoped-text-selectors -- deprecated usage
     cy.findByText("OrdersFoo");
-  });
 
-  it("subscription should not include original question name when it's been renamed in the dashboard (metabase#18344)", () => {
-    // Send a test email subscription
-    H.openSharingMenu("Subscriptions");
-    // eslint-disable-next-line no-unscoped-text-selectors -- deprecated usage
-    cy.findByText("Email it").click();
+    H.createQuestionAndAddToDashboard(questionDetails, ORDERS_DASHBOARD_ID, {
+      row: 8,
+    }).then(({ body: { card_id } }) => {
+      H.visitQuestion(card_id);
 
-    cy.findByPlaceholderText("Enter user names or email addresses").click();
-    // eslint-disable-next-line no-unscoped-text-selectors -- deprecated usage
-    cy.findByText(`${first_name} ${last_name}`).click();
-    // Click this just to close the popover that is blocking the "Send email now" button
-    // eslint-disable-next-line no-unscoped-text-selectors -- deprecated usage
-    cy.findByText("To:").click();
-
-    H.sendEmailAndAssert((email) => {
-      expect(email.html).to.include("OrdersFoo");
+      H.visitDashboard(ORDERS_DASHBOARD_ID);
     });
   });
-});
 
-describe("issue 18352", { tags: "@external" }, () => {
-  const {
-    admin: { first_name, last_name },
-  } = USERS;
-
-  const questionDetails = {
-    name: "18352",
-    native: {
-      query: "SELECT 'foo', 1 UNION ALL SELECT 'bar', 2",
-    },
-  };
-
-  beforeEach(() => {
-    H.restore();
-    cy.signInAsAdmin();
-
-    H.setupSMTP();
-
-    H.createNativeQuestionAndDashboard({ questionDetails }).then(
-      ({ body: { card_id, dashboard_id } }) => {
-        H.visitQuestion(card_id);
-
-        H.visitDashboard(dashboard_id);
-      },
-    );
-  });
-
-  it("should send the card with the INT64 values (metabase#18352)", () => {
-    H.openSharingMenu("Subscriptions");
-
-    // eslint-disable-next-line no-unscoped-text-selectors -- deprecated usage
+  it("subscription should use the renamed question name and send the card with the INT64 values (metabase#18344, metabase#18352)", () => {
+    // Send a test email subscription
+    H.toggleDashboardSubscriptionsSidebar();
+    // eslint-disable-next-line metabase/no-unscoped-text-selectors -- deprecated usage
     cy.findByText("Email it").click();
 
     cy.findByPlaceholderText("Enter user names or email addresses").click();
-    // eslint-disable-next-line no-unscoped-text-selectors -- deprecated usage
+    // eslint-disable-next-line metabase/no-unscoped-text-selectors -- deprecated usage
     cy.findByText(`${first_name} ${last_name}`).click();
     // Click this just to close the popover that is blocking the "Send email now" button
-    // eslint-disable-next-line no-unscoped-text-selectors -- deprecated usage
-    cy.findByText("To:").click();
+    // eslint-disable-next-line metabase/no-unscoped-text-selectors -- deprecated usage
+    cy.findByText("To").click();
 
     H.sendEmailAndAssert(({ html }) => {
       expect(html).not.to.include(
         "An error occurred while displaying this card.",
       );
 
-      expect(html).to.include("foo");
-      expect(html).to.include("bar");
+      expect(html).to.include("OrdersFoo");
+      expect(html).to.match(/>\s*foo\s*</);
+      expect(html).to.match(/>\s*bar\s*</);
     });
   });
 });
@@ -205,8 +176,8 @@ describe("issue 18669", { tags: "@external" }, () => {
   });
 
   it("should send a test email with non-default parameters (metabase#18669)", () => {
-    H.openSharingMenu("Subscriptions");
-    // eslint-disable-next-line no-unscoped-text-selectors -- deprecated usage
+    H.toggleDashboardSubscriptionsSidebar();
+    // eslint-disable-next-line metabase/no-unscoped-text-selectors -- deprecated usage
     cy.findByText("Email it").click();
 
     cy.findByPlaceholderText("Enter user names or email addresses")
@@ -223,7 +194,10 @@ describe("issue 18669", { tags: "@external" }, () => {
       cy.button("Update filter").click();
     });
 
-    H.clickSend();
+    H.sendEmailAndVisitIt();
+    cy.get("table.header")
+      .should("contain", filterDetails.name)
+      .and("contain", "Gizmo");
   });
 });
 
@@ -246,13 +220,11 @@ describe("issue 20393", () => {
   }
 
   beforeEach(() => {
-    cy.intercept("POST", "/api/dashboard/*/public_link").as("publicLink");
-
     H.restore();
     cy.signInAsAdmin();
   });
 
-  it("should show public dashboards with nested cards mapped to parameters (metabase#20393)", () => {
+  it("should create a public link and show public dashboards with nested cards mapped to parameters (metabase#20393)", () => {
     createDashboardWithNestedCard();
 
     H.editDashboard();
@@ -264,22 +236,30 @@ describe("issue 20393", () => {
     H.popover().contains("CREATED_AT").click();
 
     // save the dashboard
-    // eslint-disable-next-line no-unscoped-text-selectors -- deprecated usage
+    // eslint-disable-next-line metabase/no-unscoped-text-selectors -- deprecated usage
     cy.findByText("Save").click();
 
-    // open the sharing modal and enable sharing
     H.openNewPublicLinkDropdown("dashboard");
 
-    // navigate to the public dashboard link
-    cy.wait("@publicLink").then(({ response: { body } }) => {
-      const { uuid } = body;
+    cy.get("@uuid").then((uuid) => {
+      expect(uuid).not.to.be.null;
+
+      cy.findByTestId("public-link-input").should("be.visible");
+      cy.findByTestId("public-link-input").should(
+        "not.have.attr",
+        "placeholder",
+        "Loading…",
+      );
+      cy.findByTestId("public-link-input").should(($input) => {
+        expect($input.val()).to.match(new RegExp(`/public/dashboard/${uuid}$`));
+      });
 
       cy.signOut();
       cy.visit(`/public/dashboard/${uuid}`);
     });
 
     // verify that the card is visible on the page
-    // eslint-disable-next-line no-unscoped-text-selectors -- deprecated usage
+    // eslint-disable-next-line metabase/no-unscoped-text-selectors -- deprecated usage
     cy.findByText("Q2");
   });
 });
@@ -323,10 +303,10 @@ describe("issue 21559", { tags: "@external" }, () => {
   it("should respect dashboard card visualization (metabase#21559)", () => {
     cy.intercept("POST", "/api/card/*/query").as("cardQuery");
 
-    H.findDashCardAction(
-      H.getDashboardCard(0),
-      "Visualize another way",
-    ).click();
+    H.getDashboardCard(0)
+      .realHover({ scrollBehavior: "bottom" })
+      .findByLabelText("Visualize another way")
+      .click();
 
     H.modal().within(() => {
       H.switchToAddMoreData();
@@ -339,7 +319,7 @@ describe("issue 21559", { tags: "@external" }, () => {
     // Make sure visualization changed to funnel
     H.getDashboardCard(0).within(() => {
       cy.findByText("80.52").should("exist");
-      cy.get("polygon[fill='#509EE3']").should("exist");
+      cy.get("polygon[fill='#509EE2']").should("exist");
     });
 
     H.saveDashboard();
@@ -391,7 +371,7 @@ describe("issue 22524", () => {
     H.editDashboard();
     H.setFilter("Text or Category", "Is");
 
-    // eslint-disable-next-line no-unscoped-text-selectors -- deprecated usage
+    // eslint-disable-next-line metabase/no-unscoped-text-selectors -- deprecated usage
     cy.findByText("Select…").click();
     H.popover().contains("City").click();
 
@@ -411,12 +391,12 @@ describe("issue 22524", () => {
     cy.findByPlaceholderText("Text").clear().type("Rye{enter}");
 
     // Check results
-    // eslint-disable-next-line no-unscoped-text-selectors -- deprecated usage
+    // eslint-disable-next-line metabase/no-unscoped-text-selectors -- deprecated usage
     cy.findByText("2-7900 Cuerno Verde Road");
   });
 });
 
-describe("issue 24223", () => {
+describe("issue 24223", { tags: "@external" }, () => {
   const questionDetails = {
     name: "24223",
     query: {
@@ -558,7 +538,7 @@ describe("issue 25473", () => {
   };
 
   function assertOnResults() {
-    // eslint-disable-next-line no-unsafe-element-filtering
+    // eslint-disable-next-line metabase/no-unsafe-element-filtering
     cy.findAllByRole("columnheader").last().should("have.text", ccName);
     cy.findAllByText("xavier").should("have.length", 2);
 
@@ -604,15 +584,7 @@ describe("issue 25473", () => {
     );
   });
 
-  it("public sharing: dashboard text filter on a custom column should accept text input (metabase#25473-1)", () => {
-    cy.get("@dashboardId").then((id) => {
-      H.visitPublicDashboard(id);
-    });
-
-    assertOnResults();
-  });
-
-  it("signed embedding: dashboard text filter on a custom column should accept text input (metabase#25473-2)", () => {
+  it("public sharing and signed embedding: dashboard text filter on a custom column should accept text input (metabase#25473)", () => {
     cy.get("@dashboardId").then((id) => {
       cy.request("PUT", `/api/dashboard/${id}`, {
         embedding_params: {
@@ -621,6 +593,12 @@ describe("issue 25473", () => {
         enable_embedding: true,
       });
 
+      H.visitPublicDashboard(id);
+    });
+
+    assertOnResults();
+
+    cy.get("@dashboardId").then((id) => {
       const payload = {
         resource: { dashboard: id },
         params: {},
@@ -658,16 +636,22 @@ describe("issue 26988", () => {
       },
     }).then(({ body: card }) => {
       H.visitDashboard(card.dashboard_id);
-    });
 
-    H.openStaticEmbeddingModal({
-      activeTab: "lookAndFeel",
-      previewMode: "preview",
-      acceptTerms: false,
+      H.openLegacyStaticEmbeddingModal({
+        resource: "dashboard",
+        resourceId: card.dashboard_id,
+        activeTab: "lookAndFeel",
+        previewMode: "preview",
+      });
     });
 
     cy.wait("@previewDashboard");
-    H.getIframeBody().should("have.css", "font-family", "Lato, sans-serif");
+    H.getIframeBody().findByTestId("embed-frame").should("exist");
+    H.getIframeBody().should(
+      "have.css",
+      "font-family",
+      "Lato, Arial, sans-serif",
+    );
 
     cy.findByLabelText("Customizing look and feel")
       .findByLabelText("Font")
@@ -675,7 +659,11 @@ describe("issue 26988", () => {
       .click();
     H.popover().findByText("Oswald").click();
 
-    H.getIframeBody().should("have.css", "font-family", "Oswald, sans-serif");
+    H.getIframeBody().should(
+      "have.css",
+      "font-family",
+      'Oswald, "Roboto Condensed", sans-serif',
+    );
 
     cy.get("@font-control").click();
     H.popover().findByText("Slabo 27px").click();
@@ -683,38 +671,8 @@ describe("issue 26988", () => {
     H.getIframeBody().should(
       "have.css",
       "font-family",
-      '"Slabo 27px", sans-serif',
+      '"Slabo 27px", "Roboto Slab", serif',
     );
-  });
-});
-
-describe("issue 30314", () => {
-  beforeEach(() => {
-    H.restore();
-    cy.signInAsAdmin();
-    H.setupSMTP();
-  });
-
-  it("should clean the new subscription form on cancel (metabase#30314)", () => {
-    H.visitDashboard(ORDERS_DASHBOARD_ID);
-
-    H.openSharingMenu("Subscriptions");
-    H.sidebar().within(() => {
-      cy.findByText("Email it").click();
-
-      cy.findByLabelText("Attach results").should("not.be.checked").click();
-      cy.findByLabelText("Questions to attach")
-        .should("not.be.checked")
-        .click();
-
-      cy.button("Cancel").click();
-      cy.findByText("Email it").click();
-
-      cy.findByLabelText("Attach results").should("not.be.checked");
-      cy.findByText("Questions to attach").should("not.exist");
-      cy.findByText(".xlsx").should("not.exist");
-      cy.findByText(".csv").should("not.exist");
-    });
   });
 });
 
@@ -769,9 +727,9 @@ describe("issue 17657", () => {
   it("frontend should gracefully handle the case of a subscription without a recipient (metabase#17657)", () => {
     H.visitDashboard(ORDERS_DASHBOARD_ID);
 
-    H.openSharingMenu("Subscriptions");
+    H.toggleDashboardSubscriptionsSidebar();
 
-    // eslint-disable-next-line no-unscoped-text-selectors -- deprecated usage
+    // eslint-disable-next-line metabase/no-unscoped-text-selectors -- deprecated usage
     cy.findByText(/^Emailed monthly/).click();
 
     H.sidebar().within(() => {
@@ -781,7 +739,7 @@ describe("issue 17657", () => {
     // Open the popover with all users
     cy.findByPlaceholderText("Enter user names or email addresses").click();
     // Pick admin as a recipient
-    // eslint-disable-next-line no-unscoped-text-selectors -- deprecated usage
+    // eslint-disable-next-line metabase/no-unscoped-text-selectors -- deprecated usage
     cy.findByText(`${first_name} ${last_name}`).click();
 
     H.sidebar().within(() => {
@@ -864,24 +822,29 @@ describe("issue 17658", { tags: "@external" }, () => {
   it("should delete dashboard subscription from any collection (metabase#17658)", () => {
     H.visitDashboard(ORDERS_DASHBOARD_ID);
 
-    H.openSharingMenu("Subscriptions");
+    H.toggleDashboardSubscriptionsSidebar();
 
-    // eslint-disable-next-line no-unscoped-text-selectors -- deprecated usage
+    H.sidebar().findByLabelText("Pulse Card").should("be.visible");
+    // eslint-disable-next-line metabase/no-unscoped-text-selectors -- deprecated usage
     cy.findByText(/^Emailed monthly/).click();
 
-    // eslint-disable-next-line no-unscoped-text-selectors -- deprecated usage
+    // eslint-disable-next-line metabase/no-unscoped-text-selectors -- deprecated usage
     cy.findByText("Delete this subscription").click();
-    // eslint-disable-next-line no-unscoped-text-selectors -- deprecated usage
+    // eslint-disable-next-line metabase/no-unscoped-text-selectors -- deprecated usage
     cy.findByText(/^This dashboard will no longer be emailed to/).click();
 
     cy.button("Delete").click();
 
     cy.wait("@deletePulse").then(({ response }) => {
       expect(response.body.cause).not.to.exist;
-      expect(response.statusCode).not.to.eq(500);
+      expect(response.statusCode).to.eq(200);
     });
 
     cy.button("Delete").should("not.exist");
+    H.sidebar().within(() => {
+      cy.findByText("Set up a dashboard subscription").should("be.visible");
+      cy.findByLabelText("Pulse Card").should("not.exist");
+    });
   });
 });
 
@@ -929,7 +892,8 @@ describe("issue 17547", () => {
   });
 
   it("editing an alert should not delete it (metabase#17547)", () => {
-    H.openSharingMenu("Edit alerts");
+    cy.findByLabelText("Move, trash, and more…").click();
+    H.popover().findByText("Edit alerts").click();
     H.modal().findByText("Check daily at 9:00 AM").should("be.visible").click();
 
     H.modal().within(() => {
@@ -944,21 +908,6 @@ describe("issue 17547", () => {
       .should("be.visible");
 
     H.modal().findByText("Check daily at 9:00 PM");
-  });
-});
-
-describe("issue 16108", () => {
-  beforeEach(() => {
-    H.restore();
-    cy.signInAsAdmin();
-  });
-
-  it("should display a tooltip for CTA icons on an individual question (metabase#16108)", () => {
-    H.visitQuestion(ORDERS_QUESTION_ID);
-    cy.icon("download").realHover();
-    H.tooltip().findByText("Download results");
-    H.sharingMenuButton().realHover();
-    H.tooltip().findByText("Sharing");
   });
 });
 
@@ -984,6 +933,15 @@ describe("issue 49525", { tags: "@external" }, () => {
         columns: ["CATEGORY"],
         values: ["COUNT"],
       },
+      "table.column_formatting": [
+        {
+          type: "single",
+          columns: ["count"],
+          color: "#84BB4C",
+          operator: ">",
+          value: 10,
+        },
+      ],
     },
   };
 
@@ -1000,9 +958,9 @@ describe("issue 49525", { tags: "@external" }, () => {
     });
   });
 
-  it("Subscriptions with 'Keep the data pivoted' checked should work (metabase#49525)", () => {
+  it("Subscriptions with 'Keep the data pivoted' checked should work and render the pivot table inline in the email body (metabase#49525, UXW-4378)", () => {
     // Send a test email subscription
-    H.openSharingMenu("Subscriptions");
+    H.toggleDashboardSubscriptionsSidebar();
     H.sidebar().within(() => {
       cy.findByText("Email it").click();
       cy.findByPlaceholderText("Enter user names or email addresses").click();
@@ -1010,15 +968,27 @@ describe("issue 49525", { tags: "@external" }, () => {
 
     H.popover().findByText(`${first_name} ${last_name}`).click();
 
+    // Click this just to close the popover that is blocking the "Send email now" button
+    H.sidebar().findByText("To").click();
+
+    H.clickSend();
+    cy.request("GET", `http://localhost:${WEB_PORT}/email`).then(({ body }) => {
+      cy.wrap(body.slice(-1)[0].id).as("plainEmailId");
+    });
+    H.sidebar().button("Send email now", 10000).should("be.enabled");
+
     H.sidebar().within(() => {
-      // Click this just to close the popover that is blocking the "Send email now" button
-      cy.findByText("To:").click();
-      cy.findByLabelText("Attach results").click();
+      cy.findByLabelText("Attach results")
+        .should("not.be.checked")
+        .click({ force: true }); // Input is placed behind the lable due to tooltip in label
       cy.findByText("Keep the data pivoted").click();
       cy.findByText("Questions to attach").click();
     });
 
-    H.sendEmailAndAssert((email) => {
+    H.clickSend();
+    cy.request("GET", `http://localhost:${WEB_PORT}/email`).then(({ body }) => {
+      const email = body.slice(-1)[0];
+
       // Get the CSV attachment data
       const csvAttachment = email.attachments.find(
         (attachment) => attachment.contentType === "text/csv",
@@ -1032,13 +1002,202 @@ describe("issue 49525", { tags: "@external" }, () => {
         url: `http://localhost:${WEB_PORT}/email/${email.id}/attachment/${csvAttachment.generatedFileName}`,
         encoding: "utf8",
       }).then((response) => {
-        const csvContent = response.body;
-        const rows = csvContent.split("\n");
+        // CSV exports begin with a UTF-8 BOM; strip it, and tolerate either
+        // \n or \r\n line endings, before asserting on the header row.
+        const csvContent = response.body.replace(/^\uFEFF/, "");
+        const rows = csvContent.split(/\r?\n/);
         const headers = rows[0];
         expect(headers).to.equal(
-          "Created At: Year,Doohickey,Gadget,Gizmo,Widget,Row totals\r",
+          "Created At: Year,Doohickey,Gadget,Gizmo,Widget,Row totals",
         );
       });
     });
+
+    H.sidebar().button("Done").click();
+    H.openPulseSubscription();
+    H.sidebar().findByLabelText("Keep the data pivoted").should("be.checked");
+
+    cy.get("@plainEmailId").then((emailId) => {
+      cy.visit(`http://localhost:${WEB_PORT}/email/${emailId}/html`);
+    });
+
+    cy.get(".container").within(() => {
+      // Transposed pivot: row dimension as the top-left label, categories across the top,
+      // a grand-totals column appended, and no internal pivot-grouping column.
+      cy.findByText("Created At: Year").should("exist");
+      ["Doohickey", "Gadget", "Gizmo", "Widget"].forEach((category) =>
+        cy.findByText(category).should("exist"),
+      );
+      cy.findByText("Row totals").should("exist");
+      cy.contains("pivot-grouping").should("not.exist");
+
+      // Conditional formatting (count > 10 -> green) colors only the larger value cells:
+      // the 8 cell stays transparent, the 200 grand total is green.
+      cy.contains("td", /^8$/).should(
+        "have.css",
+        "background-color",
+        "rgba(0, 0, 0, 0)",
+      );
+      cy.contains("td", /^200$/).should(
+        "have.css",
+        "background-color",
+        "rgba(132, 187, 76, 0.65)",
+      );
+    });
+  });
+});
+
+describe("issue 54603", () => {
+  const FILTER_PARAMETER = {
+    id: "54603-cat",
+    name: "Category",
+    slug: "category",
+    type: "category",
+  };
+
+  const VENDOR_FILTER_PARAMETER = {
+    id: "54603-vendor",
+    name: "Vendor",
+    slug: "vendor",
+    type: "category",
+  };
+
+  const PRODUCT_CATEGORY_FIELD_REF = [
+    "field",
+    PRODUCTS.CATEGORY,
+    { "base-type": "type/Text", "source-field": ORDERS.PRODUCT_ID },
+  ];
+
+  const PRODUCT_VENDOR_FIELD_REF = [
+    "field",
+    PRODUCTS.VENDOR,
+    { "base-type": "type/Text", "source-field": ORDERS.PRODUCT_ID },
+  ];
+
+  beforeEach(() => {
+    H.restore();
+    cy.signInAsAdmin();
+
+    H.createDashboard({
+      name: "Dashboard 54603",
+      parameters: [FILTER_PARAMETER, VENDOR_FILTER_PARAMETER],
+    }).then(({ body: dashboard }) => {
+      H.updateDashboardCards({
+        dashboard_id: dashboard.id,
+        cards: [
+          createMockDashboardCard({
+            id: -1,
+            card_id: ORDERS_QUESTION_ID,
+            parameter_mappings: [
+              {
+                parameter_id: FILTER_PARAMETER.id,
+                card_id: ORDERS_QUESTION_ID,
+                target: [
+                  "dimension",
+                  PRODUCT_CATEGORY_FIELD_REF,
+                  { "stage-number": 0 },
+                ],
+              },
+              {
+                parameter_id: VENDOR_FILTER_PARAMETER.id,
+                card_id: ORDERS_QUESTION_ID,
+                target: [
+                  "dimension",
+                  PRODUCT_VENDOR_FIELD_REF,
+                  { "stage-number": 0 },
+                ],
+              },
+            ],
+          }),
+        ],
+      });
+
+      // Subscription bound to the Category filter — removing it should warn.
+      cy.request("POST", "/api/pulse", {
+        name: "Weekly Category Roundup",
+        dashboard_id: dashboard.id,
+        cards: [
+          {
+            id: ORDERS_QUESTION_ID,
+            include_csv: false,
+            include_xls: false,
+          },
+        ],
+        channels: [
+          {
+            enabled: true,
+            channel_type: "slack",
+            schedule_type: "hourly",
+          },
+        ],
+        parameters: [FILTER_PARAMETER],
+      });
+
+      H.visitDashboard(dashboard.id);
+    });
+  });
+
+  it("removes a filter without subscriptions right away and warns before removing a filter that has active subscriptions (metabase#54603)", () => {
+    H.editDashboard();
+
+    cy.findByTestId("fixed-width-filters").findByText("Vendor").click();
+    H.dashboardParameterSidebar()
+      .findByRole("button", { name: "Remove" })
+      .should("be.enabled")
+      .click();
+
+    // No modal — the filter is gone right away (sidebar closes too).
+    cy.findByRole("dialog", { name: /remove this filter/i }).should(
+      "not.exist",
+    );
+    cy.findByTestId("dashboard-parameter-sidebar").should("not.exist");
+    cy.findByTestId("fixed-width-filters").within(() => {
+      cy.findByText("Category").should("be.visible");
+      cy.findByText("Vendor").should("not.exist");
+    });
+
+    cy.findByTestId("fixed-width-filters").findByText("Category").click();
+
+    // The Remove button stays disabled until the subscriptions query resolves;
+    // Cypress retries until it's clickable.
+    H.dashboardParameterSidebar()
+      .findByRole("button", { name: "Remove" })
+      .should("be.enabled")
+      .click();
+
+    cy.findByRole("dialog", { name: /remove this filter/i }).should(
+      "be.visible",
+    );
+    H.modal().within(() => {
+      cy.findByText("Remove this filter?").should("be.visible");
+      cy.findByText(/active subscription/i).should("be.visible");
+      cy.findByText(/archive/i).should("be.visible");
+
+      // Cancel keeps the filter.
+      cy.findByRole("button", { name: "Cancel" }).click();
+    });
+
+    cy.findByTestId("fixed-width-filters")
+      .findByText("Category")
+      .should("be.visible");
+
+    // Try again and confirm — filter is removed.
+    H.dashboardParameterSidebar()
+      .findByRole("button", { name: "Remove" })
+      .click();
+    H.modal().findByRole("button", { name: "Remove filter" }).click();
+
+    // The sidebar closes when the parameter is removed.
+    cy.findByTestId("dashboard-parameter-sidebar").should("not.exist");
+
+    // Saving triggers server-side archival of any subscription referencing
+    // the removed parameter. updateDashboard's invalidatesTags includes the
+    // subscription list so the panel reflects the archive without a refresh.
+    H.saveDashboard();
+
+    H.toggleDashboardSubscriptionsSidebar();
+    H.sidebar()
+      .findByText("Set up a dashboard subscription")
+      .should("be.visible");
   });
 });

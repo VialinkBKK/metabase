@@ -1,3 +1,4 @@
+import { waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import { renderWithProviders, screen } from "__support__/ui";
@@ -31,6 +32,23 @@ const structuredAttributes: StructuredUserAttributes = {
       frozen: false,
       value: "user",
     },
+  },
+  type: {
+    // overridden tenant attribute
+    source: "user",
+    frozen: false,
+    value: "insect",
+    original: {
+      source: "tenant",
+      frozen: false,
+      value: "bug",
+    },
+  },
+  color: {
+    // inherited tenant attribute
+    source: "tenant",
+    frozen: false,
+    value: "green",
   },
   personal: {
     // personal attribute
@@ -144,6 +162,20 @@ describe("LoginAttributeMappingEditor", () => {
       });
     });
 
+    it("focuses the key input of a newly added attribute", async () => {
+      setup({ simpleAttributes });
+
+      const keyInputs = await screen.findAllByPlaceholderText("Key");
+      keyInputs.forEach((input) => expect(input).not.toHaveFocus());
+
+      await userEvent.click(
+        await screen.findByRole("button", { name: /Add an attribute/ }),
+      );
+
+      const newKeyInput = (await screen.findAllByPlaceholderText("Key")).at(-1);
+      expect(newKeyInput).toHaveFocus();
+    });
+
     it("can remove an attribute", async () => {
       const { onChange } = setup({ simpleAttributes });
 
@@ -176,6 +208,15 @@ describe("LoginAttributeMappingEditor", () => {
 
       expect(await screen.findByText("@tenant.slug")).toBeInTheDocument();
       expect(await screen.findByDisplayValue("bug_gym")).toBeInTheDocument();
+    });
+
+    it("shows tenant attributes with text keys", async () => {
+      setup({ structuredAttributes });
+
+      expect(await screen.findByText("type")).toBeInTheDocument();
+      expect(await screen.findByDisplayValue("insect")).toBeInTheDocument();
+      expect(await screen.findByText("color")).toBeInTheDocument();
+      expect(await screen.findByDisplayValue("green")).toBeInTheDocument();
     });
 
     it("shows user defined attributes with editable keys and values", async () => {
@@ -212,6 +253,8 @@ describe("LoginAttributeMappingEditor", () => {
         "@tenant.slug": "bug_gym",
         session: "abc123",
         role: "admin",
+        type: "insect",
+        color: "green",
         personal: "secret",
         newAttribute: "newValue",
       });
@@ -227,6 +270,8 @@ describe("LoginAttributeMappingEditor", () => {
         "@tenant.slug": "bug_gym",
         session: "abc123",
         role: "admin",
+        type: "insect",
+        color: "green",
         public: "newSecret",
       });
     });
@@ -241,6 +286,8 @@ describe("LoginAttributeMappingEditor", () => {
         "@tenant.slug": "bug_gym",
         session: "abc123",
         role: "admin",
+        type: "insect",
+        color: "green",
       });
     });
 
@@ -252,6 +299,22 @@ describe("LoginAttributeMappingEditor", () => {
         "@tenant.slug": "bug_gym",
         session: "xyz789",
         role: "admin",
+        type: "insect",
+        color: "green",
+        personal: "secret",
+      });
+    });
+
+    it("can override a tenant attribute value", async () => {
+      const { onChange } = setup({ structuredAttributes });
+
+      await changeInput("green", "blue");
+      expect(onChange).toHaveBeenLastCalledWith({
+        "@tenant.slug": "bug_gym",
+        session: "abc123",
+        role: "admin",
+        type: "insect",
+        color: "blue",
         personal: "secret",
       });
     });
@@ -264,6 +327,22 @@ describe("LoginAttributeMappingEditor", () => {
         "@tenant.slug": "bug_gym",
         session: "abc123",
         role: "superuser",
+        type: "insect",
+        color: "green",
+        personal: "secret",
+      });
+    });
+
+    it("can change an overridden tenant attribute value", async () => {
+      const { onChange } = setup({ structuredAttributes });
+
+      await changeInput("insect", "ick");
+      expect(onChange).toHaveBeenLastCalledWith({
+        "@tenant.slug": "bug_gym",
+        session: "abc123",
+        role: "admin",
+        type: "ick",
+        color: "green",
         personal: "secret",
       });
     });
@@ -272,19 +351,51 @@ describe("LoginAttributeMappingEditor", () => {
       const { onChange } = setup({ structuredAttributes });
 
       expect(await screen.findByDisplayValue("admin")).toBeInTheDocument();
-      const revertButtons = await screen.findAllByLabelText("refresh icon");
-      // Click the revert button for the JWT attribute (role)
-      await userEvent.click(revertButtons[0]);
 
-      expect(await screen.findByDisplayValue("user")).toBeInTheDocument();
-      expect(screen.queryByDisplayValue("admin")).not.toBeInTheDocument();
+      const revertButtons = await screen.findAllByTestId("revert-mapping");
+      expect(revertButtons).toHaveLength(2);
+
+      await userEvent.click(revertButtons[1]);
+
+      await waitFor(() => {
+        expect(screen.getByDisplayValue("user")).toBeInTheDocument();
+      });
 
       expect(onChange).toHaveBeenLastCalledWith({
         "@tenant.slug": "bug_gym",
         session: "abc123",
         role: "user",
+        type: "insect",
+        color: "green",
         personal: "secret",
       });
+
+      expect(screen.queryByDisplayValue("admin")).not.toBeInTheDocument();
+    });
+
+    it("can revert a tenant attribute value", async () => {
+      const { onChange } = setup({ structuredAttributes });
+
+      expect(await screen.findByDisplayValue("insect")).toBeInTheDocument();
+
+      const revertButtons = await screen.findAllByTestId("revert-mapping");
+
+      await userEvent.click(revertButtons[0]);
+
+      await waitFor(() => {
+        expect(screen.getByDisplayValue("bug")).toBeInTheDocument();
+      });
+
+      expect(onChange).toHaveBeenLastCalledWith({
+        "@tenant.slug": "bug_gym",
+        session: "abc123",
+        role: "admin",
+        type: "bug",
+        color: "green",
+        personal: "secret",
+      });
+
+      expect(screen.queryByDisplayValue("insect")).not.toBeInTheDocument();
     });
   });
 

@@ -8,7 +8,7 @@ redirect_from:
 
 > Pivot tables are currently only supported for questions built in the [query builder](../query-builder/editor.md). Pivot tables are not supported for NoSQL databases like MongoDB.
 
-Pivot tables allow you swap rows and columns, group data, and include subtotals in your table. You can group one or more metrics by one or more dimensions.
+Pivot tables allow you to swap rows and columns, group data, and include subtotals in your table. You can group one or more metrics by one or more dimensions.
 
 {% include youtube.html id='yTRzCQeTmO8' %}
 
@@ -18,17 +18,17 @@ Your typical, basic table is a grid of cells. Every dimension (also known as att
 
 ![Unpivoted table](../images/unpivoted-table.png)
 
-A pivot table is a table that has dimensions in both rows and columns, and metric values in the cells. Pivot tables can include summary rows with totals across for those dimensions:
+A pivot table is a table that has dimensions in both rows and columns, and metric values in the cells. Pivot tables can include summary rows with totals for those dimensions:
 
 ![Pivoted table](../images/pivoted-table.png)
 
 The reason they're called pivot tables is because you can rotate ("pivot") a column 90 degrees so that the values in that column become column headings themselves. Pivoting values into column headings is useful when analyzing data across multiple attributes, like time, location, and category. You can pivot multiple rows to columns and vice versa, or not pivot any at all.
 
-Pivot table is the only Metabase visualization type (besides the plain table, of course) can display several metrics simultaneously along several dimensions.
+Pivot table is the only Metabase visualization type (besides the plain table, of course) that can display several metrics simultaneously along several dimensions.
 
 ## How to create a pivot table
 
-To create a pivot table, you'll need to use the query builder. Currently, you can't build pivot tables for questions written in SQL, because Metabase would need to modify your SQL code in order to calculate subtotals. If you really need to use SQL, the workaround here is to create your question in two steps: first do all the complex things you need to do in SQL, save the results as a question, then use that saved SQL question as the starting point for a new query builder question which summarizes that data.
+To create a pivot table, you'll need to use the query builder. Currently, you can't build pivot tables for questions written in SQL, because Metabase would need to modify your SQL code to calculate subtotals. If you need to use SQL, the workaround here is to create your question in two steps: first do all the complex things you need to do in SQL, save the results as a question, then use that saved SQL question as the starting point for a new query builder question which summarizes that data.
 
 1. Create a question in the query builder that has a summary with at least one breakout, for example "`Count` of orders by `Category` and `Month`".
 
@@ -47,7 +47,7 @@ To create a pivot table, you'll need to use the query builder. Currently, you ca
 
    You can put multiple fields in the "rows" and "columns" buckets, but note that the order of the fields changes how Metabase displays the table: each additional field will nest within the previous field.
 
-Currently, all the dimension and metrics in your query must appear as either rows, columns, or measures in the pivot table (although you can [collapse rows to their totals](#totals-and-grand-totals)). If you don't want to display a breakout or metric in the pivot table, you'll need to remove it from the query - you can't hide it from the pivot table.
+Currently, all the dimensions and metrics in your query must appear as either rows, columns, or measures in the pivot table (although you can [collapse rows to their totals](#totals-and-grand-totals)). If you don't want to display a breakout or metric in the pivot table, you'll need to remove it from the query - you can't hide it from the pivot table.
 
 ## Totals and grand totals
 
@@ -55,7 +55,7 @@ Where it makes sense, Metabase will automatically include subtotals for grouped 
 
 ![Pivot table options](../images/pivot-table-options.png)
 
-For example, as in the image above, because we've grouped our rows first by `Source`, then by `Plan`, Metabase will list each plan for each `Source`, and then aggregate the metric(s) for that source..
+For example, as in the image above, because we've grouped our rows first by `Source`, then by `Plan`, Metabase will list each plan for each `Source`, and then aggregate the metric(s) for that source.
 
 To collapse a group on a pivot table, you can click on the minus (–) button next to the group's heading (or the plus (+) button to expand it). When you save a pivot table, Metabase will remember which groups were expanded and which were collapsed.
 
@@ -102,4 +102,4 @@ There are special considerations when exporting pivot tables as XLSX files. See 
 - Pivot tables are only available for questions built with the query builder.
 - The query builder question must have a summary block.
 
-If you must use SQL, and your SQL query does not have parameters, you can save that SQL query , then use its [results as the starting point](../native-editor/writing-sql.md#explore-sql-question-results-using-the-query-builder) for a query builder question in order to build a question. The trick here is to do your aggregation and grouping in the query builder. That is, use the SQL question to grab the raw data you want to work with (maybe [create a model](../../data-modeling/models.md)), then start a new question in the query builder to filter, summarize, and group that data.
+If you must use SQL, and your SQL query doesn't have parameters, you can save that SQL query, then use its [results as the starting point](../native-editor/writing-sql.md#explore-sql-question-results-using-the-query-builder) for a query builder question to build a question. The trick here is to do your aggregation and grouping in the query builder. That is, use the SQL question to grab the raw data you want to work with (maybe [create a model](../../data-modeling/models/models.md)), then start a new question in the query builder to filter, summarize, and group that data.

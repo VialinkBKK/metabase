@@ -7,6 +7,7 @@ interface AddRowProps {
   value: string;
   isValid: boolean;
   placeholder?: string;
+  ariaLabel?: string;
   onKeyDown?: (event: React.KeyboardEvent) => void;
   onChange: (event: ChangeEvent<HTMLInputElement>) => void;
   onDone: () => void;
@@ -18,6 +19,7 @@ export const AddRow = ({
   value,
   isValid,
   placeholder,
+  ariaLabel,
   onKeyDown,
   onChange,
   onDone,
@@ -29,32 +31,37 @@ export const AddRow = ({
     p="0.5rem"
     display="relative"
     align="center"
-    bd="1px solid var(--mb-color-brand)"
+    wrap="wrap"
+    gap="sm"
+    bd="1px solid var(--mb-color-core-brand)"
     style={{ borderRadius: "0.5rem" }}
   >
     {children}
     <Input
       type="text"
       variant="unstyled"
-      flex="1 0 auto"
+      flex="1 1 auto"
+      miw={0}
       fz="lg"
       styles={{ input: { background: "transparent" } }}
       value={value}
       placeholder={placeholder}
+      aria-label={ariaLabel}
       autoFocus
       onKeyDown={onKeyDown}
       onChange={onChange}
     />
-    <Button variant="subtle" bg="transparent" onClick={onCancel} mr="sm">
-      {t`Cancel`}
-    </Button>
-    <Button
-      variant={isValid ? "filled" : "outline"}
-      bg={!isValid ? "transparent" : ""}
-      disabled={!isValid}
-      onClick={onDone}
-    >
-      {t`Add`}
-    </Button>
+    <Flex flex="0 0 auto" gap="sm">
+      <Button variant="subtle" color="neutral" onClick={onCancel}>
+        {t`Cancel`}
+      </Button>
+      <Button
+        variant={isValid ? "filled" : "default"}
+        disabled={!isValid}
+        onClick={onDone}
+      >
+        {t`Add`}
+      </Button>
+    </Flex>
   </Flex>
 );

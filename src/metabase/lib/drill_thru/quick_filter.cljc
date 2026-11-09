@@ -38,8 +38,10 @@
   There is a separate function `filterDrillDetails` which returns `query` and `column` used for the `FilterPicker`. It
   should automatically append a query stage and find the corresponding _filterable_ column in this stage. It is used
   for `contains` and `does-not-contain` operators."
+  (:refer-clojure :exclude [select-keys mapv #?(:clj for)])
   (:require
    [medley.core :as m]
+   [metabase.lib.binning :as lib.binning]
    [metabase.lib.drill-thru.column-filter :as lib.drill-thru.column-filter]
    [metabase.lib.drill-thru.common :as lib.drill-thru.common]
    [metabase.lib.expression :as lib.expression]
@@ -50,12 +52,14 @@
    [metabase.lib.schema.common :as lib.schema.common]
    [metabase.lib.schema.drill-thru :as lib.schema.drill-thru]
    [metabase.lib.schema.expression :as lib.schema.expression]
+   [metabase.lib.schema.literal :as lib.schema.literal]
    [metabase.lib.schema.metadata :as lib.schema.metadata]
    [metabase.lib.temporal-bucket :as lib.temporal-bucket]
    [metabase.lib.types.isa :as lib.types.isa]
    [metabase.lib.underlying :as lib.underlying]
    [metabase.util.malli :as mu]
-   [metabase.util.number :as u.number]))
+   [metabase.util.number :as u.number]
+   [metabase.util.performance :refer [select-keys mapv #?(:clj for)]]))
 
 (defn- maybe-bigint->value-clause
   [value]
@@ -68,10 +72,8 @@
 
 (mu/defn- operators-for :- [:sequential ::lib.schema.drill-thru/drill-thru.quick-filter.operator]
   [column :- ::lib.schema.metadata/column
-   value]
-  (let [field-ref (cond-> (lib.ref/ref column)
-                    (:temporal-unit column)
-                    (lib.temporal-bucket/with-temporal-bucket (:temporal-unit column)))]
+   value  :- [:maybe [:or [:= :null] ::lib.schema.literal/param-value]]]
+  (let [field-ref (lib.ref/ref column)]
     (cond
       (lib.types.isa/structured? column)
       []
@@ -136,8 +138,10 @@
     (when-let [drill-details (lib.drill-thru.column-filter/prepare-query-for-drill-addition
                               query stage-number column column-ref :filter)]
       (let [temporal-unit (lib.temporal-bucket/temporal-bucket column-ref)
+            binning (lib.binning/binning column-ref)
             column (cond-> (:column drill-details)
-                     temporal-unit (assoc :temporal-unit temporal-unit))]
+                     temporal-unit (lib.temporal-bucket/with-temporal-bucket temporal-unit)
+                     binning       (lib.binning/with-binning binning))]
         (merge drill-details
                {:lib/type   :metabase.lib.drill-thru/drill-thru
                 :type       :drill-thru/quick-filter

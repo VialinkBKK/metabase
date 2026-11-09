@@ -1,14 +1,11 @@
+import cx from "classnames";
 import type { CustomPickerInjectedProps } from "react-color";
 import { CustomPicker } from "react-color";
 import { Hue, Saturation } from "react-color/lib/components/common";
 
-import {
-  ControlsRoot,
-  HueContainer,
-  HuePointer,
-  SaturationContainer,
-  SaturationPointer,
-} from "./ColorPicker.styled";
+import { Box } from "metabase/ui";
+
+import S from "./ColorPicker.module.css";
 
 const saturationStyles = {
   color: {
@@ -17,24 +14,29 @@ const saturationStyles = {
   },
 };
 
-const ColorPickerControls = CustomPicker(function ColorControls(
+export const ColorPickerControls = CustomPicker(function ColorControls(
   props: CustomPickerInjectedProps,
 ) {
   return (
-    <ControlsRoot>
-      <SaturationContainer>
+    <Box className={S.controls}>
+      <Box className={S.track} h="10rem" mb="lg">
         <Saturation
           {...props}
           pointer={SaturationPointer}
           style={saturationStyles}
         />
-      </SaturationContainer>
-      <HueContainer>
+      </Box>
+      <Box className={S.track} h="0.5rem">
         <Hue {...props} pointer={HuePointer} />
-      </HueContainer>
-    </ControlsRoot>
+      </Box>
+    </Box>
   );
 });
 
-// eslint-disable-next-line import/no-default-export -- deprecated usage
-export default ColorPickerControls;
+function SaturationPointer() {
+  return <Box className={cx(S.pointer, S.saturationPointer)} />;
+}
+
+function HuePointer() {
+  return <Box className={cx(S.pointer, S.huePointer)} />;
+}

@@ -1,7 +1,4 @@
-import {
-  createMockSettingsState,
-  createMockState,
-} from "metabase-types/store/mocks";
+import { createMockSettingsState, createMockState } from "__support__/state";
 
 import { getIsWhiteLabeling, getLoadingMessage, getLogoUrl } from "./selectors";
 
@@ -61,7 +58,6 @@ describe("getLoadingMessage", () => {
     });
 
     const expectedLoadingMessage = "Loading results...";
-    ("");
 
     expect(getLoadingMessage(states)(false)).toBe(expectedLoadingMessage);
   });
@@ -81,6 +77,7 @@ describe("getLoadingMessage", () => {
   it('should show no loading message when "loading-message" is set to an invalid enum value', () => {
     const states = createMockState({
       settings: createMockSettingsState({
+        // Unjustified type cast. FIXME
         "loading-message": "bad-enum-bad" as any,
       }),
     });

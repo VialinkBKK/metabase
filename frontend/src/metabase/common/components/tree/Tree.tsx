@@ -1,77 +1,64 @@
-import { useCallback, useEffect, useState } from "react";
-import * as React from "react";
-import { usePrevious } from "react-use";
-import _ from "underscore";
+import type { BoxProps } from "metabase/ui";
 
 import { TreeNode as DefaultTreeNode } from "./TreeNode";
 import { TreeNodeList } from "./TreeNodeList";
 import type { ITreeNodeItem } from "./types";
-import { getInitialExpandedIds } from "./utils";
+import type { TreeController } from "./useTree";
+import { useTree } from "./useTree";
 
-interface TreeProps {
-  data: ITreeNodeItem[];
-  selectedId?: ITreeNodeItem["id"];
-  role?: string;
+export interface TreeProps<TData = unknown> extends Omit<BoxProps, "children"> {
+  data?: ITreeNodeItem<TData>[];
+  selectedId?: ITreeNodeItem<TData>["id"];
   emptyState?: React.ReactNode;
-  onSelect?: (item: ITreeNodeItem) => void;
-  TreeNode?: any; // This was previously set to TreeNodeComponent, but after upgrading to react 18, the type no longer played nice with forward ref compontents, including styled components
+  initialExpandedIds?: ITreeNodeItem<TData>["id"][];
+  role?: string;
+  onSelect?: (item: ITreeNodeItem<TData>) => void;
+  rightSection?: (item: ITreeNodeItem<TData>) => React.ReactNode;
+  TreeNode?: any;
+  tree?: TreeController<TData>;
+  wrapNodesInListItem?: boolean;
 }
 
-function BaseTree({
-  data,
-  selectedId,
+function BaseTree<TData = unknown>({
+  data: dataProp,
+  selectedId: selectedIdProp,
   role = "menu",
   emptyState = null,
+  initialExpandedIds,
   onSelect,
   TreeNode = DefaultTreeNode,
-}: TreeProps) {
-  const [expandedIds, setExpandedIds] = useState(
-    new Set(selectedId != null ? getInitialExpandedIds(selectedId, data) : []),
-  );
-  const previousSelectedId = usePrevious(selectedId);
-  const prevData = usePrevious(data);
-
-  useEffect(() => {
-    if (!selectedId) {
-      return;
-    }
-    const selectedItemChanged =
-      previousSelectedId !== selectedId && !expandedIds.has(selectedId);
-    if (selectedItemChanged || !_.isEqual(data, prevData)) {
-      setExpandedIds(
-        (prev) =>
-          new Set([...prev, ...getInitialExpandedIds(selectedId, data)]),
-      );
-    }
-  }, [prevData, data, selectedId, previousSelectedId, expandedIds]);
-
-  const handleToggleExpand = useCallback(
-    (itemId: string | number) => {
-      if (expandedIds.has(itemId)) {
-        setExpandedIds(
-          (prev) => new Set([...prev].filter((id) => id !== itemId)),
-        );
-      } else {
-        setExpandedIds((prev) => new Set([...prev, itemId]));
-      }
-    },
-    [expandedIds],
-  );
+  rightSection,
+  tree,
+  wrapNodesInListItem,
+  ...boxProps
+}: TreeProps<TData>) {
+  const defaultController = useTree({
+    data: dataProp,
+    selectedId: selectedIdProp,
+    initialExpandedIds,
+  });
+  const controller = tree ?? defaultController;
+  const data = controller.data ?? dataProp;
+  const selectedId = controller.selectedId ?? selectedIdProp;
+  const { expandedIds, handleToggleExpand } = controller;
 
   if (data.length === 0) {
-    return <React.Fragment>{emptyState}</React.Fragment>;
+    return <>{emptyState}</>;
   }
 
   return (
     <TreeNodeList
-      items={data}
       role={role}
+      items={data}
       TreeNode={TreeNode}
       expandedIds={expandedIds}
       selectedId={selectedId}
       depth={0}
       onSelect={onSelect}
       onToggleExpand={handleToggleExpand}
+      rightSection={rightSection}
+      wrapNodes={wrapNodesInListItem}
+      {...boxProps}
     />
   );
 }

@@ -1,13 +1,8 @@
 import type { HTMLAttributes } from "react";
 
 import CS from "metabase/css/core/index.css";
-import {
-  ActionIcon,
-  type ActionIconProps,
-  Icon,
-  type IconName,
-} from "metabase/ui";
-
+import { ActionIcon, type ActionIconProps, Icon } from "metabase/ui";
+import type { IconName } from "metabase-types/api";
 type ChartActionIconProps = ActionIconProps & HTMLAttributes<HTMLButtonElement>;
 interface ChartSettingActionIconProps extends ChartActionIconProps {
   icon: IconName;
@@ -20,13 +15,14 @@ export const ChartSettingActionIcon = ({
   "data-testid": dataTestId,
 }: ChartSettingActionIconProps) => (
   <ActionIcon
+    variant="subtle"
     data-testid={dataTestId}
     onClick={(e) => {
       e.stopPropagation();
       onClick?.(e);
     }}
     p={0}
-    c="text-medium"
+    c="text-secondary"
     size="sm"
     radius="xl"
     className={CS.pointerEventsAuto}

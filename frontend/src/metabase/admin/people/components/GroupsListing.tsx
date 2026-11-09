@@ -3,21 +3,21 @@ import { useState } from "react";
 import { jt, t } from "ttag";
 import _ from "underscore";
 
-import { useListApiKeysQuery } from "metabase/api";
+import { AdminContentTable } from "metabase/admin/components/AdminContentTable";
+import { AdminPaneLayout } from "metabase/admin/components/AdminPaneLayout";
 import { getErrorMessage } from "metabase/api/utils";
-import { AdminContentTable } from "metabase/common/components/AdminContentTable";
-import { AdminPaneLayout } from "metabase/common/components/AdminPaneLayout";
 import { ConfirmModal } from "metabase/common/components/ConfirmModal";
-import Link from "metabase/common/components/Link";
+import { Link } from "metabase/common/components/Link";
 import { LoadingAndErrorWrapper } from "metabase/common/components/LoadingAndErrorWrapper";
-import UserAvatar from "metabase/common/components/UserAvatar";
-import CS from "metabase/css/core/index.css";
+import { UserAvatar } from "metabase/common/components/UserAvatar";
+import { getTenantsBasePath } from "metabase/common/tenants";
 import {
   getGroupNameLocalized,
   isAdminGroup,
   isDefaultGroup,
-} from "metabase/lib/groups";
-import { KEYCODE_ENTER } from "metabase/lib/keyboard";
+} from "metabase/common/utils/groups";
+import CS from "metabase/css/core/index.css";
+import { PLUGIN_TENANTS } from "metabase/plugins";
 import {
   Box,
   Button,
@@ -27,11 +27,14 @@ import {
   Menu,
   UnstyledButton,
 } from "metabase/ui";
+import { KEYCODE_ENTER } from "metabase/utils/keyboard";
 import type { ApiKey, GroupInfo } from "metabase-types/api";
 
+import { useListApiKeysQuery } from "../../settings/api/api-key";
 import { groupIdToColor } from "../colors";
 
 import { AddRow } from "./AddRow";
+import { SearchFilter } from "./SearchFilter";
 
 // ------------------------------------------------------------ Add Group ------------------------------------------------------------
 
@@ -142,17 +145,17 @@ function ActionsPopover({
 
   return (
     <>
-      <Menu shadow="md" width={200} position="bottom-end">
+      <Menu shadow="sm" width={200} position="bottom-end">
         <Menu.Target>
-          <UnstyledButton>
-            <Icon c="text-light" name="ellipsis" />
+          <UnstyledButton aria-label={`group-action-button`}>
+            <Icon c="text-secondary" name="ellipsis" />
           </UnstyledButton>
         </Menu.Target>
         <Menu.Dropdown>
           <Menu.Item onClick={() => onEditGroupClicked(group)}>
             {t`Edit Name`}
           </Menu.Item>
-          <Menu.Item c="danger" onClick={openModal}>
+          <Menu.Item c="feedback-negative" onClick={openModal}>
             {t`Remove Group`}
           </Menu.Item>
         </Menu.Dropdown>
@@ -185,7 +188,7 @@ function EditingGroupRow({
   const textIsValid = group.name && group.name.length;
 
   return (
-    <Box component="tr" bd="1px solid var(--mb-color-brand)">
+    <Box component="tr" bd="1px solid var(--mb-color-core-brand)">
       <td>
         <Input
           fz="lg"
@@ -197,10 +200,14 @@ function EditingGroupRow({
       </td>
       <td />
       <Box component="td" ta="right">
-        <Button variant="subtle" onClick={onCancelClicked}>{t`Cancel`}</Button>
+        <Button
+          variant="subtle"
+          color="neutral"
+          onClick={onCancelClicked}
+        >{t`Cancel`}</Button>
         <Button
           ml="1rem"
-          variant={textIsValid && textHasChanged ? "filled" : "outline"}
+          variant={textIsValid && textHasChanged ? "filled" : "default"}
           disabled={!textIsValid || !textHasChanged}
           onClick={onDoneClicked}
         >
@@ -212,6 +219,28 @@ function EditingGroupRow({
 }
 
 // ------------------------------------------------------------ Groups Table: not editing ------------------------------------------------------------
+
+function GroupNameCell({ group }: { group: GroupInfo }) {
+  const name = getGroupNameLocalized(group);
+  const membersLink = PLUGIN_TENANTS.isTenantGroup(group)
+    ? `${getTenantsBasePath()}/groups/${group.id}`
+    : `/admin/people/groups/${group.id}`;
+
+  return (
+    <Flex
+      component={Link}
+      align="center"
+      to={membersLink}
+      className={CS.link}
+      gap="md"
+    >
+      <UserAvatar user={{ name }} bg={groupIdToColor(group.id)} />
+      <Box component="span" fw={700} c="core-brand">
+        {name}
+      </Box>
+    </Flex>
+  );
+}
 
 interface GroupRowProps {
   group: GroupInfo;
@@ -234,8 +263,10 @@ function GroupRow({
   onEditGroupCancelClicked,
   onEditGroupDoneClicked,
 }: GroupRowProps) {
-  const backgroundColor = groupIdToColor(group.id);
-  const showActionsButton = !isDefaultGroup(group) && !isAdminGroup(group);
+  const showActionsButton =
+    !isDefaultGroup(group) &&
+    !isAdminGroup(group) &&
+    !PLUGIN_TENANTS.isExternalUsersGroup(group);
   const editing = groupBeingEdited && groupBeingEdited.id === group.id;
 
   return editing ? (
@@ -247,25 +278,11 @@ function GroupRow({
       onDoneClicked={onEditGroupDoneClicked}
     />
   ) : (
-    <tr>
+    <tr aria-label={`group-${group.id}-row`}>
       <td>
-        <Flex
-          component={Link}
-          align="center"
-          to={"/admin/people/groups/" + group.id}
-          className={CS.link}
-          gap="md"
-        >
-          <UserAvatar
-            user={{ first_name: getGroupNameLocalized(group) }}
-            bg={backgroundColor}
-          />
-          <Box component="span" fw={700} c="brand">
-            {getGroupNameLocalized(group)}
-          </Box>
-        </Flex>
+        <GroupNameCell group={group} />
       </td>
-      <td>
+      <td aria-label="member-count">
         {group.member_count || 0}
         <ApiKeyCount apiKeys={apiKeys} />
       </td>
@@ -288,7 +305,7 @@ const ApiKeyCount = ({ apiKeys }: { apiKeys: ApiKey[] }) => {
     return null;
   }
   return (
-    <Box component="span" c="text-light">
+    <Box component="span" c="text-secondary">
       {apiKeys.length === 1
         ? t` (includes 1 API key)`
         : t` (includes ${apiKeys.length} API keys)`}
@@ -372,9 +389,11 @@ interface GroupsListingProps {
   create: (group: { name: string }) => Promise<void>;
   update: (group: { id: number; name: string }) => Promise<void>;
   delete: (group: GroupInfo, groupCount: number) => Promise<void>;
+  description?: string;
 }
 
 export const GroupsListing = (props: GroupsListingProps) => {
+  const [searchText, setSearchText] = useState("");
   const [text, setText] = useState("");
   const [alertMessage, setAlertMessage] = useState<string | null>(null);
   const [groupBeingEdited, setGroupBeingEdited] = useState<GroupInfo | null>(
@@ -483,16 +502,37 @@ export const GroupsListing = (props: GroupsListingProps) => {
 
   const { groups, isAdmin } = props;
 
+  const filteredGroups = searchText
+    ? groups.filter((g) =>
+        g.name.toLowerCase().includes(searchText.toLowerCase()),
+      )
+    : groups;
+
   return (
     <AdminPaneLayout
-      buttonText={isAdmin ? t`Create a group` : undefined}
-      buttonAction={
-        isShowingAddGroupRow ? undefined : onCreateAGroupButtonClicked
+      headerContent={
+        <SearchFilter
+          value={searchText}
+          onChange={setSearchText}
+          placeholder={t`Find a group`}
+        />
       }
-      description={t`You can use groups to control your users' access to your data. Put users in groups and then go to the Permissions section to control each group's access. The Administrators and All Users groups are special default groups that can't be removed.`}
+      titleActions={
+        isAdmin &&
+        !isShowingAddGroupRow && (
+          <Button
+            variant="filled"
+            onClick={onCreateAGroupButtonClicked}
+          >{t`Create a group`}</Button>
+        )
+      }
+      description={
+        props.description ??
+        t`You can use groups to control your users' access to your data. Put users in groups and then go to the Permissions section to control each group's access. The Administrators and All Users groups are special default groups that can't be removed.`
+      }
     >
       <GroupsTable
-        groups={groups}
+        groups={filteredGroups}
         text={text}
         showAddGroupRow={isShowingAddGroupRow}
         groupBeingEdited={groupBeingEdited}

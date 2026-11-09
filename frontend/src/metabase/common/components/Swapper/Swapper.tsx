@@ -1,11 +1,10 @@
+import cx from "classnames";
 import type { HTMLAttributes, ReactNode, Ref } from "react";
 import { forwardRef, useCallback, useState } from "react";
 
-import {
-  SwapperDefaultElement,
-  SwapperLayeredElement,
-  SwapperRoot,
-} from "./Swapper.styled";
+import { Box } from "metabase/ui";
+
+import S from "./Swapper.module.css";
 
 export interface SwapperProps extends HTMLAttributes<HTMLDivElement> {
   defaultElement?: ReactNode;
@@ -13,7 +12,7 @@ export interface SwapperProps extends HTMLAttributes<HTMLDivElement> {
   isSwapped?: boolean;
 }
 
-const Swapper = forwardRef(function Swapper(
+export const Swapper = forwardRef(function Swapper(
   { defaultElement, swappedElement, isSwapped = false, ...props }: SwapperProps,
   ref: Ref<HTMLDivElement>,
 ) {
@@ -23,21 +22,21 @@ const Swapper = forwardRef(function Swapper(
   const handleMouseLeave = useCallback(() => setIsHovered(false), []);
 
   return (
-    <SwapperRoot
+    <Box
       {...props}
       ref={ref}
+      pos="relative"
       onMouseEnter={handleMouseEnter}
       onMouseLeave={handleMouseLeave}
     >
-      <SwapperDefaultElement isVisible={!isSelected}>
-        {defaultElement}
-      </SwapperDefaultElement>
-      <SwapperLayeredElement isVisible={isSelected}>
+      <Box className={cx({ [S.scaledDown]: isSelected })}>{defaultElement}</Box>
+      <Box
+        className={cx({ [S.scaledDown]: !isSelected })}
+        pos="absolute"
+        inset={0}
+      >
         {swappedElement}
-      </SwapperLayeredElement>
-    </SwapperRoot>
+      </Box>
+    </Box>
   );
 });
-
-// eslint-disable-next-line import/no-default-export -- deprecated usage
-export default Swapper;

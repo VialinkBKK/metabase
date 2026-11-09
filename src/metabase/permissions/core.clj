@@ -1,6 +1,8 @@
 (ns metabase.permissions.core
   "`permissions` module API namespace."
   (:require
+   [metabase.permissions.data-access-token]
+   [metabase.permissions.db]
    [metabase.permissions.models.application-permissions-revision]
    [metabase.permissions.models.collection-permission-graph-revision]
    [metabase.permissions.models.collection.graph]
@@ -9,7 +11,10 @@
    [metabase.permissions.models.permissions]
    [metabase.permissions.models.permissions-group]
    [metabase.permissions.models.permissions-group-membership]
+   [metabase.permissions.models.permissions-revision]
    [metabase.permissions.path]
+   [metabase.permissions.published-tables]
+   [metabase.permissions.settings]
    [metabase.permissions.user]
    [metabase.permissions.util]
    [metabase.permissions.validation]
@@ -24,28 +29,43 @@
   metabase.permissions.models.permissions/keep-me
   metabase.permissions.models.permissions-group/keep-me
   metabase.permissions.models.permissions-group-membership/keep-me
+  metabase.permissions.models.permissions-revision/keep-me
+  metabase.permissions.data-access-token/keep-me
   metabase.permissions.path/keep-me
+  metabase.permissions.published-tables/keep-me
   metabase.permissions.user/keep-me
   metabase.permissions.util/keep-me
   metabase.permissions.validation/keep-me)
 
 (p/import-vars
+ [metabase.permissions.db
+  group-tenant-flags
+  groups-by-ids]
  [metabase.permissions.models.data-permissions
   at-least-as-permissive?
+  batch-delete-permissions!
+  batch-insert-permissions!
+  data-app-collection-ids
+  data-app-collection?
   disable-perms-cache
-  full-db-permission-for-user
+  download-perms-level
+  full-database-permission-for-user
   full-schema-permission-for-user
   groups-have-permission-for-table?
+  index-database-permissions
+  is-superuser?
+  is-data-analyst?
   most-permissive-database-permission-for-user
   native-download-permission-for-user
   permissions-for-user
-  prime-db-cache
+  prime-database-perms-cache
+  prime-schema-perms-cache
+  prime-table-perms-cache
   sandboxes-for-user
   schema-permission-for-user
   set-database-permission!
-  set-new-database-permissions!
-  set-new-table-permissions!
   set-table-permission!
+  set-table-permissions!
   table-permission-for-user
   table-permission-for-groups
   user-has-any-perms-of-type?
@@ -53,17 +73,33 @@
   user-has-permission-for-schema?
   user-has-permission-for-table?
   with-additional-table-permission
-  with-relevant-permissions-for-user]
+  with-relevant-permissions-for-user
+  has-any-transforms-permission?
+  has-db-transforms-permission?
+  set-default-group-permissions!
+  set-default-database-permissions!
+  set-default-table-permissions!
+  set-default-table-permissions-bulk!
+  with-global-permissions-lock
+  with-db-scoped-permissions-lock]
  [metabase.permissions.models.data-permissions.sql
   UserInfo
   PermissionMapping
   visible-database-filter-select
   visible-table-filter-select
+  visible-table-filter-with-cte
+  visible-table-filter-subquery-clause
   select-tables-and-groups-granting-perm]
  [metabase.permissions.models.permissions
-  audit-namespace-clause
+  namespace-clause
   can-read-audit-helper
+  can-read-via-parent-collection?
+  collection-based-visibility-search-models
+  collection-id-only-read-method
+  collection-id-only-read-models
+  collection-read-access-group-ids
   current-user-has-application-permissions?
+  define-collection-based-visibility!
   grant-application-permissions!
   grant-collection-read-permissions!
   grant-collection-readwrite-permissions!
@@ -75,52 +111,79 @@
   set-has-full-permissions-for-set?
   set-has-full-permissions?]
  [metabase.permissions.models.permissions-group
-  non-magic-groups]
+  group-display-name
+  non-magic-groups
+  all-users-magic-group-type]
  [metabase.permissions.models.permissions-group-membership
   add-users-to-groups!
   add-user-to-groups!
   add-user-to-group!
   allow-changing-all-users-group-members
+  allow-changing-all-external-users-group-members
   fail-to-remove-last-admin-msg
+  fail-to-add-data-analyst-msg
   remove-user-from-group!
   remove-user-from-groups!
+  remove-all-users-from-group!
+  remove-user-from-all-groups!
   throw-if-last-admin!
   without-is-superuser-sync-on-add-to-admin-group]
  [metabase.permissions.path
   application-perms-path
   collection-read-path
-  collection-readwrite-path]
+  collection-readwrite-path
+  collection-path?]
  [metabase.permissions.user
-  user-permissions-set]
+  query-creation-capabilities
+  user-permissions-set
+  user->tenant-collection-and-descendant-ids]
  [metabase.permissions.util
   PathSchema
   check-revision-numbers
   impersonated-user?
   impersonation-enforced-for-db?
   log-permissions-changes
+  routed-user?
   sandboxed-or-impersonated-user?
   sandboxed-user?
+  sandboxed-user-for-db?
   increment-implicit-perms-revision!
   save-perms-revision!]
  [metabase.permissions.validation
+  check-advanced-permissions-enabled
   check-group-manager
   check-has-application-permission
   check-manager-of-group]
  [metabase.permissions.models.collection.graph
   graph
-  update-graph!])
+  update-graph!]
+ [metabase.permissions.published-tables
+  can-access-via-collection?
+  user-published-table-permission
+  user-has-any-published-table-permission?
+  user-has-published-table-permission-for-database?])
 
-;;; import these vars with different names to make their purpose more obvious. These actually do have docstrings but
-;;; Kondo gets tripped up here.
+(p/import-vars [metabase.permissions.settings use-tenants])
 
-#_{:clj-kondo/ignore [:missing-docstring]}
-(p/import-def metabase.permissions.models.permissions-group/all-users all-users-group)
+(p/import-vars
+ [metabase.permissions.data-access-token
+  data-access-token
+  digest
+  data-access-compatible?
+  data-access-token-transform
+  data-access-token-reader
+  routing-token-for-db])
 
-#_{:clj-kondo/ignore [:missing-docstring]}
-(p/import-def metabase.permissions.models.permissions-group/admin admin-group)
-
-#_{:clj-kondo/ignore [:missing-docstring]}
-(p/import-def metabase.permissions.models.application-permissions-revision/latest-id latest-application-permissions-revision-id)
-
-#_{:clj-kondo/ignore [:missing-docstring]}
+;;; import these vars with different names to make their purpose more obvious.
+(p/import-def metabase.permissions.models.permissions-group/all-users                    all-users-group)
+(p/import-def metabase.permissions.models.permissions-group/admin                        admin-group)
+(p/import-def metabase.permissions.models.permissions-group/data-analyst                 data-analyst-group)
+(p/import-def metabase.permissions.models.application-permissions-revision/latest-id     latest-application-permissions-revision-id)
 (p/import-def metabase.permissions.models.collection-permission-graph-revision/latest-id latest-collection-permissions-revision-id)
+(p/import-def metabase.permissions.models.permissions-revision/latest-id                 latest-permissions-revision-id)
+(p/import-def metabase.permissions.models.data-permissions/least-permissive-value        least-permissive-data-perms-value)
+(p/import-def metabase.permissions.models.permissions-group/all-external-users           all-external-users-group)
+
+(p/import-vars [metabase.permissions.models.permissions-group
+                check-tenant-groups-visible!
+                hidden-tenant-group-ids])

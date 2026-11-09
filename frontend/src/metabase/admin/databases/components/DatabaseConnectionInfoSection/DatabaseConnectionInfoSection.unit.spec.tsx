@@ -1,4 +1,6 @@
-import userEvent from "@testing-library/user-event";
+import userEvent, {
+  PointerEventsCheckLevel,
+} from "@testing-library/user-event";
 import fetchMock from "fetch-mock";
 
 import {
@@ -6,11 +8,11 @@ import {
   setupDatabaseEndpoints,
   setupDatabaseUsageInfoEndpoint,
 } from "__support__/server-mocks/database";
+import { createMockState } from "__support__/state";
 import { createMockEntitiesState } from "__support__/store";
 import { renderWithProviders, screen, waitFor } from "__support__/ui";
 import type { Database, InitialSyncStatus } from "metabase-types/api";
 import { createMockDatabase } from "metabase-types/api/mocks";
-import { createMockState } from "metabase-types/store/mocks";
 
 import { DatabaseConnectionInfoSection } from "./DatabaseConnectionInfoSection";
 
@@ -37,6 +39,7 @@ function setup({
     dataset: 0,
     metric: 0,
     segment: 0,
+    transform: 0,
   });
 
   mockEndpointsCb?.(database);
@@ -66,11 +69,9 @@ describe("DatabaseConnectionInfoSection", () => {
     it("should show error message if healthcheck returns errors", async () => {
       setup({
         mockEndpointsCb: (database) => {
-          fetchMock.get(
-            `path:/api/database/${database.id}/healthcheck`,
-            { body: { status: "error", message: "Test failure" } },
-            { overwriteRoutes: true },
-          );
+          fetchMock.modifyRoute(`database-${database.id}-healthcheck`, {
+            response: { body: { status: "error", message: "Test failure" } },
+          });
         },
       });
       expect(await screen.findByText("Test failure")).toBeInTheDocument();
@@ -79,11 +80,9 @@ describe("DatabaseConnectionInfoSection", () => {
     it("should show error message if healthcheck HTTP request fails", async () => {
       setup({
         mockEndpointsCb: (database) => {
-          fetchMock.get(
-            `path:/api/database/${database.id}/healthcheck`,
-            { status: 500 },
-            { overwriteRoutes: true },
-          );
+          fetchMock.modifyRoute(`database-${database.id}-healthcheck`, {
+            response: { status: 500 },
+          });
         },
       });
       expect(
@@ -98,9 +97,34 @@ describe("DatabaseConnectionInfoSection", () => {
       await userEvent.click(screen.getByText(/Sync database schema/i));
       await waitFor(() => {
         expect(
-          fetchMock.called(`path:/api/database/${database.id}/sync_schema`),
+          fetchMock.callHistory.called(
+            `path:/api/database/${database.id}/sync_schema`,
+          ),
         ).toBe(true);
       });
+      expect(await screen.findByText("Sync triggered!")).toBeInTheDocument();
+    });
+
+    it("shows an error when a schema sync fails", async () => {
+      const { database } = setup();
+      fetchMock.modifyRoute(`database-${database.id}-sync-schema`, {
+        response: 500,
+      });
+
+      await userEvent.click(screen.getByText(/Sync database schema/i));
+      expect(await screen.findByText(/Failed to sync/i)).toBeInTheDocument();
+    });
+
+    it("shows an error when a field sync fails", async () => {
+      const { database } = setup();
+      fetchMock.modifyRoute(`database-${database.id}-rescan-values`, {
+        response: 500,
+      });
+
+      await userEvent.click(screen.getByText(/Re-scan field values/i));
+      expect(
+        await screen.findByText(/failed to start scan/i),
+      ).toBeInTheDocument();
     });
 
     it("re-scans database field values", async () => {
@@ -108,9 +132,12 @@ describe("DatabaseConnectionInfoSection", () => {
       await userEvent.click(screen.getByText(/Re-scan field values/i));
       await waitFor(() => {
         expect(
-          fetchMock.called(`path:/api/database/${database.id}/rescan_values`),
+          fetchMock.callHistory.called(
+            `path:/api/database/${database.id}/rescan_values`,
+          ),
         ).toBe(true);
       });
+      expect(await screen.findByText("Scan triggered!")).toBeInTheDocument();
     });
 
     describe("sync indicator", () => {
@@ -146,11 +173,93 @@ describe("DatabaseConnectionInfoSection", () => {
           );
 
           expect(
-            fetchMock.calls(`path:/api/database/${database.id}/dismiss_spinner`)
-              .length,
+            fetchMock.callHistory.calls(
+              `path:/api/database/${database.id}/dismiss_spinner`,
+            ).length,
           ).toBe(1);
         });
       });
+    });
+  });
+
+  describe("sync failure cause", () => {
+    it("shows why the initial sync aborted (GHY-3856)", () => {
+      setup({
+        database: createMockDatabase({
+          initial_sync_status: "aborted",
+          initial_sync_error:
+            "User is not authorized to perform: glue:GetDatabases",
+        }),
+      });
+
+      expect(screen.getByText("Sync failed")).toBeInTheDocument();
+      expect(
+        screen.getByText(
+          "User is not authorized to perform: glue:GetDatabases",
+        ),
+      ).toBeInTheDocument();
+    });
+
+    it("isn't shown when the database has no recorded sync error", () => {
+      setup({
+        database: createMockDatabase({ initial_sync_status: "aborted" }),
+      });
+
+      expect(screen.queryByText("Sync failed")).not.toBeInTheDocument();
+    });
+  });
+
+  describe("Cloud-attached databases", () => {
+    it("should not show the sync actions", async () => {
+      setup({ database: createMockDatabase({ is_attached_dwh: true }) });
+      expect(
+        screen.queryByText(/Sync database schema/i),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByText(/Re-scan field values/i),
+      ).not.toBeInTheDocument();
+    });
+  });
+
+  describe("Stub databases", () => {
+    it("should hide the sync actions but allow editing the connection details", async () => {
+      setup({ database: createMockDatabase({ is_stub: true }) });
+      expect(
+        screen.queryByText(/Sync database schema/i),
+      ).not.toBeInTheDocument();
+      expect(
+        await screen.findByRole("button", { name: /Edit connection details/i }),
+      ).toBeEnabled();
+    });
+  });
+
+  describe("Sample database", () => {
+    it("should disable editing the connection details", async () => {
+      setup({ database: createMockDatabase({ is_sample: true }) });
+      expect(
+        await screen.findByRole("button", { name: /Edit connection details/i }),
+      ).toBeDisabled();
+    });
+
+    it("should explain why a cloud-attached sample database without details cannot be edited", async () => {
+      setup({
+        database: createMockDatabase({
+          is_sample: true,
+          is_attached_dwh: true,
+          details: undefined,
+        }),
+      });
+      const editButton = await screen.findByRole("button", {
+        name: /Edit connection details/i,
+      });
+      expect(editButton).toBeDisabled();
+
+      await userEvent.hover(editButton, {
+        pointerEventsCheck: PointerEventsCheckLevel.Never,
+      });
+      expect(await screen.findByRole("tooltip")).toHaveTextContent(
+        "The sample database cannot be edited.",
+      );
     });
   });
 });

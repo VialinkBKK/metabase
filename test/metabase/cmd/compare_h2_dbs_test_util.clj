@@ -23,7 +23,9 @@
 
 (def ^:private ignored-table-names
   "Set of Table names to skip diffing (e.g. because they're not ones we migrate.)"
-  #{"DATABASECHANGELOG"
+  #{"CORE_SESSION"
+    "DATABASECHANGELOG"
+    "DATABASECHANGELOG_VERSION"
     "QRTZ_BLOB_TRIGGERS"
     "QRTZ_CALENDARS"
     "QRTZ_CRON_TRIGGERS"
@@ -38,7 +40,9 @@
     "QUERY"
     "QUERY_QUERYEXECUTION"
     "QUERY_CACHE"
-    "TASK_HISTORY"})
+    "TASK_HISTORY"
+    ;; EE-only table populated by migration but only dumped when EE is available
+    "METABOT_PERMISSIONS"})
 
 (defn- table-names
   "Return a sorted collection of all non-system table names."

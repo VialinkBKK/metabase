@@ -1,13 +1,19 @@
-import { setupEnterprisePlugins } from "__support__/enterprise";
+import { setupEnterpriseOnlyPlugin } from "__support__/enterprise";
 import {
+  setupCollectionByIdEndpoint,
   setupDatabasesEndpoints,
   setupRecentViewsAndSelectionsEndpoints,
   setupSearchEndpoints,
 } from "__support__/server-mocks";
-import { renderWithProviders } from "__support__/ui";
-import { createMockModelResult } from "metabase/browse/models/test-utils";
+import { renderWithProviders, waitForLoaderToBeRemoved } from "__support__/ui";
+import { ROOT_COLLECTION } from "metabase/common/collections/constants";
 import * as Lib from "metabase-lib";
 import { columnFinder } from "metabase-lib/test-helpers";
+import type { SearchResult } from "metabase-types/api";
+import {
+  createMockCollection,
+  createMockModelResult,
+} from "metabase-types/api/mocks";
 import { createSampleDatabase } from "metabase-types/api/mocks/presets";
 
 import { createMockNotebookStep } from "../../../test-utils";
@@ -19,20 +25,27 @@ export interface SetupOpts {
   step?: NotebookStep;
   readOnly?: boolean;
   isEmbeddingSdk?: boolean;
-  hasEnterprisePlugins?: boolean;
+  enterprisePlugins?: Parameters<typeof setupEnterpriseOnlyPlugin>[0][];
+  searchItems?: SearchResult[];
 }
-export const setup = ({
+export const setup = async ({
   step = createMockNotebookStep(),
   readOnly = false,
   isEmbeddingSdk = false,
-  hasEnterprisePlugins = false,
+  enterprisePlugins,
+  searchItems = [],
 }: SetupOpts = {}) => {
-  if (hasEnterprisePlugins) {
-    setupEnterprisePlugins();
+  if (enterprisePlugins) {
+    enterprisePlugins.forEach((plugin) => {
+      setupEnterpriseOnlyPlugin(plugin);
+    });
   }
   const mockWindowOpen = jest.spyOn(window, "open").mockImplementation();
 
   const updateQuery = jest.fn();
+  setupCollectionByIdEndpoint({
+    collections: [createMockCollection(ROOT_COLLECTION)],
+  });
   setupDatabasesEndpoints([createSampleDatabase()]);
   setupRecentViewsAndSelectionsEndpoints([], ["selections"]);
 
@@ -45,7 +58,7 @@ export const setup = ({
       }),
     ]);
   } else {
-    setupSearchEndpoints([]);
+    setupSearchEndpoints(searchItems);
   }
 
   renderWithProviders(
@@ -55,13 +68,15 @@ export const setup = ({
         query={step.query}
         stageIndex={step.stageIndex}
         readOnly={readOnly}
-        color="brand"
+        color="background_surface-brand-strong"
         isLastOpened={false}
         reportTimezone="UTC"
         updateQuery={updateQuery}
       />
     </NotebookProvider>,
   );
+
+  await waitForLoaderToBeRemoved();
 
   const getNextQuery = (): Lib.Query => {
     const [lastCall] = updateQuery.mock.calls.slice(-1);

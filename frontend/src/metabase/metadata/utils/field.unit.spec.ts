@@ -1,5 +1,5 @@
-import { NULL_DISPLAY_VALUE } from "metabase/lib/constants";
-import MetabaseSettings from "metabase/lib/settings";
+import { getNullDisplayValue } from "metabase/utils/constants";
+import MetabaseSettings from "metabase/utils/settings";
 import {
   createMockDatabase,
   createMockField,
@@ -61,6 +61,66 @@ describe("canCoerceFieldType", () => {
       canCoerceFieldType(createMockField({ base_type: "type/Boolean" })),
     ).toBe(false);
   });
+
+  // GHY-3388: surface the cast UI when the field is in a state the user needs
+  // to fix from the UI — even when no forward coercions exist for base_type.
+  it("should return true when coercion_strategy is set, even if base_type is not coerceable", () => {
+    expect(
+      canCoerceFieldType(
+        createMockField({
+          base_type: "type/Number",
+          effective_type: "type/Number",
+          coercion_strategy: "Coercion/String->Number",
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it("should return true when effective_type drifted from base_type without a coercion (the GHY-3388 broken state)", () => {
+    expect(
+      canCoerceFieldType(
+        createMockField({
+          base_type: "type/Number",
+          effective_type: "type/Text",
+          coercion_strategy: null,
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it("should return true for an FK field that has a stale coercion (so the user can clear it)", () => {
+    const field = createOrdersProductIdField();
+    expect(
+      canCoerceFieldType({
+        ...field,
+        coercion_strategy: "Coercion/UNIXSeconds->DateTime",
+      }),
+    ).toBe(true);
+  });
+
+  it("should return false when effective_type is missing (separate concern, GHY-3367)", () => {
+    expect(
+      canCoerceFieldType(
+        createMockField({
+          base_type: "type/Number",
+          effective_type: undefined,
+          coercion_strategy: null,
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("should return false when effective_type matches base_type and no coercion", () => {
+    expect(
+      canCoerceFieldType(
+        createMockField({
+          base_type: "type/Boolean",
+          effective_type: "type/Boolean",
+          coercion_strategy: null,
+        }),
+      ),
+    ).toBe(false);
+  });
 });
 
 describe("getRawTableFieldId", () => {
@@ -87,7 +147,7 @@ describe("getFieldCurrency", () => {
       },
     });
 
-    expect(getFieldCurrency(field)).toBe("EUR");
+    expect(getFieldCurrency(field.settings)).toBe("EUR");
   });
 
   it("returns currency from global settings when field settings are not available", () => {
@@ -99,7 +159,7 @@ describe("getFieldCurrency", () => {
 
     const field = createMockField();
 
-    expect(getFieldCurrency(field)).toBe("GBP");
+    expect(getFieldCurrency(field.settings)).toBe("GBP");
   });
 
   it("returns USD as default when no currency is specified", () => {
@@ -107,7 +167,7 @@ describe("getFieldCurrency", () => {
 
     const field = createMockField();
 
-    expect(getFieldCurrency(field)).toBe("USD");
+    expect(getFieldCurrency(field.settings)).toBe("USD");
   });
 
   it("prioritizes field settings over global settings", () => {
@@ -123,7 +183,7 @@ describe("getFieldCurrency", () => {
       },
     });
 
-    expect(getFieldCurrency(field)).toBe("JPY");
+    expect(getFieldCurrency(field.settings)).toBe("JPY");
   });
 });
 
@@ -171,7 +231,7 @@ describe("getFieldDisplayName", () => {
       display_name: "",
     });
 
-    expect(getFieldDisplayName(field)).toBe(NULL_DISPLAY_VALUE);
+    expect(getFieldDisplayName(field)).toBe(getNullDisplayValue());
   });
 
   it("should handle empty dimensions array", () => {

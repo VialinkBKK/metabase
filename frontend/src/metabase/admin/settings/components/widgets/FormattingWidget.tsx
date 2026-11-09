@@ -2,18 +2,19 @@ import { useEffect, useMemo, useState } from "react";
 import { t } from "ttag";
 import _ from "underscore";
 
-import { SettingsSection } from "metabase/admin/components/SettingsSection";
-import { useAdminSetting } from "metabase/api/utils";
+import { SetByEnvVar } from "metabase/common/components/SetByEnvVar";
+import { useAdminSetting } from "metabase/settings";
+import { SettingsSection } from "metabase/settings-components";
+import { Box, Radio, Select, Stack, Switch, Text } from "metabase/ui";
 import {
   getCurrencyOptions,
   getCurrencyStyleOptions,
+} from "metabase/utils/formatting";
+import {
   getDateStyleOptionsForUnit,
   getTimeStyleOptions,
-} from "metabase/lib/formatting";
-import { Box, Radio, Select, Stack, Switch, Text } from "metabase/ui";
-import type { FormattingSettings } from "metabase-types/api";
-
-import { SetByEnvVar } from "./AdminSettingInput";
+} from "metabase/value-formatting";
+import type { CurrencyStyle, FormattingSettings } from "metabase-types/api";
 
 const DEFAULT_FORMATTING_SETTINGS: FormattingSettings = {
   "type/Temporal": {
@@ -39,13 +40,19 @@ export function FormattingWidget() {
   const {
     value: initialValue,
     updateSetting,
-    isLoading,
     settingDetails,
   } = useAdminSetting("custom-formatting");
   const [localValue, setLocalValue] = useState<FormattingSettings | undefined>({
     ...DEFAULT_FORMATTING_SETTINGS,
     ...initialValue,
   });
+
+  useEffect(() => {
+    setLocalValue({
+      ...DEFAULT_FORMATTING_SETTINGS,
+      ...initialValue,
+    });
+  }, [initialValue]);
 
   const {
     date_style: dateStyle,
@@ -60,17 +67,16 @@ export function FormattingWidget() {
     localValue?.["type/Currency"] || {};
 
   const [currencyOptions, currencyStyleOptions] = useMemo(() => {
+    // Unjustified type cast. FIXME
     const currencyOptions = (
       getCurrencyOptions() as { name: string; value: string }[]
     ).map(mapNameToLabel);
-    const currencyStyleOptions =
-      getCurrencyStyleOptions(currency).map(mapNameToLabel);
+    const currencyStyleOptions = getCurrencyStyleOptions(
+      currency,
+      currencyStyle,
+    ).map(mapNameToLabel);
     return [currencyOptions, currencyStyleOptions];
-  }, [currency]);
-
-  if (isLoading) {
-    return null;
-  }
+  }, [currency, currencyStyle]);
 
   const dateStyleOptions = getDateStyleOptionsForUnit("default", dateAbreviate);
 
@@ -98,6 +104,7 @@ export function FormattingWidget() {
                   ...localValue,
                   "type/Temporal": {
                     ...localValue?.["type/Temporal"],
+                    // Unjustified type cast. FIXME
                     date_style: newValue as string,
                   },
                 })
@@ -120,6 +127,7 @@ export function FormattingWidget() {
                   ...localValue,
                   "type/Temporal": {
                     ...localValue?.["type/Temporal"],
+                    // Unjustified type cast. FIXME
                     date_abbreviate: checked as boolean,
                   },
                 })
@@ -141,6 +149,7 @@ export function FormattingWidget() {
                   ...localValue,
                   "type/Temporal": {
                     ...localValue?.["type/Temporal"],
+                    // Unjustified type cast. FIXME
                     time_style: newValue as string,
                   },
                 })
@@ -158,13 +167,14 @@ export function FormattingWidget() {
                 { label: "100 000,00", value: ", " },
                 { label: "100.000,00", value: ",." },
                 { label: "100000.00", value: "." },
-                { label: "100'000.00", value: ".'" },
+                { label: "100’000.00", value: ".’" },
               ]}
               onChange={(newValue) =>
                 handleChange({
                   ...localValue,
                   "type/Number": {
                     ...localValue?.["type/Number"],
+                    // Unjustified type cast. FIXME
                     number_separators: newValue as string,
                   },
                 })
@@ -177,12 +187,14 @@ export function FormattingWidget() {
               label={t`Unit of currency`}
               value={currency}
               inputType="select"
+              searchable
               options={currencyOptions}
               onChange={(newValue) =>
                 handleChange({
                   ...localValue,
                   "type/Currency": {
                     ...localValue?.["type/Currency"],
+                    // Unjustified type cast. FIXME
                     currency: newValue as string,
                   },
                 })
@@ -199,7 +211,8 @@ export function FormattingWidget() {
                   ...localValue,
                   "type/Currency": {
                     ...localValue?.["type/Currency"],
-                    currency_style: newValue as string,
+                    // Unjustified type cast. FIXME
+                    currency_style: newValue as CurrencyStyle,
                   },
                 })
               }
@@ -218,6 +231,7 @@ function FormattingInput({
   onChange,
   options,
   inputType,
+  searchable,
 }: {
   id: string;
   label: string;
@@ -225,6 +239,7 @@ function FormattingInput({
   onChange: (newValue: string | boolean | number) => void;
   options?: { label: string; value: string }[];
   inputType: "boolean" | "select" | "radio";
+  searchable?: boolean;
 }) {
   const [localValue, setLocalValue] = useState(value);
 
@@ -239,7 +254,7 @@ function FormattingInput({
 
   return (
     <Box data-testid={`${id}-formatting-setting`}>
-      <Text htmlFor={id} component="label" fw="bold" display="block" mb="xs">
+      <Text htmlFor={id} component="label" fw="bold" display="block" mb="xxs">
         {label}
       </Text>
       {inputType === "select" && (
@@ -248,6 +263,7 @@ function FormattingInput({
           value={localValue}
           onChange={handleChange}
           data={options ?? []}
+          searchable={searchable}
         />
       )}
       {inputType === "boolean" && (

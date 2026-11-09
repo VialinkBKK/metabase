@@ -1,16 +1,19 @@
 (ns metabase.lib.field
+  (:refer-clojure :exclude [every? select-keys mapv empty? not-empty get-in #?(:clj for)])
   (:require
    [clojure.set :as set]
    [clojure.string :as str]
    [medley.core :as m]
    [metabase.lib.aggregation :as lib.aggregation]
    [metabase.lib.binning :as lib.binning]
+   [metabase.lib.computed :as lib.computed]
    [metabase.lib.dispatch :as lib.dispatch]
    [metabase.lib.equality :as lib.equality]
    [metabase.lib.expression :as lib.expression]
    [metabase.lib.field.resolution :as lib.field.resolution]
    [metabase.lib.field.util :as lib.field.util]
    [metabase.lib.join :as lib.join]
+   [metabase.lib.join.util :as lib.join.util]
    [metabase.lib.metadata :as lib.metadata]
    [metabase.lib.metadata.calculation :as lib.metadata.calculation]
    [metabase.lib.options :as lib.options]
@@ -25,21 +28,23 @@
    [metabase.lib.temporal-bucket :as lib.temporal-bucket]
    [metabase.lib.types.isa :as lib.types.isa]
    [metabase.lib.util :as lib.util]
+   [metabase.lib.walk :as lib.walk]
    [metabase.util :as u]
    [metabase.util.humanization :as u.humanization]
    [metabase.util.i18n :as i18n]
    [metabase.util.log :as log]
    [metabase.util.malli :as mu]
    [metabase.util.malli.registry :as mr]
+   [metabase.util.performance :refer [every? select-keys mapv empty? not-empty get-in #?(:clj for)]]
    [metabase.util.time :as u.time]))
 
 (defn- column-metadata-effective-type
-  "Effective type of a column when taking the `::temporal-unit` into account. If we have a temporal extraction like
+  "Effective type of a column when taking the `:lib/temporal-unit` into account. If we have a temporal extraction like
   `:month-of-year`, then this actually returns an integer rather than the 'original` effective type of `:type/Date` or
   whatever."
-  [{::keys [temporal-unit], :as column-metadata}]
+  [{:keys [lib/temporal-unit], :as column-metadata}]
   (if (and temporal-unit
-           (contains? lib.schema.temporal-bucketing/datetime-extraction-units temporal-unit))
+           (contains? lib.schema.temporal-bucketing/datetime-integer-extraction-units temporal-unit))
     :type/Integer
     ((some-fn :effective-type :base-type) column-metadata)))
 
@@ -50,14 +55,14 @@
 (defmethod lib.metadata.calculation/type-of-method :field
   [query stage-number [_tag {:keys [temporal-unit], :as _opts} _id-or-name :as field-ref]]
   (let [metadata (cond-> (lib.field.resolution/resolve-field-ref query stage-number field-ref)
-                   temporal-unit (assoc ::temporal-unit temporal-unit))]
+                   temporal-unit (assoc :lib/temporal-unit temporal-unit))]
     (lib.metadata.calculation/type-of query stage-number metadata)))
 
 (defmethod lib.metadata.calculation/metadata-method :metadata/column
   [_query _stage-number {field-name :name, :as field-metadata}]
   (assoc field-metadata :name field-name))
 
-(mu/defmethod lib.metadata.calculation/metadata-method :field :- ::lib.schema.metadata/column
+(mu/defmethod lib.metadata.calculation/metadata-method :field :- ::lib.metadata.calculation/visible-column
   [query stage-number field-ref]
   (lib.field.resolution/resolve-field-ref query stage-number field-ref))
 
@@ -75,37 +80,74 @@
     (when (every? some? path)
       (str/join ": " path))))
 
+(defn- clauses-in-stage-by-uuid
+  [query stage-number]
+  (lib.computed/with-cache-ephemeral* query [::clauses-in-stage-by-uuid stage-number]
+    (fn []
+      (let [sink (volatile! (transient {}))]
+        (lib.walk/walk-clauses-in-stage
+         (lib.util/query-stage query stage-number)
+         (fn [clause]
+           (when-let [lib-uuid (lib.options/uuid clause)]
+             (vswap! sink assoc! lib-uuid clause))
+           nil))
+        (persistent! @sink)))))
+
+(defn- find-stage-index-and-clause-by-uuid
+  "Find the clause in `query` with the given `lib-uuid`. Return a [stage-index clause] pair, if found."
+  [query stage-number lib-uuid]
+  (let [max-stage (lib.util/canonical-stage-index query stage-number)]
+    (loop [stage-number 0]
+      (if (> stage-number max-stage)
+        nil
+        (if-let [clause (get (clauses-in-stage-by-uuid query stage-number) lib-uuid)]
+          [stage-number clause]
+          (recur (inc stage-number)))))))
+
 (defn- field-display-name-initial-display-name
   [query
    stage-number
    {field-display-name    :display-name
     field-name            :name
-    join-alias            :metabase.lib.join/join-alias
+    join-alias            :lib/join-alias
     fk-field-id           :fk-field-id
     original-fk-field-id  :lib/original-fk-field-id
     parent-id             :parent-id
     ;; TODO (Cam 6/19/25) -- not sure why we need both "simple display name" and "original display name". QUE-1408
-    simple-display-name   ::simple-display-name
+    simple-display-name   :lib/simple-display-name
     original-display-name :lib/original-display-name
     ref-display-name      :lib/ref-display-name
-    model-display-name    :lib/model-display-name
+    from-model?           :lib/from-model?
     source                :lib/source
     source-uuid           :lib/source-uuid
     :as                   col}
    style]
   (let [humanized-name     (u.humanization/name->human-readable-name :simple field-name)
         field-display-name (or ref-display-name
-                               (when (and model-display-name
-                                          (not (str/includes? model-display-name " → ")))
-                                 model-display-name)
-                               original-display-name
+                               ;; TODO (Cam 2026-02-27) HACK for Models, `:original-display-name` gets incorrectly
+                               ;; overriden at some point with a recalculated display name for the column, so user
+                               ;; edits to `:display-name` itself get stomped on. Since we want to preserve the user
+                               ;; edits in `:display-name` we should ignore `:original-display-name` which is
+                               ;; incorrect here. FIXME -- we should make sure `:original-display-name` is set right
+                               ;; away for metadata coming from models and we can remove this hack.
+                               (when (or (not from-model?)
+                                         (= source :source/joins))
+                                 original-display-name)
                                field-display-name)
         fk-field-id        (or fk-field-id original-fk-field-id)]
     (or simple-display-name
         (when (and parent-id
                    ;; check that we haven't nested yet
                    (or (nil? field-display-name)
-                       (= field-display-name humanized-name)))
+                       (= field-display-name humanized-name)
+                       ;; For card-metadata columns, :name may be the dotted form
+                       ;; (e.g. "grandparent.parent"). Humanizing it doesn't produce
+                       ;; the leaf display-name, so also check against the raw field's
+                       ;; display-name from the metadata provider.
+                       (when-let [field-id (when (pos-int? (:id col))
+                                             (:id col))]
+                         (when-let [raw-field (lib.metadata/field query field-id)]
+                           (= field-display-name (:display-name raw-field))))))
           (nest-display-name query col))
         (when-let [[source-index source-clause]
                    (and source-uuid
@@ -115,7 +157,7 @@
                         (not (or fk-field-id join-alias))
                         (not (str/includes? field-display-name " → "))
                         (when-let [previous-stage-number (lib.util/previous-stage-number query stage-number)]
-                          (lib.util/find-stage-index-and-clause-by-uuid query previous-stage-number source-uuid)))]
+                          (find-stage-index-and-clause-by-uuid query previous-stage-number source-uuid)))]
           ;; The :display-name from the field metadata is probably not a :long display name, so
           ;; if the caller requested a :long name and we can lookup the original clause by the
           ;; source-uuid, use that to get the :long name. This allows display-info to get the
@@ -130,25 +172,31 @@
 (defn- field-display-name-add-join-alias
   [query
    stage-number
-   {join-alias           :metabase.lib.join/join-alias
+   {join-alias           :lib/join-alias
     original-join-alias  :lib/original-join-alias
-    ;; TODO (Cam 6/19/25) -- `:source-alias` is deprecated, see description for column metadata
-    ;; schema. Still getting set/used in a few places tho. Work on removing it altogether.
-    source-alias         :source-alias
     fk-field-id          :fk-field-id
     original-fk-field-id :lib/original-fk-field-id
     table-id             :table-id
+    from-model?          :lib/from-model?
+    source               :lib/source
     :as                  _col}
    style
    display-name]
   (let [join-alias        (or join-alias
-                              original-join-alias
-                              source-alias)
+                              original-join-alias)
         fk-field-id       (or fk-field-id original-fk-field-id)
         join-display-name (when (and (= style :long)
-                                     ;; don't prepend a join display name if `:display-name` already contains one! Legacy
-                                     ;; result metadata might include it for joined Fields, don't want to add it twice.
-                                     ;; Otherwise we'll end up with display names like
+                                     ;; don't append join aliases to columns that were introduced (directly in the
+                                     ;; main previous stage/source card lineage) by models, since their
+                                     ;; `:display-name` should already include the join alias and if it doesn't it's
+                                     ;; because the user edited the display name to something else. Still ok to
+                                     ;; prepend join aliases when we JOIN a model, since that should be added on top
+                                     ;; of whatever is already there.
+                                     (or (not from-model?)
+                                         (= source :source/joins))
+                                     ;; don't prepend a join display name if `:display-name` already contains one!
+                                     ;; Legacy result metadata might include it for joined Fields, don't want to add
+                                     ;; it twice. Otherwise we'll end up with display names like
                                      ;;
                                      ;;    Products → Products → Category
                                      (not (str/includes? display-name " → ")))
@@ -171,7 +219,7 @@
       display-name)))
 
 (defn- field-display-name-add-binning
-  [{binning          ::binning
+  [{binning          :lib/binning
     original-binning :lib/original-binning
     semantic-type    :semantic-type
     :as              _col}
@@ -186,7 +234,7 @@
 
 (defn- field-display-name-add-bucketing
   [{inherited-temporal-unit :inherited-temporal-unit
-    temporal-unit           ::temporal-unit
+    temporal-unit           :lib/temporal-unit
     :as                     _col}
    display-name]
   (let [temporal-unit   (or temporal-unit inherited-temporal-unit)
@@ -239,20 +287,20 @@
     "unknown_field"))
 
 (defmethod lib.metadata.calculation/display-info-method :metadata/column
-  [query stage-number field-metadata]
+  [query stage-number col]
   (merge
-   ((get-method lib.metadata.calculation/display-info-method :default) query stage-number field-metadata)
+   ((get-method lib.metadata.calculation/display-info-method :default) query stage-number col)
    ;; These have to be calculated even if the metadata has display-name to support nested fields
    ;; because the query processor doesn't produce nested display-names.
-   {:display-name (lib.metadata.calculation/display-name query stage-number field-metadata)
-    :long-display-name (lib.metadata.calculation/display-name query stage-number field-metadata :long)}
+   {:display-name (lib.metadata.calculation/display-name query stage-number col)
+    :long-display-name (lib.metadata.calculation/display-name query stage-number col :long)}
    ;; Include description and fingerprint if they're present on the column. Only proper fields or columns from a model
    ;; have these, not aggregations or expressions.
-   (u/select-non-nil-keys field-metadata [:description :fingerprint])
+   (u/select-non-nil-keys col [:description :fingerprint])
    ;; if this column comes from a source Card (Saved Question/Model/etc.) use the name of the Card as the 'table' name
    ;; rather than the ACTUAL table name.
-   (when (= (:lib/source field-metadata) :source/card)
-     (when-let [card-id (:lib/card-id field-metadata)]
+   (when (= (:lib/source col) :source/card)
+     (when-let [card-id (:lib/card-id col)]
        (when-let [card (lib.metadata/card query card-id)]
          {:table {:name (:name card), :display-name (:name card)}})))))
 
@@ -268,7 +316,7 @@
 
 (defmethod lib.temporal-bucket/temporal-bucket-method :metadata/column
   [metadata]
-  (::temporal-unit metadata))
+  (:lib/temporal-unit metadata))
 
 (defmethod lib.temporal-bucket/with-temporal-bucket-method :field
   [field-ref unit]
@@ -276,16 +324,13 @@
 
 (defmethod lib.temporal-bucket/with-temporal-bucket-method :metadata/column
   [metadata unit]
-  (let [original-effective-type ((some-fn ::original-effective-type :effective-type :base-type) metadata)
-        original-temporal-unit ((some-fn ::original-temporal-unit ::temporal-unit) metadata)]
+  (let [original-effective-type ((some-fn :lib/original-effective-type :effective-type :base-type) metadata)]
     (if unit
       (-> metadata
-          (assoc ::temporal-unit unit
-                 ::original-effective-type original-effective-type)
-          (m/assoc-some ::original-temporal-unit original-temporal-unit))
-      (cond-> (dissoc metadata ::temporal-unit ::original-effective-type)
-        original-effective-type (assoc :effective-type original-effective-type)
-        original-temporal-unit  (assoc ::original-temporal-unit original-temporal-unit)))))
+          (assoc :lib/temporal-unit unit)
+          (m/assoc-some :lib/original-effective-type original-effective-type))
+      (cond-> (dissoc metadata :lib/temporal-unit :lib/original-effective-type)
+        original-effective-type (assoc :effective-type original-effective-type)))))
 
 (defmethod lib.temporal-bucket/available-temporal-buckets-method :field
   [query stage-number field-ref]
@@ -306,7 +351,7 @@
 (defmethod lib.temporal-bucket/available-temporal-buckets-method :metadata/column
   [_query _stage-number field-metadata]
   (lib.temporal-bucket/available-temporal-buckets-for-type
-   ((some-fn ::original-effective-type :effective-type :base-type) field-metadata)
+   ((some-fn :lib/original-effective-type :effective-type :base-type) field-metadata)
    ;; `:inherited-temporal-unit` being set means field was bucketed on former stage. For this case, make the default nil
    ;; for next bucketing attempt (of already bucketed) field eg. through BreakoutPopover on FE, by setting `:inherited`
    ;; default unit.
@@ -315,7 +360,7 @@
      (or (some-> field-metadata :fingerprint fingerprint-based-default-unit)
          :month)
      :inherited)
-   (::temporal-unit field-metadata)))
+   (:lib/temporal-unit field-metadata)))
 
 ;;; ---------------------------------------- Binning ---------------------------------------------
 
@@ -331,7 +376,7 @@
 (defmethod lib.binning/binning-method :metadata/column
   [metadata]
   (some-> metadata
-          ::binning
+          :lib/binning
           (assoc :lib/type    ::lib.binning/binning
                  :metadata-fn (constantly metadata))))
 
@@ -341,7 +386,7 @@
 
 (defmethod lib.binning/with-binning-method :metadata/column
   [metadata binning]
-  (u/assoc-dissoc metadata ::binning binning))
+  (u/assoc-dissoc metadata :lib/binning binning))
 
 (defmethod lib.binning/available-binning-strategies-method :field
   [query stage-number field-ref]
@@ -349,7 +394,7 @@
 
 (defmethod lib.binning/available-binning-strategies-method :metadata/column
   [query _stage-number {:keys [effective-type fingerprint semantic-type] :as field-metadata}]
-  (if (not= (:lib/source field-metadata) :source/expressions)
+  (if-not (= (:lib/source field-metadata) :source/expressions)
     (let [binning?    (lib.metadata/database-supports? query :binning)
           fingerprint (get-in fingerprint [:type :type/Number])
           existing    (lib.binning/binning field-metadata)
@@ -361,12 +406,11 @@
                         (isa? semantic-type :type/Coordinate)        (lib.binning/coordinate-binning-strategies)
                         (and (isa? effective-type :type/Number)
                              (not (isa? semantic-type :Relation/*))) (lib.binning/numeric-binning-strategies))]
-      ;; TODO: Include the time and date binning strategies too;
-      ;; see [[metabase.warehouse-schema.api.table/assoc-field-dimension-options]].
-      (for [strat strategies]
-        (cond-> strat
+      ;; TODO: Include the time and date binning strategies too
+      (for [strategy strategies]
+        (cond-> strategy
           (or (:lib/original-binning field-metadata) existing) (dissoc :default)
-          (lib.binning/strategy= strat existing) (assoc :selected true))))
+          (lib.binning/strategy= strategy existing) (assoc :selected true))))
     []))
 
 (defmethod lib.ref/ref-method :field
@@ -384,10 +428,12 @@
     [:base-type
      :inherited-temporal-unit
      :lib/original-binning
-     ::original-effective-type
-     ::original-temporal-unit])
-   {:metabase.lib.field/binning       :binning
-    :metabase.lib.field/temporal-unit :temporal-unit}))
+     :lib/original-effective-type
+     :qp/native-sandbox-column.force-coercion-strategy])
+   {:lib/binning          :binning
+    :lib/temporal-unit    :temporal-unit
+    :lib/ref-name         :name
+    :lib/ref-display-name :display-name}))
 
 (def ^:private field-ref-propagated-keys-for-non-inherited-columns
   "Keys that should get copied into `:field` ref options from column metadata ONLY when the column is not inherited.
@@ -396,16 +442,16 @@
   (merge
    (u/index-by
     identity
-    ;; include `:metabase.lib.query/transformation-added-base-type` if this is going to be a field ID ref, so we can
+    ;; include `:lib/transformation-added-base-type` if this is going to be a field ID ref, so we can
     ;; remove `:base-type` if it wasn't included in the original query if we convert this ref back to legacy (mostly
     ;; important for [[metabase.query-processor.middleware.annotate/super-broken-legacy-field-ref]] purposes). But if
     ;; this will have a Field name then don't include the key because we don't want the convert code to strip out base
     ;; types -- they're required for field name refs.
-    [:metabase.lib.query/transformation-added-base-type])
-   {:metabase.lib.join/join-alias :join-alias
-    :fk-field-id                  :source-field
-    :fk-join-alias                :source-field-join-alias
-    :fk-field-name                :source-field-name}))
+    [:lib/transformation-added-base-type])
+   {:lib/join-alias :join-alias
+    :fk-field-id    :source-field
+    :fk-join-alias  :source-field-join-alias
+    :fk-field-name  :source-field-name}))
 
 (defn- select-renamed-keys [m old->new]
   (-> m
@@ -418,23 +464,14 @@
         options           (merge {:lib/uuid       (str (random-uuid))
                                   :effective-type (column-metadata-effective-type metadata)}
                                  (select-renamed-keys metadata field-ref-propagated-keys)
-                                 ;; MEGA HACK! QP result metadata includes `:source-alias` (which is basically any
-                                 ;; join alias that was ever used for the column); if that is present then we need to
-                                 ;; generate field refs that use as a join alias because even tho that sounds
-                                 ;; completely broken that is traditionally what we've done. Taking this out
-                                 ;; breakouts [[metabase.lib.drill-thru.column-filter-test/column-filter-join-alias-test]].
-                                 ;;
-                                 ;; TODO (Cam 6/26/25) -- figure out if we can actually take this out or not.
-                                 (when-let [source-alias (and (not inherited-column?)
-                                                              (not (:fk-field-id metadata))
-                                                              (not= :source/implicitly-joinable
-                                                                    (:lib/source metadata))
-                                                              (:source-alias metadata))]
-                                   {:join-alias source-alias})
                                  (when-not inherited-column?
                                    (select-renamed-keys metadata field-ref-propagated-keys-for-non-inherited-columns)))
         id-or-name        (or (lib.field.util/inherited-column-name metadata)
-                              ((some-fn :id :lib/deduplicated-name :lib/original-name :name) metadata))]
+                              ;; For card-sourced columns (even via joins), use the string name
+                              ;; instead of a numeric field ID. QUE2-383
+                              (when (:lib/card-id metadata)
+                                (:lib/source-column-alias metadata))
+                              ((some-fn :id :lib/source-column-alias :lib/deduplicated-name :lib/original-name :name) metadata))]
     [:field options id-or-name]))
 
 (mu/defmethod lib.ref/ref-method :metadata/column :- ::lib.schema.ref/ref
@@ -452,23 +489,51 @@
           (lib.metadata.calculation/visible-columns
            query
            stage-number
-           (lib.util/query-stage query stage-number)
            {:include-joined?              false
             :include-expressions?         true
             :include-implicitly-joinable? false})))
 
+(defn- newly-stranded-downstream-refs
+  "Field refs in stages after `stage-number` that resolve against `before` but not against `after`. Non-empty means
+  narrowing a stage's `:fields` from `before` to `after` left a later stage referencing a column that stage no longer
+  returns."
+  [before after stage-number]
+  (let [stage-number (lib.util/canonical-stage-index before stage-number)
+        bad-refs     (fn [query]
+                       (let [bad (volatile! #{})]
+                         (lib.walk/walk-clauses
+                          query
+                          (fn [query path-type path clause]
+                            (when (and (= path-type :lib.walk/stage)
+                                       (> (second path) stage-number)
+                                       (vector? clause)
+                                       (= (first clause) :field))
+                              (let [col (lib.walk/apply-f-for-stage-at-path
+                                         lib.field.resolution/resolve-field-ref query path clause)]
+                                (when (or (not col)
+                                          (::lib.field.resolution/fallback-metadata? col)
+                                          (not (:active col true)))
+                                  (vswap! bad conj clause))))
+                            nil))
+                         @bad))]
+    (set/difference (bad-refs after) (bad-refs before))))
+
 (mu/defn with-fields :- ::lib.schema/query
-  "Specify the `:fields` for a query. Pass `nil` or an empty sequence to remove `:fields`."
-  ([xs]
+  "Specify the `:fields` for a query. Pass `nil` or an empty sequence to remove `:fields`.
+
+  Throws if narrowing the projection would strand a reference in a later stage (a column that stage no longer
+  returns)."
+  ([xs :- [:maybe [:sequential ::lib.ref/referenceable]]]
    (fn [query stage-number]
      (with-fields query stage-number xs)))
 
-  ([query xs]
+  ([query :- ::lib.schema/query
+    xs :- [:maybe [:sequential ::lib.ref/referenceable]]]
    (with-fields query -1 xs))
 
   ([query        :- ::lib.schema/query
     stage-number :- :int
-    xs]
+    xs           :- [:maybe [:sequential ::lib.ref/referenceable]]]
    (let [xs        (not-empty (mapv lib.ref/ref xs))
          ;; If any fields are specified, include all expressions not yet included.
          expr-cols (expression-columns query stage-number)
@@ -478,13 +543,18 @@
                          (or xs []))
          ;; Those expr-refs which must still be included.
          to-add    (remove included expr-cols)
-         xs        (when xs (into xs (map lib.ref/ref) to-add))]
-     (lib.util/update-query-stage query stage-number u/assoc-dissoc :fields xs))))
+         xs        (when xs (into xs (map lib.ref/ref) to-add))
+         result    (lib.util/update-query-stage query stage-number u/assoc-dissoc :fields xs)]
+     (when (and xs (lib.util/next-stage-number query stage-number))
+       (when-let [stranded (not-empty (newly-stranded-downstream-refs query result stage-number))]
+         (throw (ex-info "with-fields would strand downstream references to dropped columns"
+                         {:stage-number stage-number, :stranded stranded}))))
+     result)))
 
 (mu/defn fields :- [:maybe [:ref ::lib.schema/fields]]
   "Fetches the `:fields` for a query. Returns `nil` if there are no `:fields`. `:fields` should never be empty; this is
   enforced by the Malli schema."
-  ([query]
+  ([query :- ::lib.schema/query]
    (fields query -1))
 
   ([query        :- ::lib.schema/query
@@ -498,14 +568,13 @@
   Includes a `:selected?` key letting you know this column is already in `:fields` or not; if `:fields` is
   unspecified, all these columns are returned by default, so `:selected?` is true for all columns (this is a little
   strange but it matches the behavior of the QB UI)."
-  ([query]
+  ([query :- ::lib.schema/query]
    (fieldable-columns query -1))
 
   ([query :- ::lib.schema/query
     stage-number :- :int]
    (let [visible-columns (lib.metadata.calculation/visible-columns query
                                                                    stage-number
-                                                                   (lib.util/query-stage query stage-number)
                                                                    {:include-joined?              false
                                                                     :include-expressions?         false
                                                                     :include-implicitly-joinable? false})
@@ -534,25 +603,30 @@
 (defn- include-field [query stage-number column]
   (let [populated  (query-with-fields query stage-number)
         field-refs (fields populated stage-number)
-        match-ref  (lib.equality/find-matching-ref column field-refs)
-        column-ref (lib.ref/ref column)]
-    (if (and match-ref
-             (or (string? (last column-ref))
-                 (integer? (last match-ref))))
-      ;; If the column is already found, do nothing and return the original query.
-      query
-      (lib.util/update-query-stage populated stage-number update :fields conj column-ref))))
+        matching-ref (lib.equality/find-matching-ref column field-refs)]
+    (if matching-ref
+      (do
+        (log/debugf "Column %s already included by an existing ref, doing nothing and returning the original query"
+                    (:id column))
+        query)
+      (let [column-ref (lib.ref/ref column)]
+        (lib.util/update-query-stage populated stage-number update :fields conj column-ref)))))
 
 (defn- add-field-to-join [query stage-number column]
-  (let [column-ref   (lib.ref/ref column)
-        [join field] (first (for [join  (lib.join/joins query stage-number)
+  (let [column-ref (lib.ref/ref column)
+        join-alias (lib.join.util/current-join-alias column)
+        joins (lib.join/joins query stage-number)
+        joins (if-let [join-with-alias (and join-alias
+                                            (m/find-first #(= (:alias %) join-alias) joins))]
+                [join-with-alias]
+                joins)
+        [join field] (first (for [join  joins
                                   :let [joinables (lib.join/joinable-columns query stage-number join)
                                         field     (lib.equality/find-matching-column
                                                    query stage-number column-ref joinables)]
                                   :when field]
                               [join field]))
         join-fields  (lib.join/join-fields join)]
-
     ;; Nothing to do if it's already selected, or if this join already has :fields :all.
     ;; Otherwise, append it to the list of fields.
     (if (or (= join-fields :all)
@@ -575,7 +649,7 @@
                  "hidden in the UI.")))
 
 (mu/defn add-field :- ::lib.schema/query
-  "Adds a given field (`ColumnMetadata`, as returned from eg. [[visible-columns]]) to the fields returned by the query.
+  "Adds a given field (column metadata), as returned from eg. [[visible-columns]]) to the fields returned by the query.
   Exactly what this means depends on the source of the field:
   - Source table/card, previous stage of the query, custom expression, aggregation or breakout:
       - Add it to the `:fields` list
@@ -588,9 +662,9 @@
   (let [stage  (lib.util/query-stage query stage-number)
         source (:lib/source column)]
     (when (and (empty? (:fields stage))
-               (not= source :source/joins))
+               (not (#{:source/implicitly-joinable :source/joins} source)))
       (log/warnf "[add-field] stage :fields is empty, which means everything will already be included; attempt to add %s will no-op"
-                 (pr-str ((some-fn :display-name :name) column))))
+                 (:id column)))
     (-> (case source
           (:source/table-defaults
            :source/card
@@ -610,10 +684,10 @@
         lib.remove-replace/normalize-fields-clauses)))
 
 (defn- remove-matching-ref [column refs]
-  (let [match (or (lib.equality/find-matching-ref column refs {:match-type ::lib.equality/match-type.same-stage})
-                  (log/warnf "Failed to find match for column\n%s\nin refs:\n%s"
-                             (u/pprint-to-str column)
-                             (u/pprint-to-str refs)))]
+  (let [match (or (lib.equality/find-matching-ref column refs)
+                  (log/warnf "[remove-matching-ref] Failed to find match for column %s in %d refs"
+                             (:id column)
+                             (count refs)))]
     (remove #(= % match) refs)))
 
 (defn- exclude-field
@@ -629,17 +703,17 @@
                ;; If we couldn't find the field, return the original query unchanged.
                (< (count new-fields) (count old-fields)) (lib.util/update-query-stage stage-number assoc :fields new-fields))
       (when (= <> query)
-        (log/errorf "[exclude-field] Failed to remove field %s, query is unchanged." (pr-str ((some-fn :display-name :name) column)))))))
+        (log/errorf "[exclude-field] Failed to remove field %s, query is unchanged." (:id column))))))
 
 (defn- remove-field-from-join [query stage-number column]
-  (let [join        (lib.join/resolve-join query stage-number (::lib.join/join-alias column))
+  (let [join        (lib.join/resolve-join query stage-number (:lib/join-alias column))
         join-fields (lib.join/join-fields join)]
     (if (or (nil? join-fields)
             (= join-fields :none))
       ;; Nothing to do if there's already no join fields.
       query
       (let [resolved-join-fields (if (= join-fields :all)
-                                   (map lib.ref/ref (lib.metadata.calculation/returned-columns query stage-number join))
+                                   (map lib.ref/ref (lib.join/join-returned-columns-relative-to-parent-stage query stage-number join))
                                    join-fields)
             removed              (remove-matching-ref column resolved-join-fields)]
         (cond-> query
@@ -677,7 +751,7 @@
                                                         {:query  query
                                                          :stage  stage-number
                                                          :source source}))
-          ;; Default case: do nothing and return the query unchaged.
+          ;; Default case: do nothing and return the query unchanged.
           ;; Generate a warning - we should aim to capture every `:source/*` value above.
           (do
             (log/warnf "Cannot remove-field with unknown source %s" (pr-str source))
@@ -689,24 +763,24 @@
 (mu/defn find-visible-column-for-ref :- [:maybe ::lib.schema.metadata/column]
   "Return the visible column in `query` at `stage-number` referenced by `field-ref`. If `stage-number` is omitted, the
   last stage is used. This is currently only meant for use with `:field` clauses."
-  ([query field-ref]
+  ([query :- ::lib.schema/query
+    field-ref :- [:or ::lib.schema.metadata/column ::lib.schema.ref/ref]]
    (find-visible-column-for-ref query -1 field-ref))
 
   ([query        :- ::lib.schema/query
     stage-number :- :int
-    field-ref    :- some?]
-   (let [stage   (lib.util/query-stage query stage-number)
-         ;; not 100% sure why, but [[lib.metadata.calculation/visible-columns]] doesn't seem to return aggregations,
+    field-ref    :- [:or ::lib.schema.metadata/column ::lib.schema.ref/ref]]
+   (let [;; not 100% sure why, but [[lib.metadata.calculation/visible-columns]] doesn't seem to return aggregations,
          ;; so we have to use [[lib.metadata.calculation/returned-columns]] instead.
          columns ((if (= (lib.dispatch/dispatch-value field-ref) :aggregation)
                     lib.metadata.calculation/returned-columns
                     lib.metadata.calculation/visible-columns)
-                  query stage-number stage)]
+                  query stage-number)]
      (lib.equality/find-matching-column query stage-number field-ref columns))))
 
-(defn json-field?
+(mu/defn json-field? :- :boolean
   "Return true if field is a JSON field, false if not."
-  [field]
+  [field :- [:maybe ::lib.schema.metadata/column]]
   (some? (:nfc-path field)))
 
 ;;; yes, this is intentionally different from the version in `:metabase.lib.schema.metadata/column.has-field-values`.
@@ -724,18 +798,17 @@
 
 (mu/defn infer-has-field-values :- ::field-values-search-info.has-field-values
   "Determine the value of `:has-field-values` we should return for column metadata for frontend consumption to power
-  filter search widgets, either when returned by the the REST API or in MLv2 with [[field-values-search-info]].
+  filter search widgets, either when returned by the the REST API or in Lib with [[field-values-search-info]].
 
   Note that this value is not necessarily the same as the value of `has_field_values` in the application database.
   `has_field_values` may be unset, in which case we will try to infer it. `:auto-list` is not currently understood by
   the FE filter stuff, so we will instead return `:list`; the distinction is not important to it anyway."
-  [{:keys [has-field-values], :as field} :- [:map
-                                             ;; this doesn't use `::lib.schema.metadata/column` because it's stricter
-                                             ;; than we need and the REST API calls this function with optimized Field
-                                             ;; maps that don't include some keys like `:name`
-                                             [:base-type        {:optional true} [:maybe ::lib.schema.common/base-type]]
-                                             [:effective-type   {:optional true} [:maybe ::lib.schema.common/base-type]]
-                                             [:has-field-values {:optional true} [:maybe ::lib.schema.metadata/column.has-field-values]]]]
+  [{:keys [has-field-values], :as field} :- [:or
+                                             ::lib.schema.metadata/column
+                                             [:map {:closed true}
+                                              [:base-type        {:optional true} [:maybe ::lib.schema.common/base-type]]
+                                              [:effective-type   {:optional true} [:maybe ::lib.schema.common/base-type]]
+                                              [:has-field-values {:optional true} [:maybe ::lib.schema.metadata/column.has-field-values]]]]]
   (cond
     ;; if `has_field_values` is set in the DB, use that value; but if it's `auto-list`, return the value as `list` to
     ;; avoid confusing FE code, which can remain blissfully unaware that `auto-list` is a thing

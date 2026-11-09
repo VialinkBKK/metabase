@@ -8,15 +8,19 @@ redirect_from:
 
 > This page covers connecting to MySQL as a _data warehouse_. For using MySQL as Metabase's _application database_, see [Configuring the Metabase application database](../../installation-and-operation/configuring-application-database.md).
 
-To add a database connection, click on the **gear** icon in the top right, and navigate to **Admin settings** > **Databases** > **Add a database**.
+To add a database connection, click the **grid** icon in the top right, and navigate to **Admin** > **Databases** > **Add a database**.
 
 ## Supported versions
 
-Metabase supports the oldest supported version through the latest stable version. See [MySQL end-of-life dates](https://endoflife.software/applications/databases/mysql).
+Metabase supports the oldest supported version through the latest stable version. See [MySQL end-of-life dates](https://endoflife.date/mysql).
 
 ## Edit connection details
 
 You can edit these settings at any time. Just remember to save your changes.
+
+### Connection string
+
+Paste a connection string here to pre-fill the remaining fields below.
 
 ### Display name
 
@@ -38,6 +42,16 @@ The database username for the account that you want to use to connect to your da
 
 The password for the username that you use to connect to the database.
 
+### Use an authentication provider
+
+{% include plans-blockquote.html feature="Authenticating with a provider" %}
+
+Instead of a password, you can authenticate with a supported provider. Only for self-hosted Pro and Enterprise plans.
+
+#### IAM authentication
+
+To connect to Amazon RDS instances using IAM authentication instead of a password, see [IAM authentication for AWS RDS](./aws-rds.md#iam-authentication).
+
 ### Use a secure connection (SSL)
 
 You can paste your server's SSL certification chain.
@@ -50,7 +64,7 @@ See our [guide to SSH tunneling](../ssh-tunnel.md).
 
 For MySQL databases, Metabase can unfold JSON columns into component fields to yield a table where each JSON key becomes a column. JSON unfolding is on by default, but you can turn off JSON unfolding if performance is slow.
 
-If you turn on JSON unfolding, you can also toggle the unfolding for individual columns in [table metadata](../../data-modeling/metadata-editing.md#unfold-json).
+If you turn on JSON unfolding, you can also toggle the unfolding for individual columns in [table metadata](../../data-modeling/metadata/metadata-editing.md#unfold-json).
 
 ### Additional JDBC connection string options
 
@@ -60,7 +74,7 @@ You can append options to the connection string that Metabase uses to connect to
 
 Turn this option **OFF** if people want to click **Run** (the play button) before applying any [Summarize](../../questions/query-builder/summarizing-and-grouping.md) or filter selections.
 
-By default, Metabase will execute a query as soon as you choose an grouping option from the **Summarize** menu or a filter condition from the [drill-through menu](https://www.metabase.com/learn/metabase-basics/querying-and-dashboards/questions/drill-through). If your database is slow, you may want to disable re-running to avoid loading data on each click.
+By default, Metabase will execute a query as soon as you choose a grouping option from the **Summarize** menu or a filter condition from the [drill-through menu](../../questions/visualizations/drill-through.md). If your database is slow, you may want to disable re-running to avoid loading data on each click.
 
 ### Choose when syncs and scans happen
 
@@ -76,7 +90,7 @@ A fingerprinting query examines the first 10,000 rows from each column and uses 
 
 ## Connecting to MySQL 8+ servers
 
-Metabase uses the MariaDB connector to connect to MySQL servers. The MariaDB connector lacks support for MySQL 8's default authentication plugin. In order to connect, you'll need to change the plugin used by the Metabase user:
+Metabase uses the MariaDB connector to connect to MySQL servers. The MariaDB connector lacks support for MySQL 8's default authentication plugin. To connect, you'll need to change the plugin used by the Metabase user:
 
 ```
 mysql_native_password`: `ALTER USER 'metabase'@'%' IDENTIFIED WITH mysql_native_password BY 'thepassword';
@@ -84,7 +98,7 @@ mysql_native_password`: `ALTER USER 'metabase'@'%' IDENTIFIED WITH mysql_native_
 
 ### Unable to log in with correct credentials
 
-**How to detect this:** Metabase fails to connect to your MySQL server with the error message "Looks like the username or password is incorrect", but you're sure that the username and password is correct. You may have created the MySQL user with an allowed host other than the host you're connecting from.
+**How to detect this:** Metabase fails to connect to your MySQL server with the error message "Looks like the username or password is incorrect", but you're sure that the username and password are correct. You may have created the MySQL user with an allowed host other than the host you're connecting from.
 
 For example, if the MySQL server is running in a Docker container, and your `metabase` user was created with `CREATE USER 'metabase'@'localhost' IDENTIFIED BY 'thepassword';`, the `localhost` will be resolved to the Docker container, and not the host machine, causing access to be denied.
 
@@ -169,19 +183,33 @@ mysql:
 
 - You may want to check in with the vendor that's hosting the platform, as Vitess can run into issues returning metadata from the information schema. Metabase needs this metadata to populate its application database; if Metabase can't get that metadata, fields may not appear (or appear empty).
 
-## Model features
+## Passwords with special characters
 
-Choose whether to enable features related to [Metabase models](../../data-modeling/models.md). These features will often require that the database user account, the one you use to connect to your database, has both read and write privileges.
+If your password contains characters that aren't UTF-8, then you might need to add an additional variable to the connection string `passwordCharacterEncoding=<your_encoding_here>`. This ensures that MySQL understands the special characters in the password during authentication.
 
-### Model actions
+## Writable connection
 
-Turn this setting on to allow [actions](../../actions/introduction.md) from models created from this data to be run. Actions are able to read, write, and possibly delete data. Your database user will need write permissions.
+Set up an additional connection used for write operations. See [Writable connections](../writable-connection.md).
 
-### Model persistence
+## Data actions
 
-We'll create tables with model data and refresh them on a schedule you define. To enable [model persistence](../../data-modeling/model-persistence.md), you need to grant this connection's credentials read and write permissions on a schema Metabase provides.
+Turn on **Data actions** to let people run actions on this database: [data actions](../../data-modeling/data-actions.md), actions in [data apps](../../data-apps/build.md), and [model actions](../../data-modeling/models/actions/introduction.md). Actions can read, write, and delete data, so your database user needs write permissions.
+
+## Model persistence
+
+We'll create tables with model data and refresh them on a schedule you define. To enable [model persistence](../../data-modeling/models/model-persistence.md), you need to grant this connection's credentials read and write permissions on a schema Metabase provides.
+
+## Editable table data
+
+Turn this setting **ON** to enable editing of table data directly within Metabase. When enabled, Admins can create, update, and delete records in your tables through Metabase's interface.
+
+Your database connection will need Write permissions to enable this feature. Meaning: the database user account that you use to connect Metabase to your database must have appropriate privileges to modify data in the tables you want to make editable.
+
+See [privileges](../users-roles-privileges.md).
 
 ## Database routing
+
+With database routing, an admin can build a question once using one database, and the question will run its query against a different database with the same schema depending on who is viewing the question.
 
 See [Database routing](../../permissions/database-routing.md).
 
@@ -193,6 +221,6 @@ See [Danger zone](../danger-zone.md).
 
 - [MariaDB](./mariadb.md)
 - [Managing databases](../../databases/connecting.md)
-- [Metadata editing](../../data-modeling/metadata-editing.md)
-- [Models](../../data-modeling/models.md)
+- [Metadata editing](../../data-modeling/metadata/metadata-editing.md)
+- [Models](../../data-modeling/models/models.md)
 - [Setting data access permissions](../../permissions/data.md)

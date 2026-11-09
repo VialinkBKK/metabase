@@ -20,6 +20,7 @@
    [metabase.test.data.sql-jdbc :as sql-jdbc.tx]
    [metabase.test.data.sql-jdbc.execute :as execute]
    [metabase.test.data.sql-jdbc.load-data :as load-data]
+   [metabase.test.data.sql-jdbc.spec :as spec]
    [metabase.util :as u]
    [metabase.util.files :as u.files]
    [metabase.util.malli :as mu]
@@ -49,7 +50,8 @@
                               :type/Integer        "INTEGER"
                               :type/Text           "VARCHAR(1024)"
                               :type/Time           "TIME"
-                              :type/TimeWithTZ     "TIMETZ"}]
+                              :type/TimeWithTZ     "TIMETZ"
+                              :type/UUID           "UUID"}]
   (defmethod sql.tx/field-base-type->sql-type [:vertica base-type] [_ _] sql-type))
 
 (mu/defn- db-name :- :string
@@ -88,6 +90,12 @@
   [& args]
   (apply sql.tx/drop-table-if-exists-cascade-sql args))
 
+(defmethod spec/dbdef->spec :vertica
+  [driver context dbdef]
+  ;; the driver always disables `COPY ... FROM LOCAL`; the test loader needs it
+  (assoc (sql-jdbc.conn/connection-details->spec driver (tx/dbdef->connection-details driver context dbdef))
+         :disablecopylocal "false"))
+
 (defn- dbspec []
   (sql-jdbc.conn/connection-details->spec :vertica @db-connection-details))
 
@@ -121,16 +129,13 @@
   "Dump a sequence of rows (as vectors) to a CSV file."
   [{:keys [field-definitions rows]} ^String filename]
   (try
-    (let [has-custom-pk? (when-let [pk (not-empty (sql.tx/fielddefs->pk-field-names field-definitions))]
-                           (not= ["id"] pk))
+    (let [needs-pk?      (empty? (sql.tx/fielddefs->pk-field-names field-definitions))
           column-names   (cond->> (mapv :field-name field-definitions)
-                           (not has-custom-pk?)
-                           (cons "id"))
+                           needs-pk? (cons "id"))
           rows-with-id (for [[i row] (m/indexed rows)]
                          (cond->> (for [v row]
                                     (value->csv v))
-                           (not has-custom-pk?)
-                           (cons (inc i))))
+                           needs-pk? (cons (inc i))))
 
           csv-rows     (cons column-names rows-with-id)]
       (try
@@ -157,8 +162,8 @@
   "Load rows from a CSV file into a Table."
   [driver                                   :- :keyword
    conn                                     :- (lib.schema.common/instance-of-class java.sql.Connection)
-   {:keys [database-name], :as _dbdef}      :- [:map [:database-name :string]]
-   {:keys [table-name rows], :as _tabledef} :- [:map [:table-name :string]]
+   {:keys [database-name], :as _dbdef}      :- tx/DatabaseDefinitionSchema
+   {:keys [table-name rows], :as _tabledef} :- tx/TableDefinitionSchema
    filename                                 :- :string]
   (let [table-identifier (sql.tx/qualify-and-quote driver database-name table-name)]
     (letfn [(execute! [sql]
@@ -294,10 +299,10 @@
 
 (defonce ^:private ^{:arglists '([driver database])}
   original-describe-database
-  (get-method driver/describe-database :vertica))
+  (get-method driver/describe-database* :vertica))
 
 ;; For test databases, only sync the tables that are qualified by the db name
-(defmethod driver/describe-database :vertica
+(defmethod driver/describe-database* :vertica
   [driver database]
   (if *override-describe-database-to-filter-by-db-name?*
     (let [r                (original-describe-database driver database)
@@ -307,3 +312,5 @@
                                 (filter #(tx/qualified-by-db-name? physical-db-name (:name %)))
                                 tables))))
     (original-describe-database driver database)))
+
+(defmethod sql.tx/generated-column-sql :vertica [_ _] nil)

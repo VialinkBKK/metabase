@@ -1,20 +1,26 @@
 import { useBeforeUnload } from "react-use";
 import { t } from "ttag";
 
-import { useSelector } from "metabase/lib/redux";
-import { PLUGIN_UPLOAD_MANAGEMENT } from "metabase/plugins";
+import CS from "metabase/css/core/index.css";
+import { getUserIsAdmin } from "metabase/current-user";
+import {
+  PLUGIN_AUDIT,
+  PLUGIN_REMOTE_SYNC,
+  PLUGIN_REPLACEMENT,
+  PLUGIN_UPLOAD_MANAGEMENT,
+} from "metabase/plugins";
+import { useSelector } from "metabase/redux";
 import { hasActiveUploads } from "metabase/redux/uploads";
-import { getUserIsAdmin } from "metabase/selectors/user";
 import { useCheckActiveDownloadsBeforeUnload } from "metabase/status/hooks/use-check-active-downloads-before-unload";
+import { Box } from "metabase/ui";
 
-import DatabaseStatus from "../../containers/DatabaseStatus";
+import { DatabaseStatus } from "../DatabaseStatus";
 import { DownloadsStatus } from "../DownloadsStatus";
 import { FileUploadStatus } from "../FileUploadStatus";
 
-import { StatusListingRoot } from "./StatusListing.styled";
-
-const StatusListing = () => {
+export const StatusListing = () => {
   const isAdmin = useSelector(getUserIsAdmin);
+  const { progressModal } = PLUGIN_REMOTE_SYNC.useSyncStatus();
 
   const uploadInProgress = useSelector(hasActiveUploads);
 
@@ -26,14 +32,22 @@ const StatusListing = () => {
   useCheckActiveDownloadsBeforeUnload();
 
   return (
-    <StatusListingRoot data-testid="status-root-container">
-      {isAdmin && <DatabaseStatus />}
-      <FileUploadStatus />
-      <DownloadsStatus />
-      {isAdmin && <PLUGIN_UPLOAD_MANAGEMENT.GdriveSyncStatus />}
-    </StatusListingRoot>
+    <>
+      <Box
+        className={CS.z2}
+        pos="fixed"
+        right="1.5rem"
+        bottom="1.5rem"
+        data-testid="status-root-container"
+      >
+        {isAdmin && <DatabaseStatus />}
+        {isAdmin && <PLUGIN_REPLACEMENT.SourceReplacementStatus />}
+        <FileUploadStatus />
+        <PLUGIN_AUDIT.AnalyticsExportStatus />
+        <DownloadsStatus />
+        {isAdmin && <PLUGIN_UPLOAD_MANAGEMENT.GdriveSyncStatus />}
+      </Box>
+      {progressModal}
+    </>
   );
 };
-
-// eslint-disable-next-line import/no-default-export -- deprecated usage
-export default StatusListing;

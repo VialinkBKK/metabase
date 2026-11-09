@@ -5,9 +5,12 @@ import { t } from "ttag";
 import CS from "metabase/css/core/index.css";
 import { Collapse, Group, Icon, UnstyledButton } from "metabase/ui";
 
-import { PaddedSidebarLink, SidebarHeading } from "../MainNavbar.styled";
+import { SidebarHeading } from "../Sidebar";
+import { SidebarLink } from "../SidebarItems";
 import { trackOnboardingChecklistOpened } from "../analytics";
 import type { SelectedItem } from "../types";
+
+import { useCanAddData } from "./use-can-add-data";
 
 export const GettingStartedSection = ({
   nonEntityItem,
@@ -17,6 +20,7 @@ export const GettingStartedSection = ({
   nonEntityItem: SelectedItem;
   onAddDataModalOpen: () => void;
 }>) => {
+  const canAddData = useCanAddData();
   const [opened, { toggle }] = useDisclosure(true);
 
   const ONBOARDING_URL = "/getting-started";
@@ -29,7 +33,7 @@ export const GettingStartedSection = ({
         gap="sm"
         onClick={toggle}
         component={UnstyledButton}
-        c="text-medium"
+        c="text-secondary"
         mb="sm"
         className={CS.cursorPointer}
       >
@@ -43,19 +47,21 @@ export const GettingStartedSection = ({
         role="tabpanel"
         aria-expanded={opened}
       >
-        <PaddedSidebarLink icon="add_data" onClick={onAddDataModalOpen}>
-          {t`Add data`}
-        </PaddedSidebarLink>
+        {canAddData && (
+          <SidebarLink icon="add_data" onClick={onAddDataModalOpen}>
+            {t`Add your data`}
+          </SidebarLink>
+        )}
 
-        <PaddedSidebarLink
+        <SidebarLink
           icon="learn"
           url={ONBOARDING_URL}
           isSelected={isOnboardingPageSelected}
           onClick={() => trackOnboardingChecklistOpened()}
         >
-          {/* eslint-disable-next-line no-literal-metabase-strings -- We only show this to non-whitelabelled instances */}
+          {/* eslint-disable-next-line metabase/no-literal-metabase-strings -- We only show this to non-whitelabelled instances */}
           {t`How to use Metabase`}
-        </PaddedSidebarLink>
+        </SidebarLink>
 
         {children}
       </Collapse>

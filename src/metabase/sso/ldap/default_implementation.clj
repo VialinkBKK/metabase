@@ -4,13 +4,10 @@
    [clj-ldap.client :as ldap]
    [clojure.string :as str]
    [metabase.premium-features.core :refer [defenterprise-schema]]
-   [metabase.sso.common :as sso.common]
-   [metabase.users.models.user :as user]
    [metabase.util :as u]
    [metabase.util.log :as log]
    [metabase.util.malli :as mu]
-   [metabase.util.malli.schema :as ms]
-   [toucan2.core :as t2])
+   [metabase.util.malli.schema :as ms])
   (:import
    (com.unboundid.ldap.sdk DN Filter LDAPConnectionPool)))
 
@@ -28,7 +25,7 @@
 (def LDAPSettings
   "Options passed to LDAP integration implementations. These are just the various LDAP Settings from
   [[metabase.sso.ldap]], packaged up as a single map so implementations don't need to fetch Setting values directly."
-  [:map
+  [:map {:closed true}
    [:first-name-attribute ms/NonBlankString]
    [:last-name-attribute  ms/NonBlankString]
    [:email-attribute      ms/NonBlankString]
@@ -54,18 +51,13 @@
   (let [options {:scope      :sub
                  :filter     (str/replace user-filter filter-placeholder (Filter/encodeValue ^String username))
                  :size-limit 1}]
-    (log/debugf "Searching for LDAP user %s with user search base %s and options %s"
-                username
-                user-base
-                (u/pprint-to-str options))
+    (log/debugf "Searching for LDAP user with user search base %s" user-base)
     (let [search-result (ldap/search
                          ldap-connection
                          user-base
-                         {:scope      :sub
-                          :filter     (str/replace user-filter filter-placeholder (Filter/encodeValue ^String username))
-                          :size-limit 1})]
-      (log/debugf "LDAP search results: %s" (u/pprint-to-str search-result))
-      (some-> (first search-result) u/lower-case-map-keys))))
+                         options)]
+      (log/debugf "LDAP search returned %d result(s)" (count search-result))
+      (some-> (first search-result) (update-keys (comp u/lower-case-en name))))))
 
 (mu/defn- process-group-membership-filter :- ms/NonBlankString
   "Replace DN and UID placeholders with values returned by the LDAP server."
@@ -95,16 +87,16 @@
 (mu/defn ldap-search-result->user-info :- [:maybe UserInfo]
   "Convert the result "
   [ldap-connection               :- (ms/InstanceOfClass LDAPConnectionPool)
-   {:keys [dn uid], :as result}  :- :map
+   {:strs [dn uid], :as result}  :- (ms/string-keyed-map [:or :string [:sequential :string] [:set :string]])
    {:keys [first-name-attribute
            last-name-attribute
            email-attribute
            sync-groups?]
     :as   settings}              :- LDAPSettings
    group-membership-filter       :- ms/NonBlankString]
-  (let [{first-name (keyword first-name-attribute)
-         last-name  (keyword last-name-attribute)
-         email      (keyword email-attribute)} result]
+  (let [first-name (get result (u/lower-case-en first-name-attribute))
+        last-name  (get result (u/lower-case-en last-name-attribute))
+        email      (get result (u/lower-case-en email-attribute))]
     {:dn         dn
      :first-name first-name
      :last-name  last-name
@@ -112,7 +104,7 @@
      :groups     (when sync-groups?
                    ;; Active Directory and others (like FreeIPA) will supply a `memberOf` overlay attribute for
                    ;; groups. Otherwise we have to make the inverse query to get them.
-                   (or (u/one-or-many (:memberof result))
+                   (or (u/one-or-many (get result "memberof"))
                        (user-groups ldap-connection dn uid settings group-membership-filter)
                        []))}))
 
@@ -130,7 +122,7 @@
 (mu/defn ldap-groups->mb-group-ids :- [:set ms/PositiveInt]
   "Translate a set of a user's group DNs to a set of MB group IDs using the configured mappings."
   [ldap-groups              :- [:maybe [:sequential ms/NonBlankString]]
-   {:keys [group-mappings]} :- [:select-keys LDAPSettings [:group-mappings]]]
+   {:keys [group-mappings]} :- LDAPSettings]
   (-> group-mappings
       (select-keys (map #(DN. (str %)) ldap-groups))
       vals
@@ -139,36 +131,8 @@
 
 (mu/defn all-mapped-group-ids :- [:set ms/PositiveInt]
   "Returns the set of all MB group IDs that have configured mappings."
-  [{:keys [group-mappings]} :- [:select-keys LDAPSettings [:group-mappings]]]
+  [{:keys [group-mappings]} :- LDAPSettings]
   (-> group-mappings
       vals
       flatten
       set))
-
-(defenterprise-schema fetch-or-create-user! :- (ms/InstanceOf :model/User)
-  "Using the `user-info` (from `find-user`) get the corresponding Metabase user, creating it if necessary."
-  metabase-enterprise.sso.integrations.ldap
-  [{:keys [first-name last-name email groups]} :- UserInfo
-   {:keys [sync-groups?], :as settings}        :- LDAPSettings]
-  (let [user     (t2/select-one [:model/User :id :last_login :first_name :last_name :is_active]
-                                :%lower.email (u/lower-case-en email))
-        new-user (if user
-                   (let [old-first-name (:first_name user)
-                         old-last-name  (:last_name user)
-                         user-changes   (merge
-                                         (when (not= first-name old-first-name) {:first_name first-name})
-                                         (when (not= last-name old-last-name) {:last_name last-name}))]
-                     (if (seq user-changes)
-                       (do
-                         (t2/update! :model/User (:id user) user-changes)
-                         (t2/select-one [:model/User :id :last_login :is_active] :id (:id user))) ; Reload updated user
-                       user))
-                   (-> (user/create-new-ldap-auth-user! {:first_name first-name
-                                                         :last_name  last-name
-                                                         :email      email})
-                       (assoc :is_active true)))]
-    (u/prog1 new-user
-      (when sync-groups?
-        (let [group-ids            (ldap-groups->mb-group-ids groups settings)
-              all-mapped-group-ids (all-mapped-group-ids settings)]
-          (sso.common/sync-group-memberships! new-user group-ids all-mapped-group-ids))))))

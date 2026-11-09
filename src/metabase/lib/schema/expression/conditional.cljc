@@ -1,12 +1,14 @@
 (ns metabase.lib.schema.expression.conditional
   "Conditional expressions like `:case` and `:coalesce`."
+  (:refer-clojure :exclude [not-empty #?(:clj doseq)])
   (:require
    [clojure.set :as set]
    [metabase.lib.schema.expression :as expression]
    [metabase.lib.schema.mbql-clause :as mbql-clause]
    [metabase.types.core :as types]
    [metabase.util.malli :as mu]
-   [metabase.util.malli.registry :as mr]))
+   [metabase.util.malli.registry :as mr]
+   [metabase.util.performance :refer [not-empty #?(:clj doseq)]]))
 
 ;;; the logic for calculating the return type of a `:case` or similar statement is not optimal nor perfect. But it
 ;;; should be ok for now and errors on the side of being permissive. See this Slack thread for more info:
@@ -74,6 +76,9 @@
 
 ;;; believe it or not, a `:case` clause really has the syntax [:case {} [[pred1 expr1] [pred2 expr2] ...]]
 ;;; `:if` is an alias to `:case`
+;;
+;; In MBQL 4, the optional default value is part of the options map; in MBQL 5 it is an optional final standalone
+;; value.
 (doseq [tag [:case :if]]
   (mbql-clause/define-mbql-clause
     tag
@@ -86,7 +91,6 @@
                                         #_pred [:ref ::expression/boolean]
                                         #_expr [:ref ::expression/expression]]]]
                                      [:default [:? [:schema [:ref ::expression/expression]]]])])
-
   (defmethod expression/type-of-method tag
     [[_tag _opts pred-expr-pairs default]]
     (let [exprs (concat

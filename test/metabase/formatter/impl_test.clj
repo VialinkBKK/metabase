@@ -268,3 +268,36 @@
         (testing "Should use column-specific GBP currency, not global AUD currency"
           (is (str/starts-with? result "£")
               (str "Expected GBP symbol (£) but got: " result)))))))
+
+(deftest scalar-flag-inserts-currency-inline
+  (testing "When the scalar flag is passed to `number-formatter` it puts the currency inline"
+    (let [column {:id 1
+                  :name "SUBTOTAL"
+                  :field_ref [:field 1 nil]
+                  :effective_type :type/Currency}
+          viz-settings {::mb.viz/column-settings
+                        {{::mb.viz/field-id 1} {::mb.viz/currency "GBP"
+                                                ::mb.viz/currency-style "symbol"
+                                                ::mb.viz/number-style "currency"}}}
+          formatter-fn (formatter/number-formatter column viz-settings true)
+          result (str (formatter-fn 1234.56))]
+      (testing "Should use column-specific GBP currency, not global AUD currency"
+        (is (str/starts-with? result "£")
+            (str "Expected GBP symbol (£) but got: " result))))))
+
+(deftest pivot-make-formatters-inlines-currency-test
+  (testing "Pivot value formatters render the currency symbol inline even when currency-in-header is the default (UXW-4499).
+            In-app pivot tables always show the currency symbol in the cell because measures have no column header to carry it."
+    (let [col {:name "sum" :display_name "Sum" :base_type :type/Float :effective_type :type/Float :field_ref [:aggregation 0]}]
+      (doseq [[label viz] [["currency-in-header unset (default)"
+                            {::mb.viz/column-settings
+                             {{::mb.viz/column-name "sum"} {::mb.viz/number-style "currency"
+                                                            ::mb.viz/currency      "USD"}}}]
+                           ["currency-in-header explicitly true"
+                            {::mb.viz/column-settings
+                             {{::mb.viz/column-name "sum"} {::mb.viz/number-style       "currency"
+                                                            ::mb.viz/currency           "USD"
+                                                            ::mb.viz/currency-in-header true}}}]]]
+        (testing label
+          (let [val-fmt (first (:val-formatters (formatter/make-formatters [col] [] [] [0] viz nil true)))]
+            (is (= "$632.14" (str (val-fmt 632.14))))))))))

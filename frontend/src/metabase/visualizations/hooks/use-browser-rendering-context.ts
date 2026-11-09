@@ -1,42 +1,49 @@
 import { useMemo } from "react";
 
 import { usePalette } from "metabase/common/hooks/use-palette";
-import { getIsNightMode } from "metabase/dashboard/selectors";
-import { color } from "metabase/lib/colors";
-import { measureTextHeight, measureTextWidth } from "metabase/lib/measure-text";
-import { useSelector } from "metabase/lib/redux";
 import { useMantineTheme } from "metabase/ui";
-import { getVisualizationTheme } from "metabase/visualizations/shared/utils/theme";
-import type { RenderingContext } from "metabase/visualizations/types";
+import { color } from "metabase/ui/colors";
+import { getFontFamilyValue } from "metabase/utils/fonts";
+import {
+  measureTextHeight,
+  measureTextWidth,
+} from "metabase/utils/measure-text";
+import {
+  type RenderingContext,
+  getCartesianChartSize,
+  getVisualizationTheme,
+} from "metabase/viz-core";
 
 interface RenderingOptions {
   fontFamily: string;
   isDashboard?: boolean;
-  isFullscreen?: boolean;
+  containerSize?: { width: number; height: number };
 }
 
 export const useBrowserRenderingContext = (
   options: RenderingOptions,
 ): RenderingContext => {
-  const { fontFamily, isDashboard, isFullscreen } = options;
+  const { fontFamily, isDashboard, containerSize } = options;
+  const cartesianSize = getCartesianChartSize(containerSize);
 
   const palette = usePalette();
   const theme = useMantineTheme();
-  const isNightMode = useSelector(getIsNightMode);
 
   return useMemo(() => {
     const style = getVisualizationTheme({
       theme: theme.other,
       isDashboard,
-      isNightMode: isNightMode && isFullscreen,
+      cartesianSize,
     });
 
     return {
       getColor: (name) => color(name, palette),
       measureText: measureTextWidth,
       measureTextHeight,
-      fontFamily: `${fontFamily}, Arial, sans-serif`,
+      fontFamily: getFontFamilyValue(fontFamily),
+      colorScheme: theme.other?.colorScheme ?? "light",
+      cartesianSize,
       theme: style,
     };
-  }, [fontFamily, palette, theme, isDashboard, isNightMode, isFullscreen]);
+  }, [fontFamily, palette, theme, isDashboard, cartesianSize]);
 };

@@ -1,9 +1,10 @@
 const { H } = cy;
 import { SAMPLE_DB_ID, WRITABLE_DB_ID } from "e2e/support/cypress_data";
+import { mainAppLinkText } from "e2e/support/helpers";
 
 describe("issue 26470", { tags: "@external" }, () => {
   beforeEach(() => {
-    H.restore("postgres_12");
+    H.restore("postgres-writable");
     cy.signInAsAdmin();
     cy.request("POST", "/api/persist/enable");
   });
@@ -18,19 +19,19 @@ describe("issue 26470", { tags: "@external" }, () => {
 
     cy.visit(`/admin/databases/${WRITABLE_DB_ID}`);
 
-    cy.findByTestId("database-model-features-section")
+    cy.findByTestId("database-model-persistence-section")
       .findByLabelText("Model persistence")
       .should("not.be.checked")
       .click({ force: true });
     cy.wait("@persist").its("response.statusCode").should("eq", 204);
 
-    cy.findByTestId("database-model-features-section")
+    cy.findByTestId("database-model-persistence-section")
       .findByLabelText("Model persistence")
       .should("be.checked")
       .click({ force: true });
     cy.wait("@unpersist").its("response.statusCode").should("eq", 204);
 
-    cy.findByTestId("database-model-features-section")
+    cy.findByTestId("database-model-persistence-section")
       .findByLabelText("Model persistence")
       .should("not.be.checked");
   });
@@ -60,8 +61,7 @@ describe("issue 21532", () => {
   it("should allow navigating back from admin settings (metabase#21532)", () => {
     cy.visit("/");
 
-    cy.icon("gear").click();
-    H.popover().findByText("Admin settings").click();
+    H.goToAdmin();
     cy.findByTestId("admin-layout-content");
 
     cy.go("back");
@@ -94,56 +94,49 @@ describe("issue 41765", { tags: "@external" }, () => {
     });
   });
 
-  function enterAdmin() {
-    H.appBar().icon("gear").click();
-    H.popover().findByText("Admin settings").click();
-  }
-
-  function exitAdmin() {
-    H.appBar().findByText("Exit admin").click();
-  }
-
   function openWritableDatabaseQuestion() {
     // start new question without navigating
     H.appBar().findByText("New").click();
     H.popover().findByText("Question").click();
 
-    H.entityPickerModal().within(() => {
-      cy.findByText("Tables").click();
+    H.miniPicker().within(() => {
       cy.findByText(WRITABLE_DB_DISPLAY_NAME).click();
       cy.findByText(TEST_TABLE_DISPLAY_NAME).click();
     });
   }
 
-  it(
-    "re-syncing a database should invalidate the table cache (metabase#41765)",
-    { tags: "@flaky" },
-    () => {
-      cy.visit("/");
+  it("re-syncing a database should invalidate the table cache (metabase#41765)", () => {
+    cy.visit("/");
+    cy.findByTestId("loading-indicator").should("not.exist");
 
-      H.queryWritableDB(
-        `ALTER TABLE ${TEST_TABLE} ADD ${COLUMN_NAME} text;`,
-        "postgres",
-      );
+    openWritableDatabaseQuestion();
 
-      openWritableDatabaseQuestion();
+    H.getNotebookStep("data").button("Pick columns").click();
+    H.popover().findByText(COLUMN_DISPLAY_NAME).should("not.exist");
 
-      H.getNotebookStep("data").button("Pick columns").click();
-      H.popover().findByText(COLUMN_DISPLAY_NAME).should("not.exist");
+    H.goToAdmin();
 
-      enterAdmin();
+    H.appBar().findByText("Databases").click();
+    cy.findAllByRole("link").contains(WRITABLE_DB_DISPLAY_NAME).click();
 
-      H.appBar().findByText("Databases").click();
-      cy.findAllByRole("link").contains(WRITABLE_DB_DISPLAY_NAME).click();
-      cy.button("Sync database schema").click();
+    H.queryWritableDB(
+      `ALTER TABLE ${TEST_TABLE} ADD ${COLUMN_NAME} text;`,
+      "postgres",
+    );
 
-      exitAdmin();
-      openWritableDatabaseQuestion();
+    cy.button("Sync database schema").click();
+    H.waitForSyncToFinish({
+      iteration: 0,
+      dbId: WRITABLE_DB_ID,
+      tableName: TEST_TABLE,
+    });
 
-      H.getNotebookStep("data").button("Pick columns").click();
-      H.popover().findByText(COLUMN_DISPLAY_NAME).should("be.visible");
-    },
-  );
+    H.goToMainApp();
+    openWritableDatabaseQuestion();
+
+    H.getNotebookStep("data").button("Pick columns").click();
+    H.popover().findByText(COLUMN_DISPLAY_NAME).should("be.visible");
+  });
 });
 
 describe("(metabase#45042)", () => {
@@ -158,7 +151,7 @@ describe("(metabase#45042)", () => {
     //Ensure tabs are present in normal view
     cy.findByTestId("admin-navbar").within(() => {
       cy.findByRole("link", { name: "Settings" }).should("exist");
-      cy.findByRole("link", { name: "Exit admin" }).should("exist");
+      H.getProfileLink().should("exist");
     });
 
     //Shrink viewport
@@ -166,19 +159,22 @@ describe("(metabase#45042)", () => {
 
     //ensure that hamburger is visible and functional
     cy.findByTestId("admin-navbar").within(() => {
-      cy.findByRole("button", { name: /burger/ })
+      cy.findByRole("button", { name: "Toggle navigation" })
         .should("be.visible")
         .click();
       cy.findByRole("list", { name: "Navigation links" }).should("exist");
       cy.findByRole("link", { name: "Settings" }).should("exist");
-      cy.findByRole("link", { name: "Exit admin" }).should("exist");
     });
 
     // dismiss nav list
-    cy.findByRole("button", { name: /burger/ })
+    cy.findByRole("button", { name: "Toggle navigation" })
       .should("be.visible")
       .click();
     cy.findByRole("list", { name: "Navigation links" }).should("not.exist");
+
+    //ensure that app switcher is visible and functional
+    H.getProfileLink().click();
+    H.popover().findByText(mainAppLinkText).should("exist");
   });
 });
 
@@ -191,9 +187,7 @@ describe("(metabase#46714)", () => {
 
     cy.findByTestId("segment-editor").findByText("Select a table").click();
 
-    H.entityPickerModal().within(() => {
-      cy.findByText("Orders").click();
-    });
+    H.pickEntity({ path: ["Databases", /Sample Database/, "Orders"] });
 
     cy.findByTestId("entity-picker-modal").should("not.exist");
     cy.findByTestId("segment-editor").findByText("Orders").should("be.visible");
@@ -240,7 +234,7 @@ describe("(metabase#46714)", () => {
     cy.findByLabelText("Filter operator")
       .should("have.text", "Between")
       .click();
-    // eslint-disable-next-line no-unsafe-element-filtering
+    // eslint-disable-next-line metabase/no-unsafe-element-filtering
     H.popover().last().findByText("Less than").click();
     cy.findByLabelText("Filter operator").should("have.text", "Less than");
     H.popover().findByPlaceholderText("Enter a number").clear().type("1000");
@@ -250,5 +244,45 @@ describe("(metabase#46714)", () => {
       "have.text",
       "Total is less than 1000",
     );
+  });
+});
+
+describe("issue 45890", () => {
+  beforeEach(() => {
+    H.restore();
+    cy.signInAsAdmin();
+    H.activateToken("pro-self-hosted");
+
+    cy.visit("/admin/performance/databases");
+    H.main()
+      .findByLabelText(/Edit policy for database 'Sample Database'/)
+      .click();
+
+    // The strategy form opens in a side panel; the picker options render in a portal.
+    cy.findByTestId("cache-policy-panel")
+      .findByTestId("cache-strategy-select")
+      .click();
+    cy.findByRole("option", { name: /Schedule/ }).click();
+
+    cy.intercept("PUT", "/api/cache").as("putCacheConfig");
+    cy.findByTestId("cache-policy-panel").button("Save").click();
+    cy.wait("@putCacheConfig");
+  });
+
+  it("should correctly reset caching schedule form when discarding changes", () => {
+    cy.findByTestId("cache-policy-panel").findByLabelText("Frequency").click();
+    H.popover().findByText("weekly").click();
+
+    cy.log("Cancel the dirty form and confirm discarding the changes");
+    cy.findByTestId("cache-policy-panel").button("Cancel").click();
+    cy.findByTestId("confirm-modal").button("Discard").click();
+
+    cy.log("Reopening the form shows the saved schedule, not the draft");
+    H.main()
+      .findByLabelText(/Edit policy for database 'Sample Database'/)
+      .click();
+    cy.findByTestId("cache-policy-panel")
+      .findByLabelText("Frequency")
+      .should("have.value", "hourly");
   });
 });

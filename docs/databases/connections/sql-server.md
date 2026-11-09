@@ -4,7 +4,7 @@ title: SQL Server
 
 # SQL Server
 
-To add a database connection, click on the **gear** icon in the top right, and navigate to **Admin settings** > **Databases** > **Add a database**.
+To add a database connection, click the **grid** icon in the top right, and navigate to **Admin** > **Databases** > **Add a database**.
 
 ## Supported versions
 
@@ -13,6 +13,10 @@ Metabase supports the oldest supported version of SQL Server through the latest 
 ## Settings
 
 You can edit these settings at any time. Just remember to save your changes.
+
+### Connection string
+
+Paste a connection string here to pre-fill the remaining fields below.
 
 ### Display name
 
@@ -44,7 +48,7 @@ The password for the username that you use to connect to the database.
 
 ### Use a secure connection (SSL)
 
-Metabase automatically tries to connect to databases with SSL first, then without if that doesn't work. If it's possible to connect to your database with an SSL connection, Metabase will make that the default setting for your database. If you prefer to connect without this layer of security, you can always change this setting later, but we highly recommend keeping SSL turned on to keep your data secure.
+Metabase automatically tries to connect to databases with SSL first, then without if that doesn't work. If it's possible to connect to your database with an SSL connection, Metabase will make that the default setting for your database. If you prefer to connect without this layer of security, you can always change this setting later, but we recommend keeping SSL turned on to keep your data secure.
 
 ### Use an SSH tunnel
 
@@ -58,7 +62,7 @@ You can append options to the connection string that Metabase uses to connect to
 
 Turn this option **OFF** if people want to click **Run** (the play button) before applying any [Summarize](../../questions/query-builder/summarizing-and-grouping.md) or filter selections.
 
-By default, Metabase will execute a query as soon as you choose an grouping option from the **Summarize** menu or a filter condition from the [drill-through menu](https://www.metabase.com/learn/metabase-basics/querying-and-dashboards/questions/drill-through). If your database is slow, you may want to disable re-running to avoid loading data on each click.
+By default, Metabase will execute a query as soon as you choose a grouping option from the **Summarize** menu or a filter condition from the [drill-through menu](../../questions/visualizations/drill-through.md). If your database is slow, you may want to disable re-running to avoid loading data on each click.
 
 ### Choose when syncs and scans happen
 
@@ -73,13 +77,13 @@ If you've selected **Choose when syncs and scans happen** > **ON**, you'll be ab
 
 ### Scanning for filter values
 
-Metabase can scan the values present in each field in this database to enable checkbox filters in dashboards and questions. This can be a somewhat resource-intensive process, particularly if you have a very large database.
+Metabase can scan the values present in each field in this database to enable checkbox filters in dashboards and questions. This can be a resource-intensive process, particularly if you have a large database.
 
 If you've selected **Choose when syncs and scans happen** > **ON**, you'll see the following options under **Scanning for filter values**:
 
 - **Regularly, on a schedule** allows you to run [scan queries](../sync-scan.md#how-database-scans-work) at a frequency that matches the rate of change to your database. The time is set in the timezone of the server where your Metabase app is running. This is the best option for a small database, or tables with distinct values that get updated often.
 - **Only when adding a new filter widget** is a great option if you want scan queries to run on demand. Turning this option **ON** means that Metabase will only scan and cache the values of the field(s) that are used when a new filter is added to a dashboard or SQL question.
-- **Never, I'll do this manually if I need to** is an option for databases that are either prohibitively large, or which never really have new values added. Use the [Re-scan field values](../sync-scan.md#manually-scanning-column-values) button to run a manual scan and bring your filter values up to date.
+- **Never, I'll do this manually if I need to** is an option for databases that are either prohibitively large, or which rarely have new values added. Use the [Re-scan field values](../sync-scan.md#manually-scanning-column-values) button to run a manual scan and bring your filter values up to date.
 
 ### Periodically refingerprint tables
 
@@ -91,9 +95,22 @@ A fingerprinting query examines the first 10,000 rows from each column and uses 
 
 ## Connecting to Azure SQL
 
-To connect to Azure SQL, you'll need to set the port to 1433.
+To connect to Azure SQL, set the port to 1433. Under **Authentication method**, pick how the server will identify Metabase:
+
+- **SQL Server login**: a traditional username and password. Only works when SQL authentication is enabled on the server.
+- **Azure AD - Service principal**: Metabase authenticates as an [Entra ID app registration](https://learn.microsoft.com/en-us/entra/identity-platform/app-objects-and-service-principals). Fill in the **Client ID** and **Client secret** from the app registration, and grant that service principal `CONNECT` on the target database.
+- **Azure AD - Service principal (certificate)**: Same as service principal, but authenticates with the app registration's certificate.  Upload the **Client certificate**.
+  - If the certificate needs a password, provide the password in **Certificate password**.
+  - If the private key is stored in a separate file, provide the key in **Client key**. If the key is encrypted, fill in its password in **Client key password**.
+- **Azure AD - Managed identity**: This mode only works when Metabase runs inside Azure. Metabase authenticates using the [managed identity](https://learn.microsoft.com/en-us/entra/identity/managed-identities-azure-resources/overview) assigned to the compute that your Metabase is running on (App Service, Container Apps, VM, AKS). To use the default identity, leave **Managed identity client ID** blank. You can also fill in a specific user-assigned managed identity. 
+
+## Writable connection
+
+Set up an additional connection used for write operations. See [Writable connections](../writable-connection.md).
 
 ## Database routing
+
+With database routing, an admin can build a question once using one database, and the question will run its query against a different database with the same schema depending on who is viewing the question.
 
 See [Database routing](../../permissions/database-routing.md).
 
@@ -105,6 +122,6 @@ See [Danger zone](../danger-zone.md).
 
 - [Microsoft JDBC Driver for SQL Server support matrix](https://learn.microsoft.com/en-us/sql/connect/jdbc/microsoft-jdbc-driver-for-sql-server-support-matrix)
 - [Managing databases](../../databases/connecting.md)
-- [Metadata editing](../../data-modeling/metadata-editing.md)
-- [Models](../../data-modeling/models.md)
+- [Metadata editing](../../data-modeling/metadata/metadata-editing.md)
+- [Models](../../data-modeling/models/models.md)
 - [Setting data access permissions](../../permissions/data.md)

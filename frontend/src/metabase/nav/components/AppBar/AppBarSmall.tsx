@@ -1,60 +1,62 @@
-import { useCallback, useState } from "react";
+import cx from "classnames";
+import { type JSX, type ReactNode, useCallback, useState } from "react";
 
+import { Nav as DetailViewNav } from "metabase/detail-view/components";
+import { MetabotAppBarButton } from "metabase/metabot/components/MetabotAppBarButton";
 import { SearchBar } from "metabase/nav/components/search/SearchBar";
-import { PLUGIN_METABOT } from "metabase/plugins";
-import { Flex } from "metabase/ui";
+import { APP_BAR_HEIGHT, APP_SUBHEADER_HEIGHT } from "metabase/nav/constants";
+import type { DetailViewState } from "metabase/redux/store";
+import { Box, Flex } from "metabase/ui";
+import type { SearchResult } from "metabase-types/api";
 
-import CollectionBreadcrumbs from "../../containers/CollectionBreadcrumbs";
-import QuestionLineage from "../../containers/QuestionLineage";
-import { ProfileLink } from "../ProfileLink";
+import { AppSwitcher } from "../AppSwitcher";
+import { SearchButton } from "../search/SearchButton/SearchButton";
 
+import S from "./AppBar.module.css";
 import { AppBarLogo } from "./AppBarLogo";
-import {
-  AppBarHeader,
-  AppBarLogoContainer,
-  AppBarMainContainer,
-  AppBarProfileLinkContainer,
-  AppBarRoot,
-  AppBarSearchContainer,
-  AppBarSubheader,
-  AppBarToggleContainer,
-} from "./AppBarSmall.styled";
 import { AppBarToggle } from "./AppBarToggle";
 
 export interface AppBarSmallProps {
+  detailView: DetailViewState | null;
   isNavBarOpen?: boolean;
   isNavBarEnabled?: boolean;
   isLogoVisible?: boolean;
   isSearchVisible?: boolean;
   isEmbeddingIframe?: boolean;
-  isProfileLinkVisible?: boolean;
+  isAppSwitcherVisible?: boolean;
   isCollectionPathVisible?: boolean;
   isQuestionLineageVisible?: boolean;
+  collectionBreadcrumbs?: ReactNode;
+  questionLineage?: ReactNode;
+  onSearchItemSelect?: (result: SearchResult) => void;
   onToggleNavbar: () => void;
   onCloseNavbar: () => void;
-  onLogout: () => void;
 }
 
-const AppBarSmall = ({
+export const AppBarSmall = ({
+  detailView,
   isNavBarOpen,
   isNavBarEnabled,
   isLogoVisible,
   isSearchVisible,
   isEmbeddingIframe,
-  isProfileLinkVisible,
+  isAppSwitcherVisible,
   isCollectionPathVisible,
   isQuestionLineageVisible,
+  collectionBreadcrumbs,
+  questionLineage,
+  onSearchItemSelect,
   onToggleNavbar,
   onCloseNavbar,
-  onLogout,
 }: AppBarSmallProps): JSX.Element => {
   const isNavBarVisible = isNavBarOpen && isNavBarEnabled;
 
   const [isSearchActive, setSearchActive] = useState(false);
   const isInfoVisible = isQuestionLineageVisible || isCollectionPathVisible;
   const isHeaderVisible =
-    isLogoVisible || isNavBarEnabled || isSearchVisible || isProfileLinkVisible;
+    isLogoVisible || isNavBarEnabled || isSearchVisible || isAppSwitcherVisible;
   const isSubheaderVisible = !isNavBarVisible && isInfoVisible;
+  const isLogoShown = isLogoVisible && !isSearchActive;
 
   const handleSearchActive = useCallback(() => {
     setSearchActive(true);
@@ -66,59 +68,82 @@ const AppBarSmall = ({
   }, []);
 
   return (
-    <AppBarRoot>
+    <Box bg="background_page-primary">
       {isHeaderVisible && (
-        <AppBarHeader isSubheaderVisible={isSubheaderVisible}>
-          <AppBarMainContainer>
-            <AppBarToggleContainer>
+        <Box
+          className={cx(S.navBar, {
+            [S.withBorder]: !isSubheaderVisible,
+          })}
+          pos="relative"
+          h={APP_BAR_HEIGHT}
+          px="lg"
+        >
+          <Flex justify="space-between" align="center" gap="sm" h="100%">
+            <Box flex="0 0 auto">
               <AppBarToggle
                 isSmallAppBar
                 isNavBarEnabled={isNavBarEnabled}
                 isNavBarOpen={isNavBarVisible}
                 onToggleClick={onToggleNavbar}
               />
-            </AppBarToggleContainer>
-            <AppBarSearchContainer>
+            </Box>
+            <Box flex="1 1 auto">
               {isSearchVisible &&
                 (isEmbeddingIframe ? (
                   <SearchBar
                     onSearchActive={handleSearchActive}
                     onSearchInactive={handleSearchInactive}
+                    onSearchItemSelect={onSearchItemSelect}
                   />
                 ) : (
                   <Flex justify="end">
-                    <PLUGIN_METABOT.SearchButton />
+                    <SearchButton />
                   </Flex>
                 ))}
-            </AppBarSearchContainer>
-            {isProfileLinkVisible && (
-              <AppBarProfileLinkContainer>
-                <ProfileLink onLogout={onLogout} />
-              </AppBarProfileLinkContainer>
-            )}
-          </AppBarMainContainer>
-          <AppBarLogoContainer isVisible={isLogoVisible && !isSearchActive}>
+            </Box>
+            {!isEmbeddingIframe && <MetabotAppBarButton />}
+            {isAppSwitcherVisible && <AppSwitcher />}
+          </Flex>
+          <Box
+            className={cx(S.translateCenter, S.logoFade, {
+              [S.hidden]: !isLogoShown,
+            })}
+            opacity={isLogoShown ? 1 : 0}
+            pos="absolute"
+            top="50%"
+            left="50%"
+          >
             <AppBarLogo
               isSmallAppBar
               isLogoVisible={isLogoVisible}
               isNavBarEnabled={isNavBarEnabled}
               onLogoClick={onCloseNavbar}
             />
-          </AppBarLogoContainer>
-        </AppBarHeader>
+          </Box>
+        </Box>
       )}
       {isSubheaderVisible && (
-        <AppBarSubheader isNavBarOpen={isNavBarVisible}>
-          {isQuestionLineageVisible ? (
-            <QuestionLineage />
+        <Box
+          className={cx(S.navBar, S.withTransition, {
+            [S.withBorder]: isNavBarVisible,
+          })}
+          h={APP_SUBHEADER_HEIGHT}
+          py="lg"
+          pr="lg"
+          pl="1.25rem"
+        >
+          {detailView ? (
+            <DetailViewNav
+              rowName={detailView.rowName}
+              table={detailView.table}
+            />
+          ) : isQuestionLineageVisible ? (
+            questionLineage
           ) : isCollectionPathVisible ? (
-            <CollectionBreadcrumbs />
+            collectionBreadcrumbs
           ) : null}
-        </AppBarSubheader>
+        </Box>
       )}
-    </AppBarRoot>
+    </Box>
   );
 };
-
-// eslint-disable-next-line import/no-default-export -- deprecated usage
-export default AppBarSmall;

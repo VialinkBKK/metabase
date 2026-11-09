@@ -1,16 +1,19 @@
 import type { MantineThemeOverride } from "@mantine/core";
 import { rem } from "@mantine/core";
 
-import { DEFAULT_METABASE_COMPONENT_THEME } from "metabase/embedding-sdk/theme";
+import type { ColorSettings } from "metabase-types/api";
 
 import Styles from "./Theme.module.css";
+import { DEFAULT_METABASE_COMPONENT_THEME } from "./component-theme";
 import {
   accordionOverrides,
   actionIconOverrides,
   alertOverrides,
   anchorOverrides,
   autocompleteOverrides,
+  avatarOverrides,
   badgeOverrides,
+  breadcrumbsOverrides,
   buttonOverrides,
   calendarOverrides,
   cardOverrides,
@@ -20,39 +23,111 @@ import {
   comboboxOverrides,
   dateInputOverrides,
   datePickerOverrides,
+  dateTimePickerOverrides,
+  dialogOverrides,
   dividerOverrides,
+  drawerOverrides,
   fileInputOverrides,
+  gridOverrides,
+  groupOverrides,
   hoverCardOverrides,
   inputOverrides,
   kbdOverrides,
   listOverrides,
+  loaderOverrides,
   menuOverrides,
   modalOverrides,
   monthPickerOverrides,
   multiSelectOverrides,
+  nativeSelectOverrides,
   navLinkOverrides,
+  notificationOverrides,
+  numberInputOverrides,
   overlayOverrides,
   paperOverrides,
+  passwordInputOverrides,
   pillOverrides,
   pillsInputOverrides,
   popoverOverrides,
   portalOverrides,
   progressOverrides,
   radioOverrides,
+  ringProgressOverrides,
   scrollAreaOverrides,
   segmentedControlOverrides,
   selectOverrides,
+  simpleGridOverrides,
   skeletonOverrides,
+  sliderOverrides,
+  stackOverrides,
   switchOverrides,
   tabsOverrides,
   textInputOverrides,
   textOverrides,
   textareaOverrides,
   timeInputOverrides,
+  timelineOverrides,
   titleOverrides,
   tooltipOverrides,
 } from "./components";
-import { getThemeColors } from "./utils/colors";
+import { getMantineThemeColors } from "./utils/colors";
+
+// Elevation tokens from the design system.
+/* eslint-disable metabase/no-color-literals */
+const LIGHT_SHADOWS = {
+  xs: "0 1px 3px 0 rgba(0, 0, 0, 0.07)",
+  xs_on_dark: "0 1px 3px 0 rgba(0, 0, 0, 0.20)",
+  xs_outline:
+    "0 0 0 0.5px rgba(0, 0, 0, 0.07), 0 1px 3px 0 rgba(0, 0, 0, 0.07)",
+  sm: "0 1px 4px 0 rgba(0, 0, 0, 0.05), 0 5px 15px 0 rgba(0, 0, 0, 0.10)",
+  sm_outline:
+    "0 0 0 0.5px rgba(0, 0, 0, 0.07), 0 1px 4px 0 rgba(0, 0, 0, 0.05), 0 5px 15px 0 rgba(0, 0, 0, 0.10)",
+  lg_outline:
+    "0 0 0 0.5px rgba(0, 0, 0, 0.07), 0 5px 15px 0 rgba(0, 0, 0, 0.15), 0 30px 60px 0 rgba(0, 0, 0, 0.20)",
+};
+
+const DARK_SHADOWS = {
+  xs: "0 1px 3px 0 rgba(0, 0, 0, 0.20)",
+  xs_on_dark: "0 1px 3px 0 rgba(0, 0, 0, 0.20)",
+  xs_outline:
+    "0 0 0 0.5px rgba(0, 0, 0, 0.15), 0 1px 3px 0 rgba(0, 0, 0, 0.20)",
+  sm: "0 1px 4px 0 rgba(0, 0, 0, 0.07), 0 5px 15px 0 rgba(0, 0, 0, 0.20)",
+  sm_outline:
+    "0 0 0 0.5px rgba(0, 0, 0, 0.15), 0 1px 4px 0 rgba(0, 0, 0, 0.07), 0 5px 15px 0 rgba(0, 0, 0, 0.20)",
+  lg_outline:
+    "0 0 0 0.5px rgba(0, 0, 0, 0.15), 0 5px 15px 0 rgba(0, 0, 0, 0.20), 0 30px 60px 0 rgba(0, 0, 0, 0.40)",
+};
+/* eslint-enable metabase/no-color-literals */
+
+export type ShadowScaleKey = keyof typeof LIGHT_SHADOWS;
+
+// Spacing tokens from the design system.
+const SPACING_SCALE = {
+  xxxs: rem(2),
+  xxs: rem(4),
+  xs: rem(6),
+  sm: rem(8),
+  md: rem(12),
+  lg: rem(16),
+  xl: rem(24),
+  xxl: rem(32),
+  xxxl: rem(40),
+};
+
+export type SpacingScaleKey = keyof typeof SPACING_SCALE;
+
+// Radius tokens from the design system.
+const RADIUS_SCALE = {
+  xxxs: rem(2),
+  xxs: rem(4),
+  xs: rem(6),
+  sm: rem(8),
+  md: rem(12),
+  lg: rem(16),
+  xl: rem(24),
+};
+
+export type RadiusScaleKey = keyof typeof RADIUS_SCALE;
 
 export const breakpoints = {
   xs: "23em",
@@ -63,31 +138,35 @@ export const breakpoints = {
 };
 export type BreakpointName = keyof typeof breakpoints;
 
-export const getThemeOverrides = (): MantineThemeOverride => ({
+export const getThemeOverrides = ({
+  colorScheme = "light",
+  whitelabelColors,
+  forceDynamicBrandRamp,
+}: {
+  colorScheme?: "light" | "dark";
+  whitelabelColors?: ColorSettings | null;
+  forceDynamicBrandRamp?: boolean;
+} = {}): MantineThemeOverride => ({
   focusClassName: Styles.focus,
   breakpoints,
-  colors: getThemeColors(),
-  primaryColor: "brand",
+  colors: getMantineThemeColors({
+    colorScheme,
+    whitelabelColors,
+    forceDynamicBrandRamp,
+  }),
+  primaryColor: "core-brand",
   primaryShade: 0,
+  // Store colorScheme in other property for access later
+  other: {
+    ...DEFAULT_METABASE_COMPONENT_THEME,
+    colorScheme,
+  },
   shadows: {
-    // eslint-disable-next-line no-color-literals
-    sm: "0px 1px 4px 2px rgba(0, 0, 0, 0.08)",
-    // eslint-disable-next-line no-color-literals
-    md: "0px 4px 20px 0px rgba(0, 0, 0, 0.05)",
+    ...(colorScheme === "dark" ? DARK_SHADOWS : LIGHT_SHADOWS),
   },
-  spacing: {
-    xs: rem(4),
-    sm: rem(8),
-    md: rem(16),
-    lg: rem(24),
-    xl: rem(32),
-  },
-  radius: {
-    xs: "4px",
-    sm: "6px",
-    md: "8px",
-    xl: "40px",
-  },
+  spacing: { ...SPACING_SCALE },
+  radius: { ...RADIUS_SCALE },
+  defaultRadius: "xs",
   fontSizes: {
     xs: rem(11),
     sm: rem(12),
@@ -130,15 +209,17 @@ export const getThemeOverrides = (): MantineThemeOverride => ({
       },
     },
   },
-  fontFamily: "var(--mb-default-font-family), sans-serif",
-  fontFamilyMonospace: "Monaco, monospace",
+  fontFamily: "var(--mb-default-font-family)",
+  fontFamilyMonospace: '"JetBrains Mono", monospace',
   components: {
     ...accordionOverrides,
     ...actionIconOverrides,
     ...alertOverrides,
     ...anchorOverrides,
     ...autocompleteOverrides,
+    ...avatarOverrides,
     ...badgeOverrides,
+    ...breadcrumbsOverrides,
     ...buttonOverrides,
     ...calendarOverrides,
     ...cardOverrides,
@@ -148,37 +229,51 @@ export const getThemeOverrides = (): MantineThemeOverride => ({
     ...codeOverrides,
     ...dateInputOverrides,
     ...datePickerOverrides,
+    ...dateTimePickerOverrides,
+    ...dialogOverrides,
     ...dividerOverrides,
+    ...drawerOverrides,
     ...fileInputOverrides,
+    ...gridOverrides,
+    ...groupOverrides,
     ...inputOverrides,
     ...kbdOverrides,
+    ...loaderOverrides,
     ...menuOverrides,
     ...modalOverrides,
     ...monthPickerOverrides,
     ...multiSelectOverrides,
+    ...nativeSelectOverrides,
     ...navLinkOverrides,
+    ...notificationOverrides,
+    ...numberInputOverrides,
     ...radioOverrides,
     ...overlayOverrides,
     ...paperOverrides,
+    ...passwordInputOverrides,
     ...pillOverrides,
     ...pillsInputOverrides,
     ...popoverOverrides,
     ...portalOverrides,
     ...progressOverrides,
+    ...ringProgressOverrides,
     ...scrollAreaOverrides,
     ...segmentedControlOverrides,
+    ...simpleGridOverrides,
     ...skeletonOverrides,
+    ...stackOverrides,
     ...selectOverrides,
+    ...sliderOverrides,
     ...switchOverrides,
     ...tabsOverrides,
     ...textareaOverrides,
     ...textInputOverrides,
     ...textOverrides,
     ...timeInputOverrides,
+    ...timelineOverrides,
     ...titleOverrides,
     ...tooltipOverrides,
     ...hoverCardOverrides,
     ...listOverrides,
   },
-  other: DEFAULT_METABASE_COMPONENT_THEME,
 });

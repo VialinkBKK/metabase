@@ -109,12 +109,26 @@
   Get the score for a result with `score-and-result`, and efficiently get the most relevant results with
   `top-results`.
 
-  Some of the scorers can be tweaked with configuration in [[metabase.search.config]]."
+  Some of the scorers can be tweaked with configuration in [[metabase.search.config]].
+
+  ## Divergence from the appdb engine
+
+  This engine ranks every search the same way, so it ignores the per-context weights in
+  [[metabase.search.config/static-context-weights]].
+  In particular, the `:metabot` and `:data-picker` contexts get none of their ranking behavior here:
+  - Entity types are ordered by [[metabase.search.config/models-search-order]], not by `:model/*` weights,
+    so dashboards outrank metrics and models outrank tables.
+  - Library membership is not scored.
+  - A table's `data_layer` is not scored.
+  - Official-collection and verified scores use their default weights, not the context's boosts.
+
+  Results also omit `curated`."
   (:require
    [clojure.string :as str]
    [java-time.api :as t]
    [metabase.premium-features.core :refer [defenterprise]]
    [metabase.search.config :as search.config]
+   [metabase.search.in-place.search-model :as search-model]
    [metabase.search.in-place.util :as search.util]
    [metabase.util :as u]))
 
@@ -158,8 +172,7 @@
   the text match, if there is one. If there is no match, the score is 0."
   [search-native-query weighted-scorers query-tokens search-result]
   ;; TODO is pmap over search-result worth it?
-  (let [scores (for [column (let [search-columns-fn (requiring-resolve 'metabase.search.in-place.legacy/searchable-columns)]
-                              (search-columns-fn (:model search-result) search-native-query))
+  (let [scores (for [column (search-model/searchable-columns (:model search-result) search-native-query)
                      {:keys [scorer name weight]
                       :as   _ws} weighted-scorers
                      :let [matched-text (-> search-result
@@ -356,18 +369,18 @@
 (defn score-and-result
   "Returns a map with the normalized, combined score from relevant-scores as `:score` and `:result`."
   [result {:keys [search-string search-native-query]}]
-  (let [text-matches    (-> (text-scores-with-match result {:search-string       search-string
-                                                            :search-native-query search-native-query})
-                            (force-weight text-scores-weight))
+  (let [text-matches (-> (text-scores-with-match result {:search-string search-string
+                                                         :search-native-query search-native-query})
+                         (force-weight text-scores-weight))
         has-text-match? (some (comp pos? :score) text-matches)
-        all-scores      (into (vec (score-result result)) text-matches)
+        all-scores (into (vec (score-result result)) text-matches)
         relevant-scores (remove (comp zero? :score) all-scores)
-        total-score     (compute-normalized-score all-scores)]
+        total-score (compute-normalized-score all-scores)]
     ;; Searches with a blank search string mean "show me everything, ranked";
     ;; see https://github.com/metabase/metabase/pull/15604 for archived search.
     ;; If the search string is non-blank, results with no text match have a score of zero.
     (when (or has-text-match? (str/blank? search-string))
-      {:score  total-score
+      {:score total-score
        :result (assoc result :all-scores all-scores :relevant-scores relevant-scores)})))
 
 (defn compare-score

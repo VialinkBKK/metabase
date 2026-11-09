@@ -1,6 +1,9 @@
 (ns metabase.util.malli.describe-test
   "Additional tests for this live in [[metabase.util.malli-test]]."
   (:require
+   #?@(:clj
+       ([metabase.lib.schema]
+        [metabase.util :as u]))
    [clojure.test :refer [are deftest is testing]]
    [metabase.util.malli.describe :as umd]
    [metabase.util.malli.registry :as mr]))
@@ -59,4 +62,9 @@
          (umd/describe ::cons)))
   (is (mr/validate ::map {:k :child, :parent {:k :parent}}))
   (is (= "map where {:k -> <keyword>, :parent (optional) -> <recursive :metabase.util.malli.describe-test/map>}"
-         (umd/describe ::map))))
+         (umd/describe ::map)))
+  #?(:clj
+     ;; this is a smoke test against runaway ref expansion (see `max-depth` in [[umd]]), which used to make this take
+     ;; literal minutes -- it is not a performance budget. The timeout is generous because this test is `^:parallel`
+     ;; and so competes for the thread pool with everything else; actual cost is ~175ms.
+     (is (string? (u/with-timeout 5000 (umd/describe :metabase.lib.schema/query))))))

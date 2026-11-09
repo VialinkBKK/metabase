@@ -1,20 +1,34 @@
+import cx from "classnames";
 import { t } from "ttag";
 
-import { FormMessageStyled } from "./FormMessage.styled";
+import { Box } from "metabase/ui";
+import { isObject } from "metabase-types/guards";
 
-type Response = {
+import S from "./FormMessage.module.css";
+
+export type Response = {
   status: number;
   data?: {
     message?: string;
   };
 };
 
+function isResponse(value: unknown): value is Response {
+  return (
+    isObject(value) &&
+    "status" in value &&
+    typeof value.status === "number" &&
+    (value.data === undefined ||
+      (isObject(value.data) && typeof value.data.message === "string"))
+  );
+}
+
 interface FormMessageProps {
   className?: string;
   message?: string;
   noPadding?: boolean;
   formSuccess?: Response;
-  formError?: Response;
+  formError?: unknown;
 }
 
 const getMessage = ({
@@ -34,15 +48,16 @@ const getMessage = ({
 /**
  * @deprecated
  */
-export const getErrorMessage = (formError?: Response) => {
-  if (formError) {
-    if (formError.data && formError.data.message) {
+export const getErrorMessage = (formError?: unknown) => {
+  if (isResponse(formError)) {
+    if (formError.data?.message) {
       return formError.data.message;
     } else if (formError.status >= 400) {
       return t`Server error encountered`;
-    } else {
-      return t`Unknown error encountered`;
     }
+  }
+  if (formError) {
+    return t`Unknown error encountered`;
   }
 };
 
@@ -62,13 +77,14 @@ export function FormMessage({
 }: FormMessageProps) {
   const treatedMessage = getMessage({ message, formSuccess, formError });
   return (
-    <FormMessageStyled
-      className={className}
-      visible={!!message}
-      noPadding={noPadding}
-      hasSucceeded={!!formSuccess}
+    <Box
+      component="span"
+      className={cx(S.root, className, { [S.visible]: Boolean(message) })}
+      c={formSuccess ? "feedback-positive" : "feedback-negative"}
+      pb={noPadding ? undefined : "lg"}
+      w="100%"
     >
       {treatedMessage}
-    </FormMessageStyled>
+    </Box>
   );
 }

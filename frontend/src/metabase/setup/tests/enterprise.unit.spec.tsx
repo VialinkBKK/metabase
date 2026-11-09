@@ -1,8 +1,12 @@
 import userEvent from "@testing-library/user-event";
 import fetchMock from "fetch-mock";
 
-import { setupForTokenCheckEndpoint } from "__support__/server-mocks";
+import {
+  setupForTokenCheckEndpoint,
+  setupMetabaseManagedAiEndpoints,
+} from "__support__/server-mocks";
 import { screen, waitFor } from "__support__/ui";
+import { createMockTokenFeatures } from "metabase-types/api/mocks";
 
 import { trackLicenseTokenStepSubmitted } from "../analytics";
 
@@ -14,9 +18,9 @@ import {
   getSection,
   selectUsageReason,
   setup,
-  skipLanguageStep,
   skipTokenStep,
   skipWelcomeScreen,
+  startAiConfigStep,
   submitUserInfoStep,
 } from "./setup";
 
@@ -28,7 +32,7 @@ jest.mock("../analytics", () => ({
 const setupEnterprise = (opts?: SetupOpts) => {
   return setup({
     ...opts,
-    hasEnterprisePlugins: true,
+    enterprisePlugins: "*", // we need the license and currently it's enabled at import time with setupEnterprisePlugins :/,
   });
 };
 
@@ -36,19 +40,14 @@ const sampleToken = "a".repeat(64);
 const airgapToken = "airgap_toucan";
 
 describe("setup (EE build, but no token)", () => {
-  beforeEach(() => {
-    fetchMock.reset();
-  });
-
   it("default step order should be correct, with the license step and data usage steps", async () => {
     await setupEnterprise();
     await skipWelcomeScreen();
-    expectSectionToHaveLabel("What's your preferred language?", "1");
-    expectSectionToHaveLabel("What should we call you?", "2");
-    expectSectionToHaveLabel("What will you use Metabase for?", "3");
-    expectSectionToHaveLabel("Add your data", "4");
-    expectSectionToHaveLabel("Activate your commercial license", "5");
-    expectSectionToHaveLabel("Usage data preferences", "6");
+    expectSectionToHaveLabel("What should we call you?", "1");
+    expectSectionToHaveLabel("What will you use Metabase for?", "2");
+    expectSectionToHaveLabel("Add your data", "3");
+    expectSectionToHaveLabel("Activate your commercial license", "4");
+    expectSectionToHaveLabel("Usage data preferences", "5");
 
     expectSectionsToHaveLabelsInOrder();
   });
@@ -57,7 +56,6 @@ describe("setup (EE build, but no token)", () => {
     async function setupForLicenseStep() {
       await setupEnterprise();
       await skipWelcomeScreen();
-      await skipLanguageStep();
       await submitUserInfoStep();
       await selectUsageReason("embedding"); // to skip the db connection step
       await clickNextStep();
@@ -166,6 +164,44 @@ describe("setup (EE build, but no token)", () => {
       });
     });
   });
+
+  describe("AI config step with the managed AI offer", () => {
+    it("should offer the managed provider and ask the admin to accept the terms", async () => {
+      await setupEnterprise({
+        tokenFeatures: createMockTokenFeatures({
+          hosting: true,
+          "offer-metabase-ai-managed": true,
+        }),
+      });
+      setupMetabaseManagedAiEndpoints();
+
+      await skipWelcomeScreen();
+      await submitUserInfoStep();
+      await selectUsageReason("self-service-analytics");
+      await clickNextStep();
+      await userEvent.click(
+        await screen.findByText("Continue with sample data"),
+      );
+      await startAiConfigStep();
+      await userEvent.click(
+        await screen.findByRole("button", { name: "Metabase AI service" }),
+      );
+
+      expect(
+        await screen.findByText(
+          /The simplest way to get started with AI in Metabase/,
+        ),
+      ).toBeInTheDocument();
+      expect(
+        await screen.findByRole("checkbox", {
+          name: /I agree with the Metabase AI Service/i,
+        }),
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByText("Please ask an Admin user to enable this for you."),
+      ).not.toBeInTheDocument();
+    });
+  });
 });
 
 const input = () => screen.getByRole("textbox", { name: "Token" });
@@ -181,6 +217,8 @@ const submit = async () => {
   await userEvent.click(await submitBtn());
 
   const settingEndpoint = "path:/api/setting/premium-embedding-token";
-  await waitFor(() => expect(fetchMock.done(settingEndpoint)).toBe(true));
-  return fetchMock.lastCall(settingEndpoint);
+  await waitFor(() =>
+    expect(fetchMock.callHistory.done(settingEndpoint)).toBe(true),
+  );
+  return fetchMock.callHistory.lastCall(settingEndpoint);
 };

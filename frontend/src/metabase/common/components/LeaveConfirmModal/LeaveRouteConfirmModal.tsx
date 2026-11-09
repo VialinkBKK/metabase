@@ -1,34 +1,49 @@
-import type { Location } from "history";
-import type { InjectedRouter, Route } from "react-router";
-import { withRouter } from "react-router";
+import { useEffect } from "react";
+import { usePrevious } from "react-use";
 
 import { useConfirmRouteLeaveModal } from "metabase/common/hooks/use-confirm-route-leave-modal";
+import type { Location } from "metabase/router";
 
 import { LeaveConfirmModal } from "./LeaveConfirmModal";
 
 interface LeaveRouteConfirmModalProps {
   isEnabled: boolean;
   isLocationAllowed?: (location?: Location) => boolean;
-  route: Route;
-  router: InjectedRouter;
+  isBlocking?: (location?: Location) => boolean;
+  onConfirm?: () => void;
+  onOpenChange?: (opened: boolean) => void;
 }
 
-const _LeaveRouteConfirmModal = ({
+export const LeaveRouteConfirmModal = ({
   isEnabled,
   isLocationAllowed,
-  route,
-  router,
+  isBlocking,
+  onConfirm,
+  onOpenChange,
 }: LeaveRouteConfirmModalProps) => {
   const { opened, close, confirm } = useConfirmRouteLeaveModal({
     isEnabled,
     isLocationAllowed,
-    route,
-    router,
+    isBlocking,
   });
+  const previousIsOpened = usePrevious(opened);
+
+  useEffect(() => {
+    if (previousIsOpened !== opened) {
+      onOpenChange?.(opened);
+    }
+  }, [opened, previousIsOpened, onOpenChange]);
+
+  const handleConfirm = () => {
+    confirm();
+    onConfirm?.();
+  };
 
   return (
-    <LeaveConfirmModal onConfirm={confirm} onClose={close} opened={opened} />
+    <LeaveConfirmModal
+      onConfirm={handleConfirm}
+      onClose={close}
+      opened={opened}
+    />
   );
 };
-
-export const LeaveRouteConfirmModal = withRouter(_LeaveRouteConfirmModal);

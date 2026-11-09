@@ -1,3 +1,7 @@
+import {
+  getDeduplicatedTableColumnSettings,
+  insertNewColumnSettings,
+} from "metabase/viz-core";
 import * as Lib from "metabase-lib";
 import {
   getColumnKey,
@@ -38,30 +42,42 @@ export function syncVizSettingsWithSeries(
   settings: VisualizationSettings,
   newQuery: Lib.Query,
   newSeries: Series,
-  oldSeries: Series,
+  oldSeries?: Series,
 ): VisualizationSettings {
   if (!isNativeQuery(newQuery)) {
     return settings;
   }
 
   const [newSingleSeries] = newSeries;
-  const [oldSingleSeries] = oldSeries;
+  const [oldSingleSeries] = oldSeries ?? [];
   if (!isValidSeries(newSingleSeries) || !isValidSeries(oldSingleSeries)) {
     return settings;
   }
 
   const newColumns = getSeriesColumns(newSingleSeries);
   const oldColumns = getSeriesColumns(oldSingleSeries);
-  return syncVizSettings(settings, newColumns, oldColumns);
+  return syncVizSettings(settings, newColumns, oldColumns, {
+    placeNewColumnsInQueryOrder: true,
+  });
 }
+
+export type SyncVizSettingsOpts = {
+  placeNewColumnsInQueryOrder?: boolean;
+};
 
 export function syncVizSettings(
   settings: VisualizationSettings,
   newColumns: ColumnInfo[],
   oldColumns: ColumnInfo[],
+  options: SyncVizSettingsOpts = {},
 ): VisualizationSettings {
   let nextSettings = settings;
-  nextSettings = syncTableColumns(nextSettings, newColumns, oldColumns);
+  nextSettings = syncTableColumns(
+    nextSettings,
+    newColumns,
+    oldColumns,
+    options,
+  );
   nextSettings = syncColumnSettings(nextSettings, newColumns, oldColumns);
   nextSettings = syncGraphMetrics(nextSettings, newColumns, oldColumns);
   nextSettings = syncPivotColumnSplit(nextSettings, newColumns, oldColumns);
@@ -106,6 +122,7 @@ type SyncColumnsOpts<T> = {
   setColumnName: (setting: T, newName: string) => T;
   createSetting: (column: ColumnInfo) => T;
   shouldCreateSetting?: (column: ColumnInfo) => boolean | undefined;
+  placeNewColumnsInQueryOrder?: boolean;
 };
 
 function syncColumns<T>({
@@ -116,6 +133,7 @@ function syncColumns<T>({
   setColumnName,
   createSetting,
   shouldCreateSetting = () => false,
+  placeNewColumnsInQueryOrder = false,
 }: SyncColumnsOpts<T>): T[] {
   const newNameByKey = Object.fromEntries(
     newColumns.map((column) => [column.key, column.name]),
@@ -138,16 +156,23 @@ function syncColumns<T>({
     return settings;
   }, []);
   const remappedNames = new Set(remappedSettings.map(getColumnName));
-  const addedSettings = newColumns
-    .filter(
-      (column) =>
-        !oldNameByKey[column.key] &&
-        !remappedNames.has(column.name) &&
-        shouldCreateSetting(column),
-    )
-    .map(createSetting);
+  const isNewColumn = (column: ColumnInfo) =>
+    !oldNameByKey[column.key] &&
+    !remappedNames.has(column.name) &&
+    shouldCreateSetting(column);
 
-  return [...remappedSettings, ...addedSettings];
+  if (!placeNewColumnsInQueryOrder) {
+    return [
+      ...remappedSettings,
+      ...newColumns.filter(isNewColumn).map(createSetting),
+    ];
+  }
+
+  return insertNewColumnSettings(remappedSettings, newColumns, {
+    getColumnName,
+    isNewColumn,
+    createSetting,
+  });
 }
 
 type SyncColumnNamesOpts = {
@@ -178,6 +203,7 @@ function syncTableColumns(
   settings: VisualizationSettings,
   newColumns: ColumnInfo[],
   oldColumns: ColumnInfo[],
+  { placeNewColumnsInQueryOrder }: SyncVizSettingsOpts,
 ): VisualizationSettings {
   const columnSettings = settings["table.columns"];
   if (!columnSettings) {
@@ -187,13 +213,14 @@ function syncTableColumns(
   return {
     ...settings,
     "table.columns": syncColumns({
-      settings: columnSettings,
+      settings: getDeduplicatedTableColumnSettings(columnSettings),
       newColumns,
       oldColumns,
       getColumnName: (setting) => setting.name,
       setColumnName: (setting, newName) => ({ ...setting, name: newName }),
       createSetting: (column) => ({ name: column.name, enabled: true }),
       shouldCreateSetting: () => true,
+      placeNewColumnsInQueryOrder,
     }),
   };
 }

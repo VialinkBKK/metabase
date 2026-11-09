@@ -1,58 +1,82 @@
-import { goBack, push } from "react-router-redux";
-import _ from "underscore";
+import { t } from "ttag";
 
-import Collections from "metabase/entities/collections";
-import TimelineEvents from "metabase/entities/timeline-events";
-import Timelines from "metabase/entities/timelines";
-import { connect } from "metabase/lib/redux";
-import * as Urls from "metabase/lib/urls";
-import MoveEventModal from "metabase/timelines/common/components/MoveEventModal";
+import {
+  skipToken,
+  useGetCollectionQuery,
+  useGetTimelineEventQuery,
+  useListTimelinesQuery,
+} from "metabase/api";
+import type { ModalComponentProps } from "metabase/common/components/ModalRoute";
+import { useNavigate } from "metabase/router";
+import { MoveEventForm } from "metabase/timelines/common/components/MoveEventForm";
+import {
+  TimelineModal,
+  TimelineModalLoadingState,
+} from "metabase/timelines/common/components/TimelineModal";
+import { useSetTimeline } from "metabase/timelines/common/hooks";
+import * as Urls from "metabase/urls";
 import type { Timeline, TimelineEvent } from "metabase-types/api";
-import type { State } from "metabase-types/store";
 
-import LoadingAndErrorWrapper from "../../components/LoadingAndErrorWrapper";
-import type { ModalParams } from "../../types";
+function MoveEventModalContainer({ params, onClose }: ModalComponentProps) {
+  const setTimeline = useSetTimeline();
+  const navigate = useNavigate();
+  const eventId = Urls.extractEntityId(params.timelineEventId);
+  const collectionId = Urls.extractCollectionId(params.slug);
+  const {
+    data: event,
+    isLoading: isEventLoading,
+    error: eventError,
+  } = useGetTimelineEventQuery(eventId ?? skipToken);
+  const {
+    data: timelines = [],
+    isLoading: isTimelinesLoading,
+    error: timelinesError,
+  } = useListTimelinesQuery({ include: "events" });
+  const {
+    data: collection,
+    isLoading: isCollectionLoading,
+    error: collectionError,
+  } = useGetCollectionQuery(
+    collectionId != null ? { id: collectionId } : skipToken,
+  );
 
-interface MoveEventModalProps {
-  params: ModalParams;
+  const handleSubmit = async (
+    event: TimelineEvent,
+    newTimeline?: Timeline,
+    oldTimeline?: Timeline,
+  ) => {
+    if (newTimeline) {
+      await setTimeline(event, newTimeline);
+    }
+    if (oldTimeline) {
+      navigate(Urls.timelineInCollection(oldTimeline));
+    }
+  };
+
+  const isLoading = isEventLoading || isTimelinesLoading || isCollectionLoading;
+  const error = eventError ?? timelinesError ?? collectionError;
+
+  return (
+    <TimelineModal
+      title={event ? t`Move ${event.name}` : undefined}
+      onClose={onClose}
+      animated={false}
+      tall
+    >
+      {isLoading || error || !event ? (
+        <TimelineModalLoadingState loading={isLoading} error={error} />
+      ) : (
+        <MoveEventForm
+          event={event}
+          timelines={timelines}
+          collection={collection}
+          onSubmit={handleSubmit}
+          onCancel={onClose}
+        />
+      )}
+    </TimelineModal>
+  );
 }
 
-const timelinesProps = {
-  query: { include: "events" },
-  LoadingAndErrorWrapper,
-};
-
-const timelineEventProps = {
-  id: (state: State, props: MoveEventModalProps) =>
-    Urls.extractEntityId(props.params.timelineEventId),
-  entityAlias: "event",
-  LoadingAndErrorWrapper,
-};
-
-const collectionProps = {
-  id: (state: State, props: MoveEventModalProps) =>
-    Urls.extractCollectionId(props.params.slug),
-  LoadingAndErrorWrapper,
-};
-
-const mapDispatchToProps = (dispatch: any) => ({
-  onSubmit: async (
-    event: TimelineEvent,
-    newTimeline: Timeline,
-    oldTimeline: Timeline,
-  ) => {
-    await dispatch(TimelineEvents.actions.setTimeline(event, newTimeline));
-    dispatch(push(Urls.timelineInCollection(oldTimeline)));
-  },
-  onCancel: () => {
-    dispatch(goBack());
-  },
-});
-
 // eslint-disable-next-line import/no-default-export -- deprecated usage
-export default _.compose(
-  Timelines.loadList(timelinesProps),
-  TimelineEvents.load(timelineEventProps),
-  Collections.load(collectionProps),
-  connect(null, mapDispatchToProps),
-)(MoveEventModal);
+export default MoveEventModalContainer;

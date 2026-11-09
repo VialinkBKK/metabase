@@ -2,27 +2,24 @@ import cx from "classnames";
 import { useCallback, useMemo, useState } from "react";
 import _ from "underscore";
 
-import Radio from "metabase/common/components/Radio";
 import CS from "metabase/css/core/index.css";
-import { Stack } from "metabase/ui";
-import { updateSeriesColor } from "metabase/visualizations/lib/series";
+import { Box, Stack, Tabs } from "metabase/ui";
 import {
+  SERIES_SETTING_KEY,
+  type Widget,
   getComputedSettings,
+  getSettingDefinitionsForColumn,
   getSettingsWidgets,
-} from "metabase/visualizations/lib/settings";
-import { getSettingDefinitionsForColumn } from "metabase/visualizations/lib/settings/column";
-import { keyForSingleSeries } from "metabase/visualizations/lib/settings/series";
+  keyForSingleSeries,
+  updateSeriesColor,
+} from "metabase/viz-core";
 import { getColumnKey } from "metabase-lib/v1/queries/utils/column-key";
 import type { DatasetColumn } from "metabase-types/api";
 
 import ChartSettingsWidgetList from "../../ChartSettingsWidgetList";
 import { ChartSettingsWidgetPopover } from "../../ChartSettingsWidgetPopover";
-import type { Widget } from "../types";
 
-import {
-  ChartSettingsListContainer,
-  SectionContainer,
-} from "./BaseChartSettings.styled";
+import S from "./BaseChartSettings.module.css";
 import { useChartSettingsSections } from "./hooks";
 import type { BaseChartSettingsProps } from "./types";
 
@@ -41,7 +38,7 @@ export const BaseChartSettings = ({
   const {
     chartSettingCurrentSection,
     currentSectionHasColumnSettings,
-    sectionNames,
+    orderedSectionNames,
     setCurrentSection,
     showSectionPicker,
     visibleWidgets,
@@ -78,16 +75,19 @@ export const BaseChartSettings = ({
     [chartSettings, series],
   );
 
-  const styleWidget = useMemo(() => {
+  const styleWidget = useMemo<Widget | null>(() => {
     const seriesSettingsWidget =
       currentWidget &&
-      widgets.find((widget) => widget.id === "series_settings");
+      widgets.find((widget) => widget.id === SERIES_SETTING_KEY);
 
     const display = transformedSeries?.[0]?.card?.display;
-    // In the pie the chart, clicking on the "measure" settings menu will only
+    // In the pie and treemap charts, clicking on the "measure" settings menu will only
     // open a formatting widget, and we don't want the style widget (used only
     // for dimension) to override that
-    if (display === "pie" && currentWidget?.id === "column_settings") {
+    if (
+      (display === "pie" || display === "treemap") &&
+      currentWidget?.id === "column_settings"
+    ) {
       return null;
     }
 
@@ -136,7 +136,7 @@ export const BaseChartSettings = ({
     return null;
   }, [computedSettings, currentWidget, transformedSeries, widgets]);
 
-  const formattingWidget = useMemo(() => {
+  const formattingWidget = useMemo<Widget | null>(() => {
     const widget =
       currentWidget && widgets.find((widget) => widget.id === currentWidget.id);
 
@@ -173,9 +173,11 @@ export const BaseChartSettings = ({
   }, []);
 
   const handleChangeSeriesColor = useCallback(
-    (seriesKey: string, color: string) => {
+    (seriesKey: string, hexValue: string, colorName?: string) => {
       if (chartSettings) {
-        onChange?.(updateSeriesColor(chartSettings, seriesKey, color));
+        onChange?.(
+          updateSeriesColor(chartSettings, seriesKey, hexValue, colorName),
+        );
       }
     },
     [chartSettings, onChange],
@@ -201,26 +203,37 @@ export const BaseChartSettings = ({
         {...stackProps}
       >
         {showSectionPicker && (
-          <SectionContainer>
-            <Radio
-              value={chartSettingCurrentSection ?? undefined}
+          <Box className={S.sectionContainer} w="100%" pt="lg" px="xl">
+            <Tabs
+              listBorder={false}
+              value={chartSettingCurrentSection ?? null}
               onChange={handleShowSection}
-              options={sectionNames}
-              optionNameFn={(v) => v}
-              optionValueFn={(v) => v}
-              optionKeyFn={(v) => v}
-              variant="underlined"
-            />
-          </SectionContainer>
+            >
+              <Tabs.List>
+                {orderedSectionNames.map((sectionName) => (
+                  <Tabs.Tab key={sectionName} value={sectionName}>
+                    {sectionName}
+                  </Tabs.Tab>
+                ))}
+              </Tabs.List>
+            </Tabs>
+          </Box>
         )}
-        <ChartSettingsListContainer data-testid="chartsettings-list-container">
+        <Box
+          className={S.listContainer}
+          data-testid="chartsettings-list-container"
+          pos="relative"
+          pt="xl"
+          flex={1}
+        >
           <ChartSettingsWidgetList
             widgets={visibleWidgets}
             extraWidgetProps={extraWidgetProps}
           />
-        </ChartSettingsListContainer>
+        </Box>
       </Stack>
       <ChartSettingsWidgetPopover
+        // Unjustified type cast. FIXME
         anchor={popoverRef as HTMLElement}
         widgets={[styleWidget, formattingWidget].filter(
           (widget): widget is Widget => !!widget,

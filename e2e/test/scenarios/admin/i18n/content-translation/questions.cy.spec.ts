@@ -1,14 +1,14 @@
 import { SAMPLE_DATABASE } from "e2e/support/cypress_sample_database";
 import { NORMAL_USER_ID } from "e2e/support/cypress_sample_instance_data";
+import { uploadTranslationDictionaryViaAPI } from "e2e/support/helpers/e2e-content-translation-helpers";
 
-import { germanFieldNames } from "./constants";
-import { uploadTranslationDictionaryViaAPI } from "./helpers/e2e-content-translation-helpers";
+import { germanFieldNames } from "./helpers/constants";
 
 const { PRODUCTS_ID } = SAMPLE_DATABASE;
 
 const { H } = cy;
 
-describe("scenarios > content translation > static embedding > questions", () => {
+describe("scenarios > content translation > guest embeds > questions", () => {
   describe("ee", () => {
     beforeEach(() => {
       cy.intercept("POST", "/api/ee/content-translation/upload-dictionary").as(
@@ -16,12 +16,13 @@ describe("scenarios > content translation > static embedding > questions", () =>
       );
     });
 
+    // Unjustified type cast. FIXME
     let productsQuestionId = null as unknown as number;
 
     before(() => {
       H.restore();
       cy.signInAsAdmin();
-      H.activateToken("bleeding-edge");
+      H.activateToken("pro-self-hosted");
 
       H.createQuestion(
         {
@@ -41,6 +42,7 @@ describe("scenarios > content translation > static embedding > questions", () =>
       });
     });
 
+    // Unjustified type cast. FIXME
     let visitEmbeddedQuestion = null as unknown as ({
       locale,
     }: {
@@ -48,6 +50,7 @@ describe("scenarios > content translation > static embedding > questions", () =>
     }) => void;
 
     beforeEach(() => {
+      // Unjustified type cast. FIXME
       H.restore("snapshot-for-questions" as any);
       visitEmbeddedQuestion = ({ locale }) => {
         H.visitEmbeddedPage(

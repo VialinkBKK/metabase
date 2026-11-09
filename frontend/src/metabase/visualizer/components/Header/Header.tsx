@@ -2,9 +2,8 @@ import { useCallback } from "react";
 import { t } from "ttag";
 import _ from "underscore";
 
-import EditableText from "metabase/common/components/EditableText";
-import { trackSimpleEvent } from "metabase/lib/analytics";
-import { useDispatch, useSelector } from "metabase/lib/redux";
+import { EditableText } from "metabase/common/components/EditableText";
+import { useDispatch, useSelector } from "metabase/redux";
 import { ActionIcon, Button, Flex, Icon, Tooltip } from "metabase/ui";
 import { useVisualizerHistory } from "metabase/visualizer/hooks/use-visualizer-history";
 import {
@@ -17,6 +16,10 @@ import { setTitle } from "metabase/visualizer/visualizer.slice";
 import type { VisualizerVizDefinition } from "metabase-types/api";
 
 import { useVisualizerUi } from "../VisualizerUiContext";
+import {
+  trackVisualizerCloseClicked,
+  trackVisualizerSaveClicked,
+} from "../analytics";
 
 import S from "./Header.module.css";
 
@@ -47,10 +50,7 @@ export function Header({
   const dispatch = useDispatch();
 
   const handleSave = () => {
-    trackSimpleEvent({
-      event: "visualizer_save_clicked",
-      triggered_from: "visualizer-modal",
-    });
+    trackVisualizerSaveClicked();
 
     onSave(
       _.pick(visualizerState, ["display", "columnValuesMapping", "settings"]),
@@ -68,13 +68,16 @@ export function Header({
 
   return (
     <Flex
-      p="md"
-      gap="md"
+      p="lg"
+      gap="lg"
       align="center"
       className={className}
       data-testid="visualizer-header"
     >
-      <ActionIcon onClick={() => setDataSidebarOpen((isOpen) => !isOpen)}>
+      <ActionIcon
+        variant="subtle"
+        onClick={() => setDataSidebarOpen((isOpen) => !isOpen)}
+      >
         <Icon name="sidebar_open" />
       </ActionIcon>
       <EditableText
@@ -89,51 +92,41 @@ export function Header({
       {/* Spacer */}
       <div style={{ flexGrow: 1 }} />
 
-      <Button.Group>
+      <Button.Group flex="0 0 auto">
         <Tooltip withinPortal={false} label={t`Undo`}>
           <Button
-            size="sm"
             aria-label={t`Undo`}
             disabled={!canUndo}
             onClick={undo}
             leftSection={
-              <Icon
-                name="undo"
-                color={canUndo ? "unset" : "var(--mb-color-text-light)"}
-              />
+              <Icon name="undo" c={canUndo ? "none" : "text-disabled"} />
             }
           />
         </Tooltip>
         <Tooltip withinPortal={false} label={t`Redo`}>
           <Button
-            size="sm"
             aria-label={t`Redo`}
             disabled={!canRedo}
             onClick={redo}
             leftSection={
-              <Icon
-                name="redo"
-                color={canRedo ? "unset" : "var(--mb-color-text-light)"}
-              />
+              <Icon name="redo" c={canRedo ? "unset" : "text-disabled"} />
             }
           />
         </Tooltip>
       </Button.Group>
       <Button
         variant="filled"
-        size="sm"
+        flex="0 0 auto"
         disabled={!saveButtonEnabled}
         onClick={handleSave}
       >
         {saveLabel ?? t`Add to dashboard`}
       </Button>
       <ActionIcon
+        variant="subtle"
         data-testid="visualizer-close-button"
         onClick={() => {
-          trackSimpleEvent({
-            event: "visualizer_close_clicked",
-            triggered_from: "visualizer-modal",
-          });
+          trackVisualizerCloseClicked();
           onClose();
         }}
       >

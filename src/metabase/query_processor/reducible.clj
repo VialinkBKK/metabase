@@ -1,8 +1,6 @@
 (ns metabase.query-processor.reducible
   (:require
    [clojure.core.async :as a]
-   [metabase.analytics.core :as analytics]
-   [metabase.driver :as driver]
    [metabase.lib.schema.common :as lib.schema.common]
    [metabase.query-processor.pipeline :as qp.pipeline]
    [metabase.query-processor.schema :as qp.schema]
@@ -16,7 +14,7 @@
   "Default function returning a reducing function. Results are returned in the 'standard' map format e.g.
 
     {:data {:cols [...], :rows [...]}, :row_count ...}"
-  [metadata]
+  [metadata :- ::qp.schema/metadata]
   (let [row-count (volatile! 0)
         rows      (volatile! (transient []))]
     (fn default-rf
@@ -26,7 +24,6 @@
       ([result]
        {:pre [(map? (unreduced result))]}
        ;; if the result is a clojure.lang.Reduced, unwrap it so we always get back the standard-format map
-       (analytics/inc! :metabase-query-processor/query {:driver driver/*driver* :status "success"})
        (-> (unreduced result)
            (assoc :row_count @row-count
                   :status :completed)
@@ -42,10 +39,11 @@
 
   `row-thunk` is a function that, when called, should return the next row in the results, or falsey if no more rows
   exist."
-  ([row-thunk]
+  ([row-thunk :- fn?]
    (reducible-rows row-thunk qp.pipeline/*canceled-chan*))
 
-  ([row-thunk canceled-chan]
+  ([row-thunk     :- fn?
+    canceled-chan :- [:maybe (lib.schema.common/instance-of-class clojure.core.async.impl.channels.ManyToManyChannel)]]
    (reify
      clojure.lang.IReduceInit
      (reduce [_ rf init]
@@ -96,24 +94,22 @@
   [primary-rf     :- ::qp.schema/rf
    additional-rfs :- [:sequential ::qp.schema/rf]
    combine        :- ifn?]
-  (let [additional-accs (volatile! (perf/mapv (fn [rf] (rf))
-                                              additional-rfs))]
+  (let [additional-rfs (vec additional-rfs)
+        ^objects additional-accs (perf/mapa (fn [rf] (rf)) additional-rfs)]
     (fn combine-additional-reducing-fns-rf*
       ([] (primary-rf))
 
       ([acc]
-       (let [additional-results (perf/mapv (fn [rf acc]
-                                             (rf (unreduced acc)))
-                                           additional-rfs
-                                           @additional-accs)]
-         (apply combine acc additional-results)))
+       (areduce additional-accs i _ nil
+                (let [rf (nth additional-rfs i)
+                      acc (aget additional-accs i)]
+                  (aset additional-accs i (rf (unreduced acc)))))
+       (apply combine acc (clojure.lang.LazilyPersistentVector/createOwning additional-accs)))
 
       ([acc x]
-       (vswap! additional-accs (fn [accs]
-                                 (perf/mapv (fn [rf acc]
-                                              (if (reduced? acc)
-                                                acc
-                                                (rf acc x)))
-                                            additional-rfs
-                                            accs)))
+       (areduce additional-accs i _ nil
+                (let [rf (nth additional-rfs i)
+                      acc (aget additional-accs i)]
+                  (when-not (reduced? acc)
+                    (aset additional-accs i (rf acc x)))))
        (primary-rf acc x)))))

@@ -1,28 +1,32 @@
 (ns ^:mb/driver-tests metabase.driver.starburst-test
+  {:clj-kondo/config '{:linters {:deprecated-var {:exclude {metabase.test.data/mbql-query {:namespaces [metabase.driver.starburst-test]}
+                                                            metabase.test.data/run-mbql-query {:namespaces [metabase.driver.starburst-test]}}}}}}
   (:require
    [clojure.string :as str]
    [clojure.test :refer :all]
    [java-time.api :as t]
-   [metabase.api.common :as api]
    [metabase.driver :as driver]
    [metabase.driver.common.table-rows-sample :as table-rows-sample]
    [metabase.driver.sql-jdbc.connection :as sql-jdbc.conn]
    [metabase.driver.sql-jdbc.execute :as sql-jdbc.execute]
+   [metabase.driver.sql-jdbc.sync.interface :as sql-jdbc.sync.interface]
    [metabase.driver.sql.query-processor :as sql.qp]
    [metabase.driver.starburst :as starburst]
-   [metabase.query-processor :as qp]
-   [metabase.query-processor-test.timezones-test :as timezones-test]
+   [metabase.driver.util :as driver.u]
+   [metabase.lib.metadata :as lib.metadata]
    [metabase.query-processor.compile :as qp.compile]
+   [metabase.query-processor.test :as qp]
+   [metabase.query-processor.timezones-test :as timezones-test]
    [metabase.sync.core :as sync]
    [metabase.test :as mt]
    [metabase.test.data.interface :as tx]
    [metabase.test.data.sql-jdbc :as sql-jdbc.tx]
    [metabase.test.fixtures :as fixtures]
-   [metabase.warehouses.api :as api.database]
+   [metabase.warehouses.core :as warehouses]
    [toucan2.core :as t2]
    [toucan2.tools.with-temp :as t2.with-temp])
   (:import
-   (java.sql Connection)))
+   (java.sql Connection PreparedStatement ResultSet SQLException)))
 
 (set! *warn-on-reflection* true)
 
@@ -33,18 +37,58 @@
   [_]
   (alter-var-root #'timezones-test/broken-drivers conj :starburst))
 
+(deftest have-select-privilege-mixed-tables-test
+  (testing "have-select-privilege? correctly handles mixed Hive/Iceberg tables (Issue #63127)"
+    (testing "Returns true when DESCRIBE succeeds (compatible table type)"
+      (let [mock-conn (reify Connection
+                        (getCatalog [_] "hive")
+                        (prepareStatement [_ sql]
+                          (is (= "DESCRIBE \"hive\".\"sales_data\".\"hive_table\"" sql))
+                          (reify PreparedStatement
+                            (executeQuery [_]
+                              (reify ResultSet
+                                (next [_] true)
+                                (close [_] nil)))
+                            (close [_] nil))))]
+        (is (true? (sql-jdbc.sync.interface/have-select-privilege?
+                    :starburst mock-conn "sales_data" "hive_table")))))
+    (testing "Returns false when DESCRIBE fails with UNSUPPORTED_TABLE_TYPE error (incompatible table type like Iceberg in Hive catalog)"
+      (let [mock-conn (reify Connection
+                        (getCatalog [_] "hive")
+                        (prepareStatement [_ sql]
+                          (is (= "DESCRIBE \"hive\".\"sales_data\".\"iceberg_table\"" sql))
+                          (reify PreparedStatement
+                            (executeQuery [_]
+                              ;; This simulates the actual Trino error when Hive catalog tries to describe an Iceberg table
+                              ;; The error code 133001 corresponds to UNSUPPORTED_TABLE_TYPE in Trino's StandardErrorCode
+                              (throw (SQLException. "Cannot query Iceberg table 'sales_data.iceberg_table'" nil 133001)))
+                            (close [_] nil))))]
+        (is (false? (sql-jdbc.sync.interface/have-select-privilege?
+                     :starburst mock-conn "sales_data" "iceberg_table")))))
+    (testing "Returns false for non-mixed-catalog errors"
+      (let [mock-conn (reify Connection
+                        (getCatalog [_] "hive")
+                        (prepareStatement [_ sql]
+                          (is (= "DESCRIBE \"hive\".\"sales_data\".\"restricted_table\"" sql))
+                          (reify PreparedStatement
+                            (executeQuery [_]
+                              (throw (SQLException. "Access Denied: Cannot access table restricted_table" nil 42000)))
+                            (close [_] nil))))]
+        (is (false? (sql-jdbc.sync.interface/have-select-privilege?
+                     :starburst mock-conn "sales_data" "restricted_table")))))))
+
 (deftest describe-database-test
   (mt/test-driver :starburst
     (is (= {:tables #{{:name "categories" :schema "default"}
                       {:name "venues" :schema "default"}
                       {:name "checkins" :schema "default"}
                       {:name "users" :schema "default"}}}
-           (-> (driver/describe-database :starburst (mt/db))
-               (update :tables (comp set (partial filter (comp #{"categories"
-                                                                 "venues"
-                                                                 "checkins"
-                                                                 "users"}
-                                                               :name)))))))))
+           (-> (driver/describe-database :starburst (lib.metadata/database (mt/metadata-provider)))
+               (update :tables #(into #{} (filter (comp #{"categories"
+                                                          "venues"
+                                                          "checkins"
+                                                          "users"}
+                                                        :name)) %)))))))
 
 (deftest describe-table-test
   (mt/test-driver :starburst
@@ -76,7 +120,7 @@
                        :database-type "integer"
                        :base-type     :type/Integer
                        :database-position 0}}}
-           (driver/describe-table :starburst (mt/db) (t2/select-one :model/Table :id (mt/id :venues)))))))
+           (driver/describe-table :starburst (lib.metadata/database (mt/metadata-provider)) (t2/select-one :model/Table :id (mt/id :venues)))))))
 
 (deftest table-rows-sample-test
   (mt/test-driver :starburst
@@ -114,7 +158,7 @@
   (mt/test-driver :starburst
     (testing "If global timezone is 'SYSTEM', should use system timezone"
       (is (= "UTC"
-             (driver/db-default-timezone driver/*driver* (mt/db)))))))
+             (driver/db-default-timezone driver/*driver* (lib.metadata/database (mt/metadata-provider))))))))
 
 (deftest template-tag-timezone-test
   (mt/test-driver :starburst
@@ -191,7 +235,7 @@
         (t2.with-temp/with-temp [:model/Database db {:engine :starburst, :name "Temp starburst JDBC Schema DB", :details with-schema}]
           (mt/with-db db
             ;; same as test_data, but with schema, so should NOT pick up venues, users, etc.
-            (sync/sync-database! db)
+            (sync/sync-database! (:id db))
             (is (= [{:name t, :schema s, :db_id (mt/id)}]
                    (map #(select-keys % [:name :schema :db_id]) (t2/select :model/Table :db_id (mt/id)))))))
         (execute-ddl! [(format "DROP TABLE %s.%s" s t)
@@ -204,25 +248,46 @@
       ;; the others (ex: :auto_run_queries and :refingerprint) are one level up (fields in the model, not in the details
       ;; JSON blob)
       (let [db-details (assoc (:details (mt/db)) :let-user-control-scheduling false)]
-        (is (nil? (api.database/test-database-connection :starburst db-details)))))))
+        (is (nil? (warehouses/test-database-connection :starburst db-details)))))))
 
 (deftest kerberos-properties-test
   (testing "Kerberos related properties are set correctly"
-    (let [details {:host                         "starburst-server"
-                   :port                         7778
-                   :catalog                      "my-catalog"
-                   :kerberos                     true
-                   :ssl                          true
-                   :kerberos-config-path         "/path/to/krb5.conf"
-                   :kerberos-principal           "alice@DOMAIN.COM"
-                   :kerberos-remote-service-name "HTTP"
-                   :kerberos-keytab-path         "/path/to/client.keytab"
-                   :kerberos-delegation          true}
-          jdbc-spec (sql-jdbc.conn/connection-details->spec :starburst details)]
-      (is (= (str "//starburst-server:7778/my-catalog?KerberosPrincipal=alice@DOMAIN.COM"
-                  "&KerberosRemoteServiceName=HTTP&KerberosKeytabPath=/path/to/client.keytab"
-                  "&KerberosConfigPath=/path/to/krb5.conf&KerberosDelegation=true")
-             (:subname jdbc-spec))))))
+    (mt/with-temp-env-var-value! [mb-readable-paths "/path/to"]
+      (let [details {:host                         "starburst-server"
+                     :port                         7778
+                     :catalog                      "my-catalog"
+                     :kerberos                     true
+                     :ssl                          true
+                     :kerberos-config-path         "/path/to/krb5.conf"
+                     :kerberos-principal           "alice@DOMAIN.COM"
+                     :kerberos-remote-service-name "HTTP"
+                     :kerberos-keytab-path         "/path/to/client.keytab"
+                     :kerberos-delegation          true}
+            jdbc-spec (sql-jdbc.conn/connection-details->spec :starburst details)]
+        (is (= (str "//starburst-server:7778/my-catalog?KerberosPrincipal=alice@DOMAIN.COM"
+                    "&KerberosRemoteServiceName=HTTP&KerberosKeytabPath=/path/to/client.keytab"
+                    "&KerberosConfigPath=/path/to/krb5.conf&KerberosDelegation=true")
+               (:subname jdbc-spec)))))))
+
+(deftest kerberos-file-paths-must-be-readable-test
+  (testing "the Kerberos keytab, config and credential-cache paths are files on the Metabase host an admin types in, so
+            they have to be somewhere `readable-paths` allows"
+    (let [details {:host "starburst-server" :port 7778 :catalog "my-catalog" :kerberos true :ssl true
+                   :kerberos-principal "alice@DOMAIN.COM"}
+          spec    #(sql-jdbc.conn/connection-details->spec :starburst (merge details %))]
+      (mt/with-temp-env-var-value! [mb-readable-paths "/allowed-dir"]
+        (doseq [extra [{:kerberos-keytab-path "/etc/krb5.keytab"}
+                       {:kerberos-config-path "/etc/krb5.conf"}
+                       {:kerberos-credential-cache-path "/tmp/../etc/krb5cc"}
+                       {:kerberos-credential-cache-path "FILE:/etc/krb5cc"}]]
+          (testing (pr-str extra)
+            (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Reading from path is disallowed" (spec extra)))))
+        (testing "paths inside an allowed directory, and credential caches that are not files, are accepted"
+          (doseq [extra [{:kerberos-keytab-path "/allowed-dir/client.keytab"
+                          :kerberos-config-path "/allowed-dir/krb5.conf"}
+                         {:kerberos-credential-cache-path "FILE:/allowed-dir/krb5cc"}
+                         {:kerberos-credential-cache-path "KEYRING:persistent:1000"}]]
+            (is (map? (spec extra)) (pr-str extra))))))))
 
 (deftest source-property-test
   (testing "source property is set correctly"
@@ -272,17 +337,6 @@
             (testing description
               (is (= [expected (- expected)] (query x y unit))))))))))
 
-(deftest impersonation-properties-test
-  (testing "Impersonation related properties are set correctly"
-    (let [details {:host                         "starburst-server"
-                   :port                         7778
-                   :catalog                      "my-catalog"
-                   :ssl                          true
-                   :impersonation                true}
-          jdbc-spec (sql-jdbc.conn/connection-details->spec :starburst details)]
-      (is (= "impersonate:true"
-             (:clientInfo jdbc-spec))))))
-
 (defn prepared-statements-helper
   [prepared-optimized]
   (let [details (merge (:details (mt/db))
@@ -323,56 +377,48 @@
 (deftest prepared-statements
   (mt/test-driver :starburst
     (testing "Make sure prepared statements work"
-        ;; If impersonation is set, then the starburst user should be the current Metabase user, i.e. metabase_user@user.com
-        ;; The role is ignored as Metabase users may not have the role defined in the database connection
+      ;; If impersonation is set, then the starburst user should be the current Metabase user, i.e. metabase_user@user.com
+      ;; The role is ignored as Metabase users may not have the role defined in the database connection
       (prepared-statements-helper true)
       (prepared-statements-helper false))))
 
-(deftest impersonation-query
+(deftest optimized-prepared-statement-is-closed-test
   (mt/test-driver :starburst
-    (testing "Make sure the right credentials are used depending on the impersonation checkbox"
-      (binding [api/*current-user* (atom {:email "metabase_user@user.com"})]
-        ;; By default the starburst user should the user defined in the database connection, i.e. "metabase"
-        (is (= [["metabase"]]
-               (mt/rows
-                (qp/process-query
-                 (mt/native-query {:query "SELECT current_user"})))))
+    (testing "can check isClosed on optimized prepared statement"
+      (sql-jdbc.execute/do-with-connection-with-options
+       driver/*driver* (mt/id) nil
+       (fn [^Connection conn]
+         (let [stmt (.prepareStatement conn "select 1" ResultSet/TYPE_FORWARD_ONLY ResultSet/CONCUR_READ_ONLY)
+               ^PreparedStatement prepared-stmt (#'starburst/proxy-optimized-prepared-statement driver/*driver* conn stmt [])]
+           (is (false? (.isClosed prepared-stmt)))
+           (.close stmt)
+           (is (true? (.isClosed prepared-stmt)))))))))
 
-        (let [details (assoc (:details (mt/db)) :impersonation true)]
-          (t2.with-temp/with-temp [:model/Database db {:engine :starburst, :name "Temp starburst JDBC Schema DB", :details details}]
-            (mt/with-db db
-              (is (= [["metabase_user@user.com"]]
-                     (mt/rows
-                      (qp/process-query
-                       (mt/native-query {:query "SELECT current_user"}))))))))
+(deftest have-select-privilege-doesnt-throw-test
+  (mt/test-driver :starburst
+    (testing "have-select-privilege? returns true if table exists"
+      (sql-jdbc.execute/do-with-connection-with-options
+       driver/*driver*
+       (mt/id)
+       nil
+       (fn [^Connection conn]
+         (is (true?
+              (sql-jdbc.sync.interface/have-select-privilege? driver/*driver* conn "default" "products"))))))
+    (testing "have-select-privilege? returns false if table does not exist"
+      (sql-jdbc.execute/do-with-connection-with-options
+       driver/*driver*
+       (mt/id)
+       nil
+       (fn [^Connection conn]
+         (is (false?
+              (sql-jdbc.sync.interface/have-select-privilege? driver/*driver* conn "default" "fake_table"))))))))
 
-        ;; If impersonation is set, then the starburst user should be the current Metabase user, i.e. metabase_user@user.com
-        ;; The role is ignored as Metabase users may not have the role defined in the database connection
-        ;; Because database user = metabase user, the role is passed in the starburst query
-        ;; This is expected to fail as the starburst container doesn't support roles
-        (let [details (assoc (:details (mt/db))
-                             :user "metabase_user@user.com"
-                             :roles "sysadmin"
-                             :impersonation true)]
-          (t2.with-temp/with-temp [:model/Database db {:engine :starburst, :name "Temp starburst JDBC Schema DB", :details details}]
-            (mt/with-db db
-              (is (thrown-with-msg?
-                   Exception
-                   #"Access Denied: Cannot set role sysadmin"
-                   (qp/process-query
-                    (mt/native-query {:query "SELECT current_user"})))))))
-
-        ;; With impersonation disabled the role is passed in the starburst query
-        ;; This is expected to fail as the starburst container doesn't support roles
-        (let [details (assoc (:details (mt/db))
-                             :user "metabase_user@user.com"
-                             :user "admin"
-                             :roles "sysadmin"
-                             :impersonation false)]
-          (t2.with-temp/with-temp [:model/Database db {:engine :starburst, :name "Temp starburst JDBC Schema DB", :details details}]
-            (mt/with-db db
-              (is (thrown-with-msg?
-                   Exception
-                   #"Access Denied: Cannot set role sysadmin"
-                   (qp/process-query
-                    (mt/native-query {:query "SELECT current_user"})))))))))))
+(deftest ^:parallel url-building-details-reject-separators-test
+  (doseq [details [{:host "localhost" :port 8080 :catalog "c" :schema "a?b"}
+                   {:host "localhost" :port 8080 :catalog "c" :schema "a%26b"}]]
+    (testing (pr-str details)
+      (is (=? {:status-code 400}
+              (try (driver.u/validate-connection-parameters! :starburst details)
+                   nil
+                   (catch clojure.lang.ExceptionInfo e
+                     (ex-data e))))))))

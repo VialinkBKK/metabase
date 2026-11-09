@@ -1,9 +1,14 @@
-import { ORDERS_COUNT_QUESTION_ID } from "e2e/support/cypress_sample_instance_data";
+import {
+  ORDERS_COUNT_QUESTION_ID,
+  ORDERS_QUESTION_ID,
+} from "e2e/support/cypress_sample_instance_data";
+import { embedModalEnableEmbedding } from "e2e/support/helpers";
 
 import {
   assertDashboard,
   assertRecentItemName,
   getEmbedSidebar,
+  getResourceSelectorButton,
   visitNewEmbedPage,
 } from "./helpers";
 
@@ -12,18 +17,22 @@ const { H } = cy;
 const suiteTitle =
   "scenarios > embedding > sdk iframe embed setup > select embed experience";
 
-H.describeWithSnowplow(suiteTitle, () => {
+describe(suiteTitle, () => {
   beforeEach(() => {
     H.restore();
     H.resetSnowplow();
     cy.signInAsAdmin();
-    H.activateToken("bleeding-edge");
+    H.activateToken("pro-self-hosted");
     H.enableTracking();
-    H.updateSetting("enable-embedding-simple", true);
+
+    H.updateSetting("enable-embedding-modular", true);
+    H.setupAnthropicLlmProvider();
 
     cy.intercept("GET", "/api/dashboard/*").as("dashboard");
     cy.intercept("POST", "/api/card/*/query").as("cardQuery");
-    cy.intercept("GET", "/api/activity/recents?*").as("recentActivity");
+    cy.intercept("GET", "/api/activity/recents?context=selections*").as(
+      "recentActivity",
+    );
   });
 
   afterEach(() => {
@@ -37,7 +46,33 @@ H.describeWithSnowplow(suiteTitle, () => {
       visitNewEmbedPage();
       assertRecentItemName("dashboard", dashboardName);
 
+      H.expectUnstructuredSnowplowEvent({ event: "embed_wizard_opened" });
       H.waitForSimpleEmbedIframesToLoad();
+
+      getEmbedSidebar().within(() => {
+        cy.findByLabelText("Guest").click();
+      });
+      embedModalEnableEmbedding();
+
+      getEmbedSidebar().within(() => {
+        cy.findByText("Select a dashboard to embed").should("be.visible");
+
+        cy.log("a default dashboard is preselected");
+        getResourceSelectorButton().should("contain", dashboardName);
+
+        cy.findByText("Next").click();
+      });
+
+      H.expectUnstructuredSnowplowEvent({
+        event: "embed_wizard_experience_completed",
+        event_detail:
+          "authType=guest-embed,experience=dashboard,isDefaultExperience=true",
+      });
+
+      H.expectUnstructuredSnowplowEvent({
+        event: "embed_wizard_resource_selection_completed",
+        event_detail: "isDefaultResource=true,experience=dashboard",
+      });
 
       H.getSimpleEmbedIframeContent().within(() => {
         cy.log("dashboard title is visible");
@@ -57,15 +92,23 @@ H.describeWithSnowplow(suiteTitle, () => {
 
       visitNewEmbedPage();
       assertRecentItemName("card", questionName);
+      H.expectUnstructuredSnowplowEvent({ event: "embed_wizard_opened" });
 
-      getEmbedSidebar().findByText("Chart").click();
+      getEmbedSidebar().within(() => {
+        cy.findByLabelText("Guest").click();
+      });
+      embedModalEnableEmbedding();
 
-      H.expectUnstructuredSnowplowEvent({
-        event: "embed_wizard_experience_selected",
-        event_detail: "chart",
+      getEmbedSidebar().within(() => {
+        cy.findByText("Chart").click();
+        cy.findByText("Next").click();
       });
 
-      cy.wait("@cardQuery");
+      H.expectUnstructuredSnowplowEvent({
+        event: "embed_wizard_experience_completed",
+        event_detail:
+          "authType=guest-embed,experience=chart,isDefaultExperience=false",
+      });
 
       H.getSimpleEmbedIframeContent().within(() => {
         cy.log("question title is visible");
@@ -73,20 +116,69 @@ H.describeWithSnowplow(suiteTitle, () => {
       });
     });
 
-    it.skip("shows exploration template when selected", () => {
+    it("shows browser template when selected and can pick a collection", () => {
       visitNewEmbedPage();
-      getEmbedSidebar().findByText("Exploration").click();
 
-      H.expectUnstructuredSnowplowEvent({
-        event: "embed_wizard_experience_selected",
-        event_detail: "exploration",
+      getEmbedSidebar().within(() => {
+        cy.findByLabelText("Metabase account (SSO)").click();
       });
 
-      H.waitForSimpleEmbedIframesToLoad();
+      embedModalEnableEmbedding();
+
+      getEmbedSidebar().within(() => {
+        cy.findByText("Browser").click();
+        cy.findByText("Next").click();
+      });
+
+      H.expectUnstructuredSnowplowEvent({
+        event: "embed_wizard_experience_completed",
+        event_detail:
+          "authType=sso,experience=browser,isDefaultExperience=false",
+      });
 
       H.getSimpleEmbedIframeContent().within(() => {
-        cy.log("data picker is visible");
-        cy.findByText("Pick your starting data").should("be.visible");
+        cy.log("collection is visible in breadcrumbs");
+        cy.findByTestId("sdk-breadcrumbs")
+          .findAllByText("Our analytics")
+          .first()
+          .should("be.visible");
+
+        cy.log("collection is visible in browser");
+        cy.findAllByText("Orders in a dashboard").should("be.visible");
+      });
+
+      cy.log("a different collection can be selected via the picker");
+      getEmbedSidebar().within(() => {
+        cy.findByText("Back").click();
+        cy.findByText("Select initial collection").should("be.visible");
+        getResourceSelectorButton().click();
+      });
+
+      H.entityPickerModal().within(() => {
+        cy.findByText("Select initial collection").should("be.visible");
+
+        cy.findByTestId("item-picker-level-0")
+          .findByText("Our analytics")
+          .click();
+        cy.findByTestId("item-picker-level-1")
+          .findByText("First collection")
+          .click();
+        cy.findByText("Select").click();
+      });
+
+      cy.log("button reflects the newly selected collection");
+      getEmbedSidebar().within(() => {
+        getResourceSelectorButton().should("contain", "First collection");
+      });
+
+      cy.log("collection is shown in the breadcrumbs and preview");
+      H.getSimpleEmbedIframeContent().within(() => {
+        cy.findByTestId("sdk-breadcrumbs")
+          .findAllByText("First collection")
+          .first()
+          .should("be.visible");
+
+        cy.findByText("Second collection").should("be.visible");
       });
     });
   });
@@ -96,6 +188,14 @@ H.describeWithSnowplow(suiteTitle, () => {
       cy.log("simulate an empty activity log");
       cy.intercept("GET", "/api/activity/recents?*", { recents: [] }).as(
         "emptyRecentItems",
+      );
+
+      // The embed wizard calls the search API to find recently created
+      // dashboards. Without this, the snapshot's admin-owned dashboards
+      // would be returned and selected as the default.
+      cy.log("simulate that there are no recently created dashboards");
+      cy.intercept("GET", "/api/search?*", { data: [], total: 0 }).as(
+        "emptySearch",
       );
     });
 
@@ -113,39 +213,75 @@ H.describeWithSnowplow(suiteTitle, () => {
         cy.findByText("Person detail").should("be.visible");
       });
     });
+  });
 
-    it.skip("shows question of id=1 when activity log is empty and chart is selected", () => {
-      visitNewEmbedPage();
-      cy.wait("@emptyRecentItems");
+  it("should show a fake loading indicator in embed preview", () => {
+    cy.visit(`/question/${ORDERS_QUESTION_ID}`);
 
-      getEmbedSidebar().findByText("Chart").click();
+    H.openEmbedJsModal();
 
-      H.expectUnstructuredSnowplowEvent({
-        event: "embed_wizard_experience_selected",
-        event_detail: "chart",
+    cy.get("#iframe-embed-container")
+      .findByTestId("preview-loading-indicator", { timeout: 20_000 })
+      .should("be.visible");
+
+    H.embedModalEnableEmbedding();
+
+    cy.get("[data-iframe-loaded]", { timeout: 20_000 }).should(
+      "have.length",
+      1,
+    );
+
+    cy.findByTestId("preview-loading-indicator").should("not.exist");
+  });
+
+  it("should respect slow loading of recent dashboars and wait till loading complete", () => {
+    cy.intercept("GET", "/api/activity/recents*", (req) => {
+      req.on("response", (res) => {
+        res.setThrottle(0.3); // Slow down the response
       });
+    }).as("getRecents");
 
-      H.waitForSimpleEmbedIframesToLoad();
+    visitNewEmbedPage();
 
-      H.getSimpleEmbedIframeContent().within(() => {
-        cy.log("question title of id=1 is visible");
-        cy.findByText("Query log").should("be.visible");
-      });
+    // The hub's "New embed" button sits in the nav and is clickable as soon as
+    // the layout mounts, where the admin settings card it replaced only
+    // appeared once that page had loaded its settings. That delay was giving
+    // the throttled recents response a head start; without it the wizard is
+    // still resolving when the assertions run.
+    cy.wait("@getRecents");
+
+    H.getSimpleEmbedIframeContent().within(() => {
+      cy.findByText("Person overview").should("not.exist");
+      cy.findByText("Orders in a dashboard").should("be.visible");
     });
   });
 
-  // TODO: fix this flaky test
-  it.skip("localizes the iframe preview when ?locale is passed", () => {
-    visitNewEmbedPage({ locale: "fr" });
+  it("shows no-data block when example-dashboard-id points to an archived dashboard", () => {
+    H.createDashboard({
+      name: "Archived Dashboard",
+    }).then(({ body: { id: dashboardId } }) => {
+      H.archiveDashboard(dashboardId);
 
-    // TODO: update this test once "Exploration" is localized in french.
-    getEmbedSidebar().findByText("Exploration").click();
-
-    H.waitForSimpleEmbedIframesToLoad();
-
-    H.getSimpleEmbedIframeContent().within(() => {
-      cy.log("data picker is localized");
-      cy.findByText("Choisissez vos données de départ").should("be.visible");
+      cy.intercept("GET", "/api/session/properties", (req) => {
+        req.continue((res) => {
+          res.body["example-dashboard-id"] = dashboardId;
+          res.send();
+        });
+      });
     });
+
+    cy.intercept("GET", "/api/activity/recents*", {
+      body: [],
+    }).as("emptyRecentItems");
+
+    visitNewEmbedPage({ waitForResource: false });
+
+    getEmbedSidebar().within(() => {
+      cy.findByLabelText("Metabase account (SSO)").click();
+    });
+
+    cy.wait("@emptyRecentItems");
+
+    cy.findByAltText("No results").should("be.visible");
   });
 });

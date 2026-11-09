@@ -1,7 +1,7 @@
 import _ from "underscore";
 
-import { isNotNull } from "metabase/lib/types";
-import { isCartesianChart } from "metabase/visualizations";
+import { isNotNull } from "metabase/utils/types";
+import { getVisualizerSeriesCardId, isCartesianChart } from "metabase/viz-core";
 import type {
   RawSeries,
   VisualizerColumnValueSource,
@@ -51,6 +51,7 @@ export function splitVisualizerSeries(
   const allMetrics = mainCard.visualization_settings["graph.metrics"];
   const allDimensions = mainCard.visualization_settings["graph.dimensions"];
 
+  // Unjustified type cast. FIXME
   return dataSourceIds
     .map((dataSourceId, i) => {
       const columnNames = Object.keys(columnValuesMapping).filter(
@@ -65,14 +66,20 @@ export function splitVisualizerSeries(
       const cols = series[0].data.cols.filter((col) =>
         columnNames.includes(col.name),
       );
+      const resultMetadataCols = series[0].data.results_metadata.columns.filter(
+        (col) => columnNames.includes(col.name),
+      );
 
       if (cols.length === 0) {
         return null;
       }
 
-      const rows = series[0].data.rows.map((row) =>
-        row.filter((_, i) => columnNames.includes(data.cols[i].name)),
-      );
+      const rows = series[0].data.rows
+        .map((row) =>
+          row.filter((_, i) => columnNames.includes(data.cols[i].name)),
+        )
+        // if the entire row is undefined, it was introduced when joining in mergeVisualizerData
+        .filter((row) => row.some((val) => val !== undefined));
 
       const metrics = allMetrics?.filter((columnName) =>
         columnNames.includes(columnName),
@@ -100,21 +107,14 @@ export function splitVisualizerSeries(
         data: {
           cols,
           rows,
-          results_metadata: { columns: cols },
+          insights: series[0].data.insights?.filter((insight) =>
+            columnNames.includes(insight.col),
+          ),
+          results_metadata: { columns: resultMetadataCols },
         },
+        columnValuesMapping,
         started_at: new Date().toISOString(),
       };
     })
     .filter(isNotNull) as RawSeries;
-}
-
-function getVisualizerSeriesCardId(seriesIndex: number) {
-  return -(seriesIndex + 1);
-}
-
-export function getVisualizerSeriesCardIndex(cardId?: number) {
-  if (!cardId) {
-    return 0;
-  }
-  return -cardId - 1;
 }

@@ -2,11 +2,15 @@
   (:require
    [clojure.walk :as walk]
    [metabase-enterprise.action-v2.execute-form :as data-editing.execute-form]
+   [metabase-enterprise.action-v2.schema :as action-v2.schema]
    [metabase.actions.core :as actions]
    [metabase.actions.types :as types]
    [metabase.api.common :as api]
    [metabase.api.macros :as api.macros]
    [metabase.api.routes.common :refer [+auth]]
+   [metabase.events.core :as events]
+   [metabase.lib.schema.parameter :as lib.schema.parameter]
+   [metabase.util :as u]
    [metabase.util.malli :as mu]
    [metabase.util.malli.registry :as mr]
    [metabase.util.malli.schema :as ms]))
@@ -25,40 +29,38 @@
    :string])
 
 (mr/def ::api-action-expression
-  "A more relaxed version of ::action-expression that can still have opaque identifiers inside inside."
-  :map)
+  "A more relaxed version of ::action-expression that can still have opaque identifiers inside inside.
+
+  Opaque ([[ms/OpaqueJSONObject]]) rather than a bare `:map`: the shape is deliberately unspecified here, and a closed
+  map with no declared entries would have every key stripped during request decoding, so the handler would only ever
+  see `{}`."
+  ms/OpaqueJSONObject)
 
 (mr/def ::api-action-id-or-expression
   "All the various ways of referring to an action with the v2 APIs."
   [:or ::api-action-id ::api-action-expression])
 
-(mr/def ::action-expression
-  "The internal representation used by our APIs, after we've parsed the relevant ids and fetched their configuration."
-  ;; Expected extensions:
-  ;; - data app actions (with their mappings)
-  ;; - action expressions (e.g., unsaved data app actions. might not need these with auto save)
-  ;; - dashboard buttons (unless we deprecate them instead)
-  [:or
-   [:map {:closed true}
-    [:model-action-id ms/PositiveInt]]
-   [:map {:closed true}
-    [:action-kw :keyword]
-    [:mapping [:maybe :map]]]])
+(mr/def ::action-value
+  "A single value for an action parameter or an input-row cell: a scalar, or a sequence of them like any other
+  parameter value (`POST /api/action/:id/execute` holds its parameters to the same schema -- a query action binds
+  them to native template tags, which take multiple values)."
+  [:ref ::lib.schema.parameter/parameter.value])
 
-(mr/def ::execute-form
-  "A description of the form to render for executing an action"
-  [:map
-   [:title :string]
-   ;; TODO fully define the shape of a parameter
-   [:parameters [:sequential [:map {:closed false}
-                              [:id :string]
-                              [:display_name :string]
-                              [:input_type :string]
-                              [:optional :boolean]
-                              [:readonly :boolean]
-                              [:value {:optional true} :any]]]]])
+(def ^:private strict-action-value-map
+  [:map-of :string [:ref ::action-value]])
 
-(mu/defn- fetch-unified-action :- ::action-expression
+(mr/def ::action-value-map
+  "A map from parameter name / column name to a value. The names are the action's and the table's, so the map is
+  string-keyed, here and all the way down to the action that runs it.
+
+  Same shape as [[metabase.actions.schema/execute-parameter-values]]. Decoding sees a permissive string-keyed map and the
+  values are validated against, rather than decoded through, [[strict-action-value-map]]."
+  [:and
+   ms/OpaqueJSONObject
+   [:fn {:error/message "value must be a scalar, or a sequence of scalars"}
+    #(mr/validate strict-action-value-map %)]])
+
+(mu/defn- fetch-unified-action :- ::action-v2.schema/action-expression
   "Resolve various flavors of action-id into plain data, making it easier to dispatch on. Fetch config etc."
   [scope :- ::types/scope.hydrated
    raw   :- ::api-action-id-or-expression]
@@ -87,7 +89,8 @@
     (merge input params)
     (reduce-kv
      (fn [acc k v]
-       (let [override (when-not (:visible v) (get params k))]
+       (let [k        (u/qualified-name k)
+             override (when-not (:visible v) (get params k))]
          (case (:sourceType v)
            ;; It seems like misconfiguration to configure a default :value for "ask-user", but some tests do it.
            "ask-user" (assoc acc k (if (contains? params k) override (:value v)))
@@ -114,8 +117,8 @@
              (= ::input x)  input
              (= ::params x) params
              ;; specific key
-             (tag? ::key x)   (get root (keyword (second x)))
-             (tag? ::param x) (get params (keyword (second x)))
+             (tag? ::key x)   (get root (second x))
+             (tag? ::param x) (get params (second x))
              :else
              x))
          mapping)))))
@@ -139,6 +142,10 @@
       :else
       (throw (ex-info "Not able to execute given action yet" {:status-code 400 :scope scope :action action-def})))))
 
+;; TODO (Cam 2025-11-25) please add a response schema to this API endpoint, it makes it easier for our customers to
+;; use our API + we will need it when we make auto-TypeScript-signature generation happen
+;;
+#_{:clj-kondo/ignore [:metabase/validate-defendpoint-has-response-schema]}
 (api.macros/defendpoint :post "/execute"
   "Execute an action with a single input.
 
@@ -155,16 +162,25 @@
   [{}
    {}
    {:keys [action scope params input]}
-   :- [:map
+   :- [:map {:closed true}
        [:action ::api-action-id-or-expression]
        [:scope ::types/scope.raw]
-       [:params {:optional true} :map]
-       [:input {:optional true} :map]]]
+       [:params {:optional true} ::action-value-map]
+       [:input {:optional true} ::action-value-map]]]
   ;; This check should be redundant in practice with the permission checks within perform-action!
   ;; Since test coverage is light and the logic is so simple, we've decided to be extra cautious for now.
   (api/check-superuser)
+  (events/publish-event! :event/action-v2-execute
+                         {:details {:action action
+                                    :scope scope
+                                    :input_count 1}
+                          :user-id api/*current-user-id*})
   {:outputs (execute!* action scope params [input])})
 
+;; TODO (Cam 2025-11-25) please add a response schema to this API endpoint, it makes it easier for our customers to
+;; use our API + we will need it when we make auto-TypeScript-signature generation happen
+;;
+#_{:clj-kondo/ignore [:metabase/validate-defendpoint-has-response-schema]}
 (api.macros/defendpoint :post "/execute-bulk"
   "Execute an action with multiple inputs.
 
@@ -184,23 +200,33 @@
   [{}
    {}
    {:keys [action scope inputs params]}
-   :- [:map
+   ;; see the note on `POST /execute` for why `inputs` and `params` are open
+   :- [:map {:closed true}
        [:action ::api-action-id-or-expression]
        [:scope ::types/scope.raw]
-       [:inputs [:sequential {:min 1} :map]]
-       [:params {:optional true} [:map-of :keyword :any]]]]
+       [:inputs [:sequential {:min 1} ::action-value-map]]
+       [:params {:optional true} ::action-value-map]]]
   ;; This check should be redundant in practice with the permission checks within perform-action!
   ;; Since test coverage is light and the logic is so simple, we've decided to be extra cautious for now.
   (api/check-superuser)
+  (events/publish-event! :event/action-v2-execute
+                         {:details {:action action
+                                    :scope scope
+                                    :input_count (count inputs)}
+                          :user-id api/*current-user-id*})
   {:outputs (execute!* action scope params inputs)})
 
-(api.macros/defendpoint :post "/execute-form"
+(api.macros/defendpoint :post "/execute-form" :- ::data-editing.execute-form/action-description
   "Temporary endpoint for describing an actions parameters
   such that they can be presented correctly in a modal ahead of execution."
   [{}
    {}
    ;; TODO support for bulk actions
-   {:keys [action scope input]}] :- ::execute-form
+   {:keys [action scope input]}
+   :- [:map {:closed true}
+       [:action ::api-action-id-or-expression]
+       [:scope ::types/scope.raw]
+       [:input {:optional true} ::action-value-map]]]
   ;; This check should be redundant in practice with the permission checks within perform-action!
   ;; Since test coverage is light and the logic is so simple, we've decided to be extra cautious for now.
   (api/check-superuser)

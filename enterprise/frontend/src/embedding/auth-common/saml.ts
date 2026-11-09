@@ -1,5 +1,6 @@
-import * as MetabaseError from "embedding-sdk/errors";
-import type { MetabaseEmbeddingSessionToken } from "embedding-sdk/types/refresh-token";
+import * as MetabaseError from "embedding-sdk-shared/errors";
+// eslint-disable-next-line eslint-js/no-restricted-imports -- import type
+import type { MetabaseEmbeddingSessionToken } from "metabase/embedding-sdk/types/refresh-token";
 
 /*
  * For the markup for the popup (nice rhyme), visit
@@ -16,8 +17,17 @@ import type { MetabaseEmbeddingSessionToken } from "embedding-sdk/types/refresh-
  * */
 export const openSamlLoginPopup = async (
   idpUrl: string,
+  instanceUrl: string,
+  popupUrl = instanceUrl,
 ): Promise<MetabaseEmbeddingSessionToken> => {
   return new Promise((resolve, reject) => {
+    const expectedOrigin = new URL(instanceUrl).origin;
+
+    if (new URL(popupUrl).origin !== expectedOrigin) {
+      reject(MetabaseError.SAML_SITE_URL_MISMATCH());
+      return;
+    }
+
     const width = 600;
     const height = 700;
     const left = window.screenX + (window.outerWidth - width) / 2;
@@ -39,13 +49,21 @@ export const openSamlLoginPopup = async (
         authData: MetabaseEmbeddingSessionToken;
       }>,
     ) => {
-      if (event.data && event.data.type === "SAML_AUTH_COMPLETE") {
-        window.removeEventListener("message", messageHandler);
-        if (!popup.closed) {
-          popup.close();
-        }
-        resolve(event.data.authData);
+      if (event.source !== popup || event.data?.type !== "SAML_AUTH_COMPLETE") {
+        return;
       }
+
+      if (event.origin !== expectedOrigin) {
+        return;
+      }
+
+      window.removeEventListener("message", messageHandler);
+
+      if (!popup.closed) {
+        popup.close();
+      }
+
+      resolve(event.data.authData);
     };
 
     window.addEventListener("message", messageHandler);
@@ -55,6 +73,7 @@ export const openSamlLoginPopup = async (
       if (popup.closed) {
         clearInterval(checkClosed);
         window.removeEventListener("message", messageHandler);
+
         reject(MetabaseError.SAML_POPUP_CLOSED());
       }
     }, 1000);

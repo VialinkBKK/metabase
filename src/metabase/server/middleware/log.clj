@@ -3,7 +3,10 @@
   (:require
    [clojure.core.async :as a]
    [clojure.string :as str]
+   [java-time.api :as t]
+   [metabase.api-keys.usage :as api-keys.usage]
    [metabase.api.common :as api]
+   [metabase.api.macros :as api.macros]
    [metabase.app-db.core :as mdb]
    [metabase.driver.sql-jdbc.execute.diagnostic :as sql-jdbc.execute.diagnostic]
    [metabase.request.core :as request]
@@ -19,16 +22,18 @@
    (clojure.core.async.impl.channels ManyToManyChannel)
    (com.mchange.v2.c3p0 PoolBackedDataSource)
    (metabase.server.streaming_response StreamingResponse)
+   (org.apache.logging.log4j ThreadContext)
    (org.eclipse.jetty.util.thread QueuedThreadPool)))
 
 (set! *warn-on-reflection* true)
 
-;; To simplify passing large amounts of arguments around most functions in this namespace take an "info" map that
+;; To simplify passing large amounts of arguments around, the logging functions below take an "info" map that
 ;; looks like
 ;;
-;;     {:request ..., :response ..., :start-time ..., :call-count-fn ...}
+;;     {:request ..., :response ..., :start-time ..., :call-count-fn ..., :diag-info-fn ..., :log-context ...}
 ;;
-;; This map is created in `log-api-call` at the bottom of this namespace.
+;; This map is built in `log-api-call` at the bottom of this namespace, once a response exists. API-key usage
+;; recording is a separate concern with its own inputs — see [[record-api-key-usage!]] — and never touches it.
 
 ;;; +----------------------------------------------------------------------------------------------------------------+
 ;;; |                                   Getting & Formatting Request/Response Info                                   |
@@ -87,11 +92,6 @@
   (when include-stats?
     (stats diag-info-fn)))
 
-(defn- format-error-info [{{:keys [body]} :response} {:keys [error?]}]
-  (when (and error?
-             (or (string? body) (coll? body)))
-    (str "\n" (u/pprint-to-str body))))
-
 (defn- format-log-context [{:keys [log-context]} _]
   (pr-str log-context))
 
@@ -99,8 +99,7 @@
   (str/join " " (filter some? [(format-status-info info)
                                (format-performance-info info)
                                (format-threads-info info opts)
-                               (format-log-context info opts)
-                               (format-error-info info opts)])))
+                               (format-log-context info opts)])))
 
 ;;; +----------------------------------------------------------------------------------------------------------------+
 ;;; |                                                Logging the Info                                                |
@@ -148,7 +147,7 @@
                 log-options)]
       (log-fn (u/format-color color (format-info info opts))))
     (catch Throwable e
-      (log/error e "Error logging API request"))))
+      (log/errorf "Error logging API request: %s" (ex-message e)))))
 
 ;;; +----------------------------------------------------------------------------------------------------------------+
 ;;; |                                                 Async Logging                                                  |
@@ -159,30 +158,81 @@
 
 (defn- log-core-async-response
   "For async responses that return a `core.async` channel, wait for the channel to return a response before logging the
-  API request info."
-  [{{chan :body, :as _response} :response, :as info}]
+  API request info. `mdc-ctx` is the MDC snapshot from the request thread — restored before logging
+  so trace_id/span_id appear in async log lines."
+  [{{chan :body, :as _response} :response, :as info} mdc-ctx]
   {:pre [(async.u/promise-chan? chan)]}
   ;; [async] wait for the pipe to close the canceled/finished channel and log the API response
   (a/go
     (let [result (a/<! chan)]
-      (log-info (assoc info :async-status (if (nil? result) "canceled" "completed"))))))
+      (try
+        (ThreadContext/putAll mdc-ctx)
+        (log-info (assoc info :async-status (if (nil? result) "canceled" "completed")))
+        (finally
+          (ThreadContext/removeAll (keys mdc-ctx)))))))
 
-(defn- log-streaming-response [{{streaming-response :body, :as _response} :response, :as info}]
+(defn- log-streaming-response
+  "Log a streaming response after it completes. `mdc-ctx` is the MDC snapshot from the request thread."
+  [{{streaming-response :body, :as _response} :response, :as info} mdc-ctx]
   ;; [async] wait for the streaming response to be canceled/finished channel and log the API response
   (let [finished-chan (streaming-response/finished-chan streaming-response)]
     (a/go
       (let [result (a/<! finished-chan)]
-        (log-info (assoc info :async-status (name result)))))))
+        (try
+          (ThreadContext/putAll mdc-ctx)
+          (log-info (assoc info :async-status (name result)))
+          (finally
+            (ThreadContext/removeAll (keys mdc-ctx))))))))
 
 (defn- logged-response
-  "Log an API response. Returns resonse, possibly modified (i.e., core.async channels will be wrapped); this value
-  should be passed to the normal `respond` function."
+  "Log an API response. Returns response, possibly modified (i.e., core.async channels will be wrapped); this value
+  should be passed to the normal `respond` function.
+  Captures MDC context from the request thread so that async log lines include trace_id/span_id."
   [{{:keys [body], :as response} :response, :as info}]
-  (condp instance? body
-    ManyToManyChannel (log-core-async-response info)
-    StreamingResponse (log-streaming-response info)
-    (log-info info))
+  (let [mdc-ctx (ThreadContext/getImmutableContext)]
+    (condp instance? body
+      ManyToManyChannel (log-core-async-response info mdc-ctx)
+      StreamingResponse (log-streaming-response info mdc-ctx)
+      (log-info info)))
   response)
+
+;;; +----------------------------------------------------------------------------------------------------------------+
+;;; |                                             API Key Usage Analytics                                            |
+;;; +----------------------------------------------------------------------------------------------------------------+
+
+(defn- api-key-request?
+  "Whether `request` authenticated with an API key — the only kind of request that gets recorded. Resolved well
+  outside this middleware by `metabase.server.middleware.session/wrap-current-user-info`, so it is already on the
+  request we closed over. Everything else pays this one keyword lookup and nothing more."
+  [request]
+  ;; `:api-key-id` is always and only set by API-key auth
+  (some? (:api-key-id request)))
+
+(defn- record-api-key-usage!
+  "Record API-key usage analytics for a completed request.
+
+  Hands the recorder the raw `request`/`response` plus the handful of values only this middleware can supply:
+  `route-template` (read off the carrier `metabase.server.middleware.route-template-carrier/wrap-route-template-carrier`
+  installed on every request — nil for a request that matched no endpoint and for raw-Compojure handlers that bypass
+  `defendpoint`, since neither ever fills it in; a dynamic binding wouldn't survive an async `respond` on another
+  thread, which is why this is a carrier and not `api/*current-route*` or similar), `duration-ms` (time to `respond`,
+  not to the last byte written — for streaming and core.async responses `respond` is called when the response object
+  is created, so this is time-to-response, as it is for the CLI usage log), and `occurred-at` (captured here on the
+  request thread rather than left for the DB to fill in at INSERT time — the row lands via a scheduled flush, up to
+  the flush interval later, so a DB-computed default would record when the flush ran, not when the request happened).
+
+  Best-effort throughout: the recorders swallow their own failures, and this catches anything else, so usage
+  analytics can never fail a request or alter its response."
+  [request response start-time]
+  (when (api-key-request? request)
+    (try
+      (api-keys.usage/record-api-key-usage!
+       request response
+       {:route-template (some-> (get request api.macros/route-template-carrier-key) deref)
+        :duration-ms    (long (u/since-ms start-time))
+        :occurred-at    (t/offset-date-time)})
+      (catch Throwable e
+        (log/warn e "Error recording API key usage")))))
 
 ;;; +----------------------------------------------------------------------------------------------------------------+
 ;;; |                                                   Middleware                                                   |
@@ -195,30 +245,45 @@
   "The set of URIs that should not be logged."
   []
   (cond-> #{"/api/logger/logs"}
-    (not (server.settings/health-check-logging-enabled)) (conj "/api/health")))
+    (not (server.settings/health-check-logging-enabled)) (into #{"/api/health" "/livez" "/readyz"})))
 
-(defn- should-log-request? [{:keys [uri], :as request}]
-  ;; don't log calls to /health or /logger/logs because they clutter up the logs (especially the window in admin) with
-  ;; useless lines
-  (and (request/api-call? request)
+(defn- should-log-request? [{:keys [^String uri], :as request}]
+  ;; don't log calls to health checks or /logger/logs because they clutter up the logs (especially the window in admin)
+  ;; with useless lines
+  (and (or (request/api-call? request)
+           (str/starts-with? uri "/.well-known")
+           (str/starts-with? uri "/oauth")
+           (contains? #{"/livez" "/readyz"} uri))
        (not ((logging-disabled-uris) uri))))
 
 (defn log-api-call
-  "Logs info about request such as status code, number of DB calls, and time taken to complete."
+  "Logs info about request such as status code, number of DB calls, and time taken to complete. Also the write point
+  for API-key usage analytics — see [[record-api-key-usage!]]; requests that didn't authenticate with an API key are
+  unaffected.
+
+  Console logging and API-key usage recording are independent concerns with independent eligibility: a request
+  suppressed from the console log (health checks, `/api/logger/logs`) still has its usage recorded if it
+  authenticated with an API key, and vice versa. Neither gates the other."
   [handler]
   (fn [request respond raise]
-    (if-not (should-log-request? request)
-      ;; non-API call or health or logs call, don't log it
-      (handler request respond raise)
-      ;; API call, log info about it
-      (t2/with-call-count [call-count-fn]
-        (sql-jdbc.execute.diagnostic/capturing-diagnostic-info [diag-info-fn]
-          (let [info           {:request       request
-                                :start-time    (u/start-timer)
-                                :call-count-fn call-count-fn
-                                :diag-info-fn  diag-info-fn
-                                :log-context   {:metabase-user-id api/*current-user-id*}}
-                response->info (fn [response]
-                                 (assoc info :response response))
-                respond        (comp respond logged-response response->info)]
-            (handler request respond raise)))))))
+    (let [should-log? (should-log-request? request)
+          api-key?    (api-key-request? request)]
+      (if-not (or should-log? api-key?)
+        ;; neither concern applies — skip the wrapping entirely
+        (handler request respond raise)
+        (t2/with-call-count [call-count-fn]
+          (sql-jdbc.execute.diagnostic/capturing-diagnostic-info [diag-info-fn]
+            (let [start-time (u/start-timer)
+                  respond*   (fn [response]
+                               (when api-key?
+                                 (record-api-key-usage! request response start-time))
+                               (when should-log?
+                                 (logged-response {:request       request
+                                                   :response      response
+                                                   :start-time    start-time
+                                                   :call-count-fn call-count-fn
+                                                   :diag-info-fn  diag-info-fn
+                                                   :log-context   {:metabase-user-id (or (:metabase-user-id (meta response))
+                                                                                         api/*current-user-id*)}}))
+                               (respond response))]
+              (handler request respond* raise))))))))

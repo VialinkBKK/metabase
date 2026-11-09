@@ -1,7 +1,7 @@
 import userEvent from "@testing-library/user-event";
 
 import { renderWithProviders, screen } from "__support__/ui";
-import { checkNotNull } from "metabase/lib/types";
+import { checkNotNull } from "metabase/utils/types";
 import * as Lib from "metabase-lib";
 import { columnFinder } from "metabase-lib/test-helpers";
 
@@ -202,6 +202,25 @@ describe("DateFilterPicker", () => {
       unit: "day",
       offsetValue: null,
       offsetUnit: null,
+    });
+  });
+
+  it("should keep the 'Include current' option when updating a relative date filter", async () => {
+    const { query, filter } = createQueryWithRelativeDateFilter({
+      query: initialQuery,
+      value: -30,
+      unit: "day",
+      options: { includeCurrent: true },
+    });
+    const { getNextRelativeFilterParts } = setup({ query, column, filter });
+
+    expect(screen.getByLabelText("Include today")).toBeChecked();
+    await userEvent.click(screen.getByText("Update filter"));
+
+    expect(getNextRelativeFilterParts()).toMatchObject({
+      value: -30,
+      unit: "day",
+      options: { includeCurrent: true },
     });
   });
 

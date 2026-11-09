@@ -1,23 +1,28 @@
 import { useDndContext } from "@dnd-kit/core";
-import { useCallback, useLayoutEffect, useState } from "react";
+import { type JSX, useCallback, useLayoutEffect, useState } from "react";
 
-import { Box, Popover } from "metabase/ui";
+import { Box, Popover, useStablePopoverPosition } from "metabase/ui";
 import { PreventPopoverExitProvider } from "metabase/ui/components/utils/PreventPopoverExit";
 
 import S from "./ClausePopover.module.css";
 
 interface ClausePopoverProps {
   isInitiallyOpen?: boolean;
-  renderItem: (open: () => void) => JSX.Element | string;
+  disabled?: boolean;
+  renderItem: (open: () => void, hasPopover?: boolean) => JSX.Element | string;
   renderPopover: (close: () => void) => JSX.Element | null;
 }
 
+const noop = () => {};
+
 export function ClausePopover({
   isInitiallyOpen = false,
+  disabled = false,
   renderItem,
   renderPopover,
 }: ClausePopoverProps) {
   const [isOpen, setIsOpen] = useState(isInitiallyOpen);
+  const stablePositionProps = useStablePopoverPosition("bottom-start");
   const { active } = useDndContext();
 
   const handleOpen = useCallback(() => {
@@ -38,20 +43,28 @@ export function ClausePopover({
     }
   }, [active]);
 
+  const content = renderPopover(handleClose);
+  const hasPopover = content !== null && !disabled;
+
   return (
     <PreventPopoverExitProvider>
       <Popover
+        position={stablePositionProps.position}
+        middlewares={stablePositionProps.middlewares}
+        onClose={stablePositionProps.onClose}
         opened={isOpen}
-        position="bottom-start"
         offset={{ mainAxis: 4 }}
         trapFocus
         onChange={handleChange}
         classNames={{ dropdown: S.dropdown }}
+        disabled={!hasPopover}
       >
-        <Popover.Target>{renderItem(handleOpen)}</Popover.Target>
+        <Popover.Target>
+          {renderItem(disabled ? noop : handleOpen, hasPopover)}
+        </Popover.Target>
         <Popover.Dropdown data-testid="clause-popover">
           <Box className={S.dropdownContent} data-testid="popover-content">
-            {renderPopover(handleClose)}
+            {content}
           </Box>
         </Popover.Dropdown>
       </Popover>

@@ -1,12 +1,10 @@
 import cx from "classnames";
-import type * as React from "react";
 
 import { ColorSelector } from "metabase/common/components/ColorSelector";
 import CS from "metabase/css/core/index.css";
-import { getAccentColors } from "metabase/lib/colors/groups";
+import { TextInputBlurChange } from "metabase/ui";
+import { getNamedAccentColors } from "metabase/ui/colors/groups";
 import type { SingleSeries, VisualizationSettings } from "metabase-types/api";
-
-import { SeriesNameInput } from "./ChartNestedSettingSeries.styled";
 
 export interface ChartNestedSettingsSeriesSingleProps {
   object: SingleSeries;
@@ -43,11 +41,17 @@ const ChartNestedSettingsSeriesSingle = ({
         <ColorSelector
           withinPortal={false}
           value={computedSettings.color}
-          colors={getAccentColors()}
-          onChange={(value) => onChangeObjectSettings(object, { color: value })}
+          colors={getNamedAccentColors()}
+          onChange={(hexValue, colorName) =>
+            onChangeObjectSettings(object, {
+              color: hexValue,
+              color_name: colorName,
+            })
+          }
         />
-        <SeriesNameInput
+        <TextInputBlurChange
           className={cx(CS.flexFull, CS.ml1, CS.alignSelfStretch)}
+          resetOnEsc
           value={computedSettings.title}
           description={
             seriesCardName === computedSettings.title ? "" : seriesCardName

@@ -1,9 +1,9 @@
 import { useMemo } from "react";
 import { t } from "ttag";
 
-import type { Download } from "metabase-types/store";
+import type { Download } from "metabase/redux/store";
 
-import StatusLarge from "../StatusLarge";
+import { StatusLarge } from "../StatusLarge";
 import { isCompleted, isErrored, isInProgress } from "../utils/downloads";
 
 export interface DownloadsStatusLargeProps {

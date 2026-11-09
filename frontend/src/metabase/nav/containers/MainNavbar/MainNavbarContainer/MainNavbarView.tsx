@@ -4,40 +4,41 @@ import { useCallback, useMemo } from "react";
 import { t } from "ttag";
 import _ from "underscore";
 
-import ErrorBoundary from "metabase/ErrorBoundary";
+import type { CollectionTreeItem } from "metabase/common/collections/utils";
 import {
   isExamplesCollection,
+  isLibraryCollection,
   isRootTrashCollection,
-} from "metabase/collections/utils";
+} from "metabase/common/collections/utils";
+import { CollapseSection } from "metabase/common/components/CollapseSection";
+import ErrorBoundary from "metabase/common/components/ErrorBoundary";
 import { Tree } from "metabase/common/components/tree";
-import { useSetting, useUserSetting } from "metabase/common/hooks";
 import { useIsAtHomepageDashboard } from "metabase/common/hooks/use-is-at-homepage-dashboard";
+import { useShowOtherUsersCollections } from "metabase/common/hooks/use-show-other-users-collections";
+import {
+  getIsTenantUser,
+  getUser,
+  getUserCanWriteToCollections,
+} from "metabase/current-user";
+import { NavbarLibrarySection } from "metabase/nav/containers/MainNavbar/NavbarLibrarySection";
+import {
+  PLUGIN_DATA_APPS,
+  PLUGIN_REMOTE_SYNC,
+  PLUGIN_TENANTS,
+} from "metabase/plugins";
+import { useSelector } from "metabase/redux";
 import {
   getCanAccessOnboardingPage,
   getIsNewInstance,
-} from "metabase/home/selectors";
-import { isSmallScreen } from "metabase/lib/dom";
-import { useSelector } from "metabase/lib/redux";
-import * as Urls from "metabase/lib/urls";
-import { WhatsNewNotification } from "metabase/nav/components/WhatsNewNotification";
-import {
-  ActionIcon,
-  Flex,
-  Icon,
-  type IconName,
-  type IconProps,
-  Tooltip,
-} from "metabase/ui";
+} from "metabase/selectors/onboarding";
+import { useSetting, useUserSetting } from "metabase/settings";
+import { ActionIcon, Flex, Icon, Tooltip } from "metabase/ui";
+import * as Urls from "metabase/urls";
+import { isSmallScreen } from "metabase/utils/dom";
 import type { Bookmark, Collection } from "metabase-types/api";
 
-import {
-  PaddedSidebarLink,
-  SidebarContentRoot,
-  SidebarHeading,
-  SidebarSection,
-  TrashSidebarSection,
-} from "../MainNavbar.styled";
-import { SidebarCollectionLink } from "../SidebarItems";
+import { SidebarHeading, SidebarSection } from "../Sidebar";
+import { SidebarCollectionLink, SidebarLink } from "../SidebarItems";
 import {
   trackAddDataModalOpened,
   trackNewCollectionFromNavInitiated,
@@ -49,17 +50,16 @@ import BookmarkList from "./BookmarkList";
 import { BrowseNavSection } from "./BrowseNavSection";
 import { GettingStartedSection } from "./GettingStartedSection";
 
-interface CollectionTreeItem extends Collection {
-  icon: IconName | IconProps;
-  children: CollectionTreeItem[];
-}
 type Props = {
-  isAdmin: boolean;
   isOpen: boolean;
   bookmarks: Bookmark[];
   hasDataAccess: boolean;
   collections: CollectionTreeItem[];
   selectedItems: SelectedItem[];
+  sharedTenantCollections?: Collection[];
+  canAccessTenantSpecificCollections: boolean;
+  canCreateSharedCollection: boolean;
+  showExternalCollectionsSection: boolean;
   handleCloseNavbar: () => void;
   handleLogout: () => void;
   handleCreateNewCollection: () => void;
@@ -74,7 +74,6 @@ type Props = {
 const OTHER_USERS_COLLECTIONS_URL = Urls.otherUsersPersonalCollections();
 
 export function MainNavbarView({
-  isAdmin,
   bookmarks,
   collections,
   selectedItems,
@@ -82,12 +81,23 @@ export function MainNavbarView({
   reorderBookmarks,
   handleCreateNewCollection,
   handleCloseNavbar,
+  sharedTenantCollections,
+  canAccessTenantSpecificCollections,
+  canCreateSharedCollection,
+  showExternalCollectionsSection,
 }: Props) {
   const [expandBookmarks = true, setExpandBookmarks] = useUserSetting(
     "expand-bookmarks-in-nav",
   );
+  const [expandCollections = true, setExpandCollections] = useUserSetting(
+    "expand-collections-in-nav",
+  );
 
   const isAtHomepageDashboard = useIsAtHomepageDashboard();
+  const canWriteToCollections = useSelector(getUserCanWriteToCollections);
+  const currentUser = useSelector(getUser);
+  const useTenants = useSetting("use-tenants");
+  const isTenantUser = useSelector(getIsTenantUser);
 
   const [
     addDataModalOpened,
@@ -119,38 +129,64 @@ export function MainNavbarView({
     [isAtHomepageDashboard, onItemSelect],
   );
 
-  const [regularCollections, trashCollection, examplesCollection] =
+  const { regularCollections, trashCollection, examplesCollection } =
     useMemo(() => {
-      return [
-        collections.filter(
-          (c) => !isRootTrashCollection(c) && !isExamplesCollection(c),
-        ),
-        collections.find(isRootTrashCollection),
-        collections.find(isExamplesCollection),
-      ];
-    }, [collections]);
+      const trashCollection = collections.find(isRootTrashCollection);
+      const examplesCollection = collections.find(isExamplesCollection);
+
+      const regularCollections = collections.filter((c) => {
+        const isNormalCollection =
+          !isRootTrashCollection(c) && !isExamplesCollection(c);
+        return isNormalCollection && !isLibraryCollection(c);
+      });
+
+      const collectionsByCategory = {
+        trashCollection,
+        examplesCollection,
+      };
+
+      return {
+        ...collectionsByCategory,
+        regularCollections:
+          useTenants && isTenantUser
+            ? PLUGIN_TENANTS.getFlattenedCollectionsForNavbar({
+                currentUser,
+                sharedTenantCollections,
+                regularCollections,
+              })
+            : regularCollections,
+      };
+    }, [
+      collections,
+      isTenantUser,
+      useTenants,
+      sharedTenantCollections,
+      currentUser,
+    ]);
 
   const isNewInstance = useSelector(getIsNewInstance);
   const canAccessOnboarding = useSelector(getCanAccessOnboardingPage);
   const shouldDisplayGettingStarted = isNewInstance && canAccessOnboarding;
 
-  const activeUsersCount = useSetting("active-users-count");
-  const areThereOtherUsers = (activeUsersCount ?? 0) > 1;
-  const showOtherUsersCollections = isAdmin && areThereOtherUsers;
+  const showOtherUsersCollections = useShowOtherUsersCollections();
+
+  const collectionsHeading = showExternalCollectionsSection
+    ? t`Internal Collections`
+    : t`Collections`;
 
   return (
     <ErrorBoundary>
-      <SidebarContentRoot>
+      <Flex direction="column" justify="space-between" flex={1}>
         <div>
           <SidebarSection>
-            <PaddedSidebarLink
+            <SidebarLink
               isSelected={nonEntityItem?.url === "/"}
               icon="home"
               onClick={handleHomeClick}
               url="/"
             >
               {t`Home`}
-            </PaddedSidebarLink>
+            </SidebarLink>
           </SidebarSection>
 
           {shouldDisplayGettingStarted && (
@@ -193,30 +229,82 @@ export function MainNavbarView({
             </SidebarSection>
           )}
 
+          {/* Tenant users don't see the section about "External collections" */}
+          {showExternalCollectionsSection && (
+            <PLUGIN_TENANTS.MainNavSharedCollections
+              canAccessTenantSpecificCollections={
+                canAccessTenantSpecificCollections
+              }
+              canCreateSharedCollection={canCreateSharedCollection}
+              sharedTenantCollections={sharedTenantCollections}
+            />
+          )}
+
+          <NavbarLibrarySection
+            collections={collections}
+            selectedId={collectionItem?.id}
+            onItemSelect={onItemSelect}
+          />
+
           <SidebarSection>
             <ErrorBoundary>
-              <CollectionSectionHeading
-                handleCreateNewCollection={handleCreateNewCollection}
-              />
-
-              <Tree
-                data={regularCollections}
-                selectedId={collectionItem?.id}
-                onSelect={onItemSelect}
-                TreeNode={SidebarCollectionLink}
-                role="tree"
-                aria-label="collection-tree"
-              />
-              {showOtherUsersCollections && (
-                <PaddedSidebarLink
-                  icon="group"
-                  url={OTHER_USERS_COLLECTIONS_URL}
-                >
-                  {t`Other users' personal collections`}
-                </PaddedSidebarLink>
-              )}
+              <CollapseSection
+                header={<SidebarHeading>{collectionsHeading}</SidebarHeading>}
+                initialState={expandCollections ? "expanded" : "collapsed"}
+                iconPosition="right"
+                iconSize={8}
+                onToggle={setExpandCollections}
+                rightAction={
+                  canWriteToCollections && !isTenantUser ? (
+                    <Tooltip label={t`Create a new collection`}>
+                      <ActionIcon
+                        variant="subtle"
+                        aria-label={t`Create a new collection`}
+                        onClick={() => {
+                          trackNewCollectionFromNavInitiated();
+                          handleCreateNewCollection();
+                        }}
+                      >
+                        <Icon name="add" />
+                      </ActionIcon>
+                    </Tooltip>
+                  ) : null
+                }
+                role="section"
+                aria-label={t`Collections`}
+              >
+                {PLUGIN_REMOTE_SYNC.CollectionsNavTree ? (
+                  <PLUGIN_REMOTE_SYNC.CollectionsNavTree
+                    collections={regularCollections}
+                    selectedId={collectionItem?.id}
+                    onSelect={onItemSelect}
+                  />
+                ) : (
+                  <Tree
+                    data={regularCollections}
+                    selectedId={collectionItem?.id}
+                    onSelect={onItemSelect}
+                    TreeNode={SidebarCollectionLink}
+                    role="tree"
+                    aria-label="collection-tree"
+                  />
+                )}
+                {showOtherUsersCollections && (
+                  <SidebarLink
+                    icon="group"
+                    url={OTHER_USERS_COLLECTIONS_URL}
+                    isSelected={collectionItem?.id === "users"}
+                  >
+                    {t`Other users' personal collections`}
+                  </SidebarLink>
+                )}
+              </CollapseSection>
             </ErrorBoundary>
           </SidebarSection>
+
+          {PLUGIN_DATA_APPS.isEnabled && (
+            <PLUGIN_DATA_APPS.MainNavbarSection onItemSelect={onItemSelect} />
+          )}
 
           <SidebarSection>
             <ErrorBoundary>
@@ -230,7 +318,7 @@ export function MainNavbarView({
           </SidebarSection>
 
           {trashCollection && (
-            <TrashSidebarSection>
+            <SidebarSection>
               <ErrorBoundary>
                 <Tree
                   data={[trashCollection]}
@@ -240,38 +328,12 @@ export function MainNavbarView({
                   role="tree"
                 />
               </ErrorBoundary>
-            </TrashSidebarSection>
+            </SidebarSection>
           )}
         </div>
-        <WhatsNewNotification />
-      </SidebarContentRoot>
+      </Flex>
 
       <AddDataModal opened={addDataModalOpened} onClose={closeAddDataModal} />
     </ErrorBoundary>
-  );
-}
-interface CollectionSectionHeadingProps {
-  handleCreateNewCollection: () => void;
-}
-
-function CollectionSectionHeading({
-  handleCreateNewCollection,
-}: CollectionSectionHeadingProps) {
-  return (
-    <Flex align="center" justify="space-between">
-      <SidebarHeading>{t`Collections`}</SidebarHeading>
-      <Tooltip label={t`Create a new collection`}>
-        <ActionIcon
-          aria-label={t`Create a new collection`}
-          color="var(--mb-color-text-medium)"
-          onClick={() => {
-            trackNewCollectionFromNavInitiated();
-            handleCreateNewCollection();
-          }}
-        >
-          <Icon name="add" />
-        </ActionIcon>
-      </Tooltip>
-    </Flex>
   );
 }

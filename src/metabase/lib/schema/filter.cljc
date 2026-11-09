@@ -1,6 +1,7 @@
 (ns metabase.lib.schema.filter
   "Schemas for the various types of filter clauses that you'd pass to `:filters` or use inside something else that takes
   a boolean expression."
+  (:refer-clojure :exclude [every?])
   (:require
    [metabase.lib.schema.common :as common]
    [metabase.lib.schema.expression :as expression]
@@ -8,7 +9,8 @@
    [metabase.lib.schema.literal :as literal]
    [metabase.lib.schema.mbql-clause :as mbql-clause]
    [metabase.lib.schema.temporal-bucketing :as temporal-bucketing]
-   [metabase.util.malli.registry :as mr]))
+   [metabase.util.malli.registry :as mr]
+   [metabase.util.performance :refer [every?]]))
 
 (defn- tuple-clause-of-comparables-schema
   "Helper intended for use with [[define-mbql-clause]]. Create a clause schema with `:tuple` and ensure that
@@ -27,6 +29,10 @@
                                    (expression/comparable-expressions? (get argv i) (get argv j)))
                                  compared-position-pairs)))))]]))
 
+(def predicate-operators
+  "Set of predicate operators that can be user in filter clauses."
+  #{:and :or :not := :!= :> :>= :< :<= :is-null :not-null :is-empty :not-empty :starts-with :ends-with :contains :does-not-contain :between :inside})
+
 (mr/def ::default-filter-operator
   "Filter operators that should be supported by any column type. Note that the FE allows only `:is-empty` and
   `:not-empty` for string columns."
@@ -40,7 +46,7 @@
 (mr/def ::string-filter-options
   "String filter operator options. Only set for `:contains`, `:does-not-contain`, `:starts-with`, `:ends-with`
   operators."
-  [:map [:case-sensitive {:optional true} :boolean]]) ; default true
+  [:map {:closed true} [:case-sensitive {:optional true} :boolean]]) ; default true
 
 (mr/def ::number-filter-operator
   "Numeric filter operators supported by the FE."
@@ -73,7 +79,7 @@
 
 (mr/def ::time-interval-options
   "Options for `:time-interval` operator. Note that `:relative-time-interval` does not support these options."
-  [:map [:include-current {:optional true} :boolean]]) ; default false
+  [:map {:closed true} [:include-current {:optional true} :boolean]]) ; default false
 
 (doseq [op [:and :or]]
   (mbql-clause/define-catn-mbql-clause op :- :type/Boolean
@@ -186,7 +192,7 @@
     [false ::id/segment]]])
 
 (mr/def ::operator
-  [:map
+  [:map {:closed true}
    [:lib/type [:= :operator/filter]]
    [:short [:enum
             := :!= :inside :between :< :> :<= :>= :is-null :not-null :is-empty :not-empty

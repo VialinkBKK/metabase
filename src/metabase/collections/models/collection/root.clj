@@ -2,7 +2,7 @@
   (:require
    [medley.core :as m]
    [metabase.models.interface :as mi]
-   [metabase.permissions.core :as perms]
+   [metabase.permissions.path :as permissions.path]
    [metabase.premium-features.core :as premium-features]
    [metabase.util :as u]
    [metabase.util.i18n :refer [tru]]
@@ -37,8 +37,8 @@
            (not (premium-features/enable-snippet-collections?)))
     #{}
     #{((case read-or-write
-         :read  perms/collection-read-path
-         :write perms/collection-readwrite-path) collection)}))
+         :read  permissions.path/collection-read-path
+         :write permissions.path/collection-readwrite-path) collection)}))
 
 (def ^RootCollection root-collection
   "Special placeholder object representing the Root Collection, which isn't really a real Collection."
@@ -54,18 +54,27 @@
   "The special Root Collection placeholder object with some extra details to facilitate displaying it on the FE."
   [collection-namespace]
   (m/assoc-some root-collection
-                :name (case (keyword collection-namespace)
-                        :snippets (tru "Top folder")
+                :name (case (some-> collection-namespace keyword)
+                        :shared-tenant-collections (tru "Shared collections")
+                        :snippets (tru "SQL snippets")
+                        :transforms (tru "Transforms")
+                        :data-actions (tru "Data actions")
                         (tru "Our analytics"))
                 :namespace collection-namespace
                 :is_personal false
-                :id   "root"))
+                :id "root"
+                ;; Root collection itself is not remote-synced; individual top-level collections
+                ;; within the shared-tenant-collection namespace can be toggled individually.
+                :is_remote_synced false))
 
 (defn hydrated-root-collection
-  "Return the root collection entity."
-  []
-  (-> (root-collection-with-ui-details nil)
-      (hydrate :can_write)))
+  "Return the root collection entity for the given namespace.
+  By default, returns the root collection for the non-namespaced collection subtree."
+  ([]
+   (hydrated-root-collection nil))
+  ([collection-namespace]
+   (-> (root-collection-with-ui-details collection-namespace)
+       (hydrate :can_write))))
 
 (defn hydrate-root-collection
   "Hydrate `:collection` onto entity when the id is `nil`."

@@ -1,5 +1,5 @@
-import * as MetabaseError from "embedding-sdk/errors";
-import type { MetabaseAuthMethod } from "embedding-sdk/types";
+import * as MetabaseError from "embedding-sdk-shared/errors";
+import type { MetabaseAuthMethod } from "embedding-sdk-shared/types/auth-config";
 
 export async function connectToInstanceAuthSso(
   url: string,
@@ -29,10 +29,18 @@ export async function connectToInstanceAuthSso(
 
   try {
     const urlResponse = await fetch(ssoUrl, { headers });
+
     if (!urlResponse.ok) {
+      let errorData;
+
+      try {
+        errorData = await urlResponse.json();
+      } catch {}
+
       throw MetabaseError.CANNOT_CONNECT_TO_INSTANCE({
         instanceUrl: url,
         status: urlResponse.status,
+        message: errorData?.message,
       });
     }
     return await urlResponse.json();
@@ -43,6 +51,7 @@ export async function connectToInstanceAuthSso(
     }
     throw MetabaseError.CANNOT_CONNECT_TO_INSTANCE({
       instanceUrl: url,
+      // Unjustified type cast. FIXME
       status: (e as any)?.status,
     });
   }

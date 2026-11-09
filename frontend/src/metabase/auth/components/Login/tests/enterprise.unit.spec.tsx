@@ -1,4 +1,4 @@
-import "metabase/plugins/builtin";
+import "metabase/auth/plugins";
 import { screen } from "__support__/ui";
 
 import { setup } from "./setup";
@@ -8,7 +8,6 @@ describe("Login", () => {
     setup({
       isPasswordLoginEnabled: false,
       isGoogleAuthEnabled: true,
-      hasEnterprisePlugins: true,
     });
 
     expect(screen.getByText("Sign in with email")).toBeInTheDocument();

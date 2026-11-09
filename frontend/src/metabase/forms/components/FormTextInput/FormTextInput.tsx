@@ -1,14 +1,17 @@
-import { useField } from "formik";
+import { useField, useFormikContext } from "formik";
 import type { ChangeEvent, FocusEvent, Ref } from "react";
 import { forwardRef, useCallback } from "react";
 
+import { CopyButton } from "metabase/common/components/CopyButton";
 import type { TextInputProps } from "metabase/ui";
 import { TextInput } from "metabase/ui";
 
-import { CopyWidgetButton } from "./FormTextInput.styled";
+import S from "./FormTextInput.module.css";
 
-export interface FormTextInputProps
-  extends Omit<TextInputProps, "value" | "error"> {
+export interface FormTextInputProps extends Omit<
+  TextInputProps,
+  "value" | "error"
+> {
   name: string;
   nullable?: boolean;
   hasCopyButton?: boolean;
@@ -28,11 +31,13 @@ export const FormTextInput = forwardRef(function FormTextInput(
   const [{ value }, { error, touched }, { setValue, setTouched }] =
     useField(name);
 
+  const { validateOnMount } = useFormikContext();
+
   const handleChange = useCallback(
     (event: ChangeEvent<HTMLInputElement>) => {
       const newValue = event.target.value;
       if (newValue === "") {
-        setValue(nullable ? null : undefined);
+        setValue(nullable ? null : newValue);
       } else {
         setValue(newValue);
       }
@@ -50,7 +55,7 @@ export const FormTextInput = forwardRef(function FormTextInput(
   );
 
   const rightSection = hasCopyButton ? (
-    <CopyWidgetButton value={value} />
+    <CopyButton className={S.copyButton} value={value} />
   ) : (
     props.rightSection
   );
@@ -62,7 +67,7 @@ export const FormTextInput = forwardRef(function FormTextInput(
       ref={ref}
       name={name}
       value={value ?? ""}
-      error={touched && error ? error : null}
+      error={(validateOnMount || touched) && error ? error : null}
       onChange={handleChange}
       onBlur={handleBlur}
       rightSection={rightSection}

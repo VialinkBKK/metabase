@@ -1,22 +1,26 @@
+import { useDisclosure } from "@mantine/hooks";
 import cx from "classnames";
 import { useCallback, useState } from "react";
 import { t } from "ttag";
 
-import InputBlurChange from "metabase/common/components/InputBlurChange";
-import ModalContent from "metabase/common/components/ModalContent";
-import ModalWithTrigger from "metabase/common/components/ModalWithTrigger";
 import CS from "metabase/css/core/index.css";
-import { isTableDisplay } from "metabase/lib/click-behavior";
-import { Box, Button, Icon } from "metabase/ui";
+import { hasColumnLevelClickBehavior } from "metabase/dashboard/utils";
+import {
+  Button,
+  Icon,
+  Modal,
+  Stack,
+  Text,
+  TextInputBlurChange,
+} from "metabase/ui";
 import type { UiParameter } from "metabase-lib/v1/parameters/types";
-import { clickBehaviorIsValid } from "metabase-lib/v1/parameters/utils/click-behavior";
 import type {
   ArbitraryCustomDestinationClickBehavior,
   ClickBehavior,
   DashboardCard,
 } from "metabase-types/api";
+import { clickBehaviorIsValid } from "metabase-types/guards";
 
-import LinkOptionsS from "../LinkOptions/LinkOptions.module.css";
 import { SidebarItem } from "../SidebarItem";
 
 import { CustomLinkText } from "./CustomLinkText";
@@ -37,6 +41,8 @@ export function CustomURLPicker({
 }: Props) {
   const [url, setUrl] = useState(clickBehavior?.linkTemplate ?? "");
   const hasLinkTemplate = !!clickBehavior.linkTemplate;
+  const [modalOpened, { open: openModal, close: closeModal }] =
+    useDisclosure(!hasLinkTemplate);
   const canSelect = clickBehaviorIsValid({
     ...clickBehavior,
     linkTemplate: url,
@@ -65,68 +71,66 @@ export function CustomURLPicker({
   }, [clickBehavior, updateSettings]);
 
   return (
-    <ModalWithTrigger
-      isInitiallyOpen={!hasLinkTemplate}
-      triggerElement={
-        <Button.Group>
-          <Button
-            justify="flex-start"
-            leftSection={<Icon name="link" />}
-            size="lg"
-            variant="filled"
-            classNames={{
-              root: LinkOptionsS.ButtonRoot,
-            }}
-          >
-            <SidebarItem.Name>
-              {hasLinkTemplate ? clickBehavior.linkTemplate : t`URL`}
-            </SidebarItem.Name>
-          </Button>
-          <Button
-            onClick={handleReset}
-            miw="3rem"
-            size="lg"
-            variant="filled"
-            rightSection={<Icon name="close" />}
-          />
-        </Button.Group>
-      }
-    >
-      {({ onClose }: { onClose: () => void }) => (
-        <ModalContent
-          title={t`Enter a URL to link to`}
-          onClose={hasLinkTemplate ? onClose : undefined}
+    <>
+      <Button.Group>
+        <Button
+          justify="flex-start"
+          leftSection={<Icon name="link" />}
+          size="lg"
+          variant="filled"
+          flex="1 1 auto"
+          onClick={openModal}
         >
-          <Box component="span" mb="md">
+          <SidebarItem.Name>
+            {hasLinkTemplate ? clickBehavior.linkTemplate : t`URL`}
+          </SidebarItem.Name>
+        </Button>
+        <Button
+          onClick={handleReset}
+          miw="3rem"
+          size="lg"
+          variant="filled"
+          rightSection={<Icon name="close" />}
+        />
+      </Button.Group>
+      <Modal
+        density="relaxed"
+        opened={modalOpened}
+        onClose={closeModal}
+        title={t`Enter a URL to link to`}
+        size="lg"
+      >
+        <Stack gap="xl">
+          <Text>
             {t`You can insert the value of a column or dashboard filter using its name, like this: {{some_column}}`}
-          </Box>
-          <InputBlurChange
+          </Text>
+          <TextInputBlurChange
             autoFocus
             value={url}
             placeholder={t`e.g. http://acme.com/id/\{\{user_id\}\}`}
             onChange={handleLinkTemplateChange}
             className={cx(CS.block, CS.full)}
           />
-          {isTableDisplay(dashcard) && (
+          {hasColumnLevelClickBehavior(dashcard) && (
             <CustomLinkText
               updateSettings={updateSettings}
               clickBehavior={clickBehavior}
             />
           )}
           <ValuesYouCanReference dashcard={dashcard} parameters={parameters} />
+        </Stack>
+        <Modal.Footer>
           <Button
-            ml="auto"
-            mt="xl"
             variant="filled"
             type="button"
             onClick={() => {
               handleSubmit();
-              onClose();
+              closeModal();
             }}
             disabled={!canSelect}
           >{t`Done`}</Button>
-        </ModalContent>
-      )}
-    </ModalWithTrigger>
+        </Modal.Footer>
+      </Modal>
+    </>
   );
 }

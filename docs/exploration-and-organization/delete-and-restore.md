@@ -1,10 +1,11 @@
 ---
 title: Delete and restore
+summary: You can move questions, dashboards, models, and metrics to Trash where they can be restored or permanently deleted. Deleting items affects related content like dashboards and subscriptions. Other entities in Metabase can be deleted or archived, but won't show up in Trash.
 ---
 
 # Delete and restore
 
-Sometimes your questions, dashboards, models, or collections outlive their usefulness. You can send outdated items to **Trash**.
+Sometimes your questions, dashboards, models, metrics, or collections outlive their usefulness. You can send outdated items to **Trash**.
 
 ![Move to trash](./images/move-to-trash.png)
 
@@ -22,7 +23,7 @@ You can find Trash at the bottom of the left navigation sidebar below all the co
 
 You can think of Trash as a special type of collection. In **Trash**, you can see deleted items from the collections that you have [Curate permissions](../permissions/collections.md#collection-permission-levels) on. You can order deleted items by type (questions, dashboards, etc), time it was deleted, and who deleted it.
 
-You;'ll be able to see the contents of deleted dashboards, questions, and models in Trash, but you won't be able to modify them.
+You'll be able to see the contents of deleted dashboards, questions, and models in Trash, but you won't be able to modify them.
 
 ## Search in Trash
 
@@ -55,7 +56,7 @@ To restore an item:
 
 > Restoring a collection will also restore all the items from that collection.
 
-If the item's original parent collection has been deleted as well, you won't see an option to **Restore**. You'll still be able to move the it from Trash to a different collection.
+If the item's original parent collection has been deleted as well, you won't see an option to **Restore**. You'll still be able to move it from Trash to a different collection.
 
 ### Cleaning up collections
 
@@ -90,11 +91,13 @@ What happens to related items when you delete a dashboard?
 
 What happens to related items when you delete a model?
 
-| Related item                       | In Trash       | Permanently deleted                | Restored       |
-| ---------------------------------- | -------------- | ---------------------------------- | -------------- |
-| Question based on deleted question | Works normally | Breaks with `Card not found` error | Reactivated    |
-| Dashboard                          | Card removed   | Card removed                       | Card restored  |
-| Action                             | Works normally | Deleted                            | Works normally |
+| Related item                       | In Trash       | Permanently deleted                | Restored      |
+| ---------------------------------- | -------------- | ---------------------------------- | ------------- |
+| Question based on deleted question | Works normally | Breaks with `Card not found` error | Reactivated   |
+| Dashboard                          | Card removed   | Card removed                       | Card restored |
+| Action                             | Deleted        | Deleted                            | Not restored  |
+
+Metabase also removes the dashboard buttons that use the model's actions. The same happens when you move the collection that the model is in to the trash. See [Deleting a model deletes its actions](../data-modeling/models/actions/introduction.md#deleting-a-model-deletes-its-actions).
 
 ## Collections
 
@@ -104,7 +107,7 @@ What happens to related items when you delete a collection?
 | ---------------------------------------------- | -------- | ------------------- | -------- |
 | All items and subcollections in the collection | In Trash | N/A                 | Restored |
 
-> You can't permanently delete collections
+> You can't permanently delete collections.
 
 ## Permanently deleting items
 
@@ -117,7 +120,7 @@ To permanently delete an item:
 3. Click on the checkbox next to the item to select it;
 4. Select "Permanently delete". If you click this button, you won't be able to recover the item. It'll be lost to the void.
 
-> You can't permanently delete collections
+> You can't permanently delete collections.
 
 ## Deleting and restoring events and timelines
 
@@ -125,21 +128,21 @@ Events and timelines can be archived and unarchived. See [Archiving Events and t
 
 You won't see archived Events and Timelines in Trash. To see archived events and timelines, you need to [access them from the collection's page](events-and-timelines.md#view-archived-events-and-timelines).
 
-## Deleting and restoring Snippets
+## Deleting and restoring snippets
 
-Snippets can be archived and unarchived. See [Archiving Snippets](../questions/native-editor/snippets.md#archiving-snippets).
-
-You won't see archived Snippets in Trash. To see archived Snippets, you need to [access them from the Snippet menu](../questions/native-editor/snippets.md#snippet-menu).
+Snippets can be archived and unarchived. See [Archiving snippets](../questions/native-editor/snippets.md#archive-snippets). You won't see archived snippets in Trash. Snippets can't be permanently deleted.
 
 ## Deleting segments
 
-Segments can be retired. See [Retiring Segments](../data-modeling/segments.md#editing-and-retiring-segments).
+See [Delete segments](../data-modeling/semantic-layer/segments.md#delete-segments). Deleting segments is permanent, but it won't break questions that use the segment.
 
-You won't see retired Segments in Trash.
+## Deleting measures
+
+See [Delete measures](../data-modeling/semantic-layer/measures.md#delete-measures). Deleting measures is permanent.
 
 ## Deleting subscriptions and alerts
 
-See [Deleting a subscription](../dashboards/subscriptions.md#deleting-a-subscription) and [Deleting alerts](../questions/alerts.md#editing-and-deleting-alerts).
+See [Deleting a subscription](../dashboards/subscriptions.md#deleting-a-subscription) and [Deleting alerts](../questions/alerts.md#editing-deleting-and-unsubscribing-from-alerts).
 
 ## Deleting databases
 

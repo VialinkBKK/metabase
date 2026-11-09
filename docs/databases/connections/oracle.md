@@ -6,7 +6,7 @@ redirect_from:
 
 # Oracle
 
-To add a database connection, click on the **gear** icon in the top right, and navigate to **Admin settings** > **Databases** > **Add a database**.
+To add a database connection, click the **grid** icon in the top right, and navigate to **Admin** > **Databases** > **Add a database**.
 
 ## Supported versions
 
@@ -15,6 +15,10 @@ Metabase supports the oldest supported version through the latest stable version
 ## Edit connection details
 
 You can edit these settings at any time. Just remember to save your changes.
+
+### Connection string
+
+Paste a connection string here to pre-fill the remaining fields below.
 
 ### Display name
 
@@ -90,7 +94,7 @@ certificate chain. Refer to the
 [Oracle documentation](https://docs.oracle.com/javase/8/docs/technotes/tools/unix/keytool.html) on using `keytool` to manage key and truststore files, importing certificates, etc.
 
 For more information on setting up a truststore for AWS RDS Oracle instances, see the
-[instructions provided by Amazon](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Appendix.Oracle.Options.SSL.html#Appendix.Oracle.Options.SSL.JDBC).
+[instructions provided by Amazon](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Appendix.Oracle.Options.SSL.JDBC.html).
 
 If you need to connect to other databases using SSL, instead of creating a new truststore, you'll probably want to add the RDS CA to your existing truststore file (likely called `cacerts`).
 
@@ -107,7 +111,7 @@ We recommend using the `ojdbc8.jar` JAR.
 
 ## Adding the Oracle JDBC Driver JAR to the Metabase plugins directory
 
-In your Metabase directory (the directory where you keep and run your metabase.jar), create a directory called `plugins` (if it doesn't already exist.
+In your Metabase directory (the directory where you keep and run your metabase.jar), create a directory called `plugins` (if it doesn't already exist).
 
 Move the JAR you just downloaded (`ojdbc8.jar`) into the plugins directory, and restart Metabase. Metabase will automatically make the Oracle driver available when it starts back up.
 
@@ -127,6 +131,10 @@ For example, if you're running Metabase from a directory called `/app/`, you sho
 
 The process for adding plugins when running via Docker is similar, but you'll need to mount the `plugins` directory. Refer to instructions [here](../../installation-and-operation/running-metabase-on-docker.md#adding-external-dependencies-or-plugins) for more details.
 
+## Writable connection
+
+Set up an additional connection used for write operations. See [Writable connections](../writable-connection.md).
+
 ## Danger zone
 
 See [Danger zone](../danger-zone.md).
@@ -134,6 +142,6 @@ See [Danger zone](../danger-zone.md).
 ## Further reading
 
 - [Managing databases](../../databases/connecting.md)
-- [Metadata editing](../../data-modeling/metadata-editing.md)
-- [Models](../../data-modeling/models.md)
+- [Metadata editing](../../data-modeling/metadata/metadata-editing.md)
+- [Models](../../data-modeling/models/models.md)
 - [Setting data access permissions](../../permissions/data.md)

@@ -1,46 +1,71 @@
 (ns metabase.query-processor.util
   "Utility functions used by the global query processor and middleware functions."
+  (:refer-clojure :exclude [select-keys get-in])
   (:require
    [buddy.core.codecs :as codecs]
-   [buddy.core.hash :as buddy-hash]
    [clojure.string :as str]
-   [clojure.walk :as walk]
-   [medley.core :as m]
    [metabase.driver :as driver]
-   [metabase.legacy-mbql.normalize :as mbql.normalize]
-   [metabase.lib-be.metadata.jvm :as lib.metadata.jvm]
+   [metabase.lib-be.core]
    [metabase.lib.core :as lib]
-   [metabase.lib.schema.expression :as lib.schema.expression]
-   [metabase.lib.schema.util :as lib.schema.util]
    [metabase.query-processor.schema :as qp.schema]
-   [metabase.query-processor.store :as qp.store]
+   [metabase.system.core :as system]
    [metabase.util :as u]
-   [metabase.util.json :as json]
-   [metabase.util.malli :as mu]))
+   [metabase.util.malli :as mu]
+   [metabase.util.performance :refer [select-keys get-in]]
+   [potemkin :as p]))
 
 (set! *warn-on-reflection* true)
 
-;; TODO - I think most of the functions in this namespace that we don't remove could be moved to [[metabase.legacy-mbql.util]]
+(comment metabase.lib-be.core/keep-me)
 
-(defn query-without-aggregations-or-limits?
-  "Is the given query an MBQL query without a `:limit`, `:aggregation`, or `:page` clause?"
-  [{{aggregations :aggregation, :keys [limit page]} :query}]
-  (and (not limit)
-       (not page)
-       (empty? aggregations)))
+(p/import-vars
+ [metabase.lib-be.core
+  query-hash])
 
-(defn default-query->remark
+;; TODO - I think most of the functions in this namespace that we don't remove could be moved
+;; to [[metabase.legacy-mbql.util]]
+
+(defn- remark-field
+  [field-name value]
+  (when-let [value (cond-> value (keyword? value) name)]
+    (format " %s: %s" field-name value)))
+
+(mu/defn query->remark-data
+  "Returns the data for a query remark as a map. Drivers can format this data as their database requires."
+  [{{:keys [executed-by query-hash card-id dashboard-id pulse-id context], :as _info} :info
+    database-id :database
+    :as query} :- ::qp.schema/any-query]
+  {:user-id      executed-by
+   :query-type   (if (:lib/type query)
+                   (case (keyword (:lib/type (lib/query-stage query -1)))
+                     :mbql.stage/mbql   "MBQL"
+                     :mbql.stage/native "native")
+                   (case (keyword (:type query))
+                     :query  "MBQL"
+                     :native "native"))
+   :query-hash   (when (bytes? query-hash) (codecs/bytes->hex query-hash))
+   :account-id   (system/site-uuid)
+   :dashboard-id dashboard-id
+   :card-id      card-id
+   :pulse-id     pulse-id
+   :context      context
+   :database-id  database-id})
+
+(mu/defn default-query->remark
   "Generates the default query remark. Exists as a separate function so that overrides of the query->remark multimethod
    can access the default value."
-  [{{:keys [executed-by query-hash], :as _info} :info, query-type :type}]
-  (str "Metabase" (when executed-by
-                    (assert (bytes? query-hash) "If info includes executed-by it should also include query-hash")
-                    (format ":: userID: %s queryType: %s queryHash: %s"
-                            executed-by
-                            (case (keyword query-type)
-                              :query  "MBQL"
-                              :native "native")
-                            (codecs/bytes->hex query-hash)))))
+  [query :- ::qp.schema/any-query]
+  (let [{:keys [user-id query-type query-hash account-id dashboard-id card-id pulse-id context database-id]}
+        (query->remark-data query)]
+    (str "Metabase" (when user-id
+                      (assert query-hash "If info includes executed-by it should also include query-hash")
+                      (format ":: userID: %s queryType: %s queryHash: %s" user-id query-type query-hash))
+         (remark-field "accountID" account-id)
+         (remark-field "dashboardID" dashboard-id)
+         (remark-field "cardID" card-id)
+         (remark-field "pulseID" pulse-id)
+         (remark-field "context" context)
+         (remark-field "databaseID" database-id))))
 
 (defmulti query->remark
   "Generate an appropriate remark `^String` to be prepended to a query to give DBAs additional information about the query
@@ -62,8 +87,6 @@
   [_ query]
   (default-query->remark query))
 
-;;; ------------------------------------------------- Normalization --------------------------------------------------
-
 ;; TODO - this has been moved to `metabase.legacy-mbql.util`; use that implementation instead.
 (mu/defn ^:deprecated normalize-token :- :keyword
   "Convert a string or keyword in various cases (`lisp-case`, `snake_case`, or `SCREAMING_SNAKE_CASE`) to a lisp-cased
@@ -74,120 +97,7 @@
       (str/replace #"_" "-")
       keyword))
 
-;;; ---------------------------------------------------- Hashing -----------------------------------------------------
-
-(defn- walk-query-sort-maps
-  "We don't want two queries to have different hashes because their map keys are in different orders, now do we? Convert
-  all the maps to sorted maps so queries are serialized to JSON in an identical order."
-  [x]
-  (walk/postwalk
-   (fn [x]
-     (if (and (map? x)
-              (not (sorted? x)))
-       (into (sorted-map) x)
-       x))
-   x))
-
-(mu/defn- sort-parameter-values
-  "Return the sequence of parameter maps, but with any :value keys sorted if they are a sequence. Parameter values can
-  be of mixed types, as bigintegers are passed as strings to avoid precision loss."
-  [params :- [:or :nil [:sequential :any]]]
-  (map #(if (sequential? (:value %)) (update % :value (partial sort-by str)) %) params))
-
-(mu/defn- select-keys-for-hashing
-  "Return `query` with only the keys relevant to hashing kept.
-  (This is done so irrelevant info or options that don't affect query results doesn't result in the same query
-  producing different hashes.)"
-  [query :- [:maybe :map]]
-  (let [{:keys [constraints parameters], :as query} (select-keys query [:database
-                                                                        :lib/type
-                                                                        :stages
-                                                                        :parameters
-                                                                        :constraints
-                                                                        :destination-database/id
-                                                                        :impersonation/role])]
-    (-> query
-        (cond-> (empty? constraints) (dissoc :constraints))
-        (update :parameters sort-parameter-values)
-        (cond-> (empty? parameters) (dissoc :parameters))
-        lib.schema.util/indexed-order-bys
-        lib.schema.util/remove-lib-uuids
-        walk-query-sort-maps)))
-
-(defn- ->metadata-provider [legacy-query]
-  (if (qp.store/initialized?)
-    (qp.store/metadata-provider)
-    (lib.metadata.jvm/application-database-metadata-provider (:database legacy-query))))
-
-(mu/defn query-hash :- bytes?
-  "Return a 256-bit SHA3 hash of `query` as a key for the cache. (This is returned as a byte array.)"
-  ^bytes [query :- [:maybe :map]]
-  ;; convert to pMBQL first if this is a legacy query.
-  (let [query (try
-                ;; Expression type check supression is necessary because coerced fields in `query` may not have
-                ;; `:effective-type` populated. That's the case during call to this function in
-                ;; `process-userland-query-middleware` that occurs before normalization.
-                ;; TODO: This is an unfortunate leak of lib internals but I can't see a clean way to fix it.
-                (binding [lib.schema.expression/*suppress-expression-type-check?* true]
-                  (case (:type query)
-                    ("query" "native") (lib/query (->metadata-provider query) (mbql.normalize/normalize query))
-                    (:query :native)   (lib/query (->metadata-provider query) query)
-                    query))
-                (catch Throwable e
-                  (throw (ex-info "Error hashing query. Is this a valid query?"
-                                  {:query query}
-                                  e))))]
-    (buddy-hash/sha3-256 (json/encode (select-keys-for-hashing query)))))
-
-;;; --------------------------------------------- Query Source Card IDs ----------------------------------------------
-
-(defn query->source-card-id
-  "Return the ID of the Card used as the \"source\" query of this query, if applicable; otherwise return `nil`."
-  ^Integer [outer-query]
-  (let [source-table (get-in outer-query [:query :source-table])]
-    (when (string? source-table)
-      (when-let [[_ card-id-str] (re-matches #"^card__(\d+$)" source-table)]
-        (Integer/parseInt card-id-str)))))
-
-;;; ------------------------------------------- Metadata Combination Utils --------------------------------------------
-
-(defn field-ref->key
-  "A standard and repeatable way to address a column. Names can collide and sometimes are not unique. Field refs should
-  be stable, except we have to exclude the last part as extra information can be tucked in there. Names can be
-  non-unique at times, numeric ids are not guaranteed."
-  [[tyype identifier]]
-  [tyype identifier])
-
-(def ^:private field-options-for-identification
-  "Set of FieldOptions that only mattered for identification purposes." ;; base-type is required for field that use name instead of id
-  #{:source-field :join-alias :base-type})
-
-(defn- field-normalizer
-  [field]
-  (let [[type id-or-name options] (mbql.normalize/normalize-tokens field)]
-    [type id-or-name (select-keys options field-options-for-identification)]))
-
-(defn field->field-info
-  "Given a field and result_metadata, return a map of information about the field if result_metadata contains a matched field. "
-  [field result-metadata]
-  (let [[_ttype id-or-name options :as field] (field-normalizer field)]
-    (or
-      ;; try match field_ref first
-     (first (filter (fn [field-info]
-                      (= field
-                         (-> field-info
-                             :field_ref
-                             field-normalizer)))
-                    result-metadata))
-      ;; if not match name and base type for aggregation or field with string id
-     (first (filter (fn [field-info]
-                      (and (= (:name field-info)
-                              id-or-name)
-                           (= (:base-type options)
-                              (:base_type field-info))))
-                    result-metadata)))))
-
-(def ^:private preserved-keys
+(def ^:private ^{:deprecated "0.57.0"} preserved-keys
   "Keys that can survive merging metadata from the database onto metadata computed from the query. When merging
   metadata, the types returned should be authoritative. But things like semantic_type, display_name, and description
   can be merged on top."
@@ -200,40 +110,31 @@
 
   Ensure that saved metadata from datasets or source queries can remain in the results metadata. We always recompute
   metadata in general, so need to blend the saved metadata on top of the computed metadata. First argument should be
-  the metadata from a run from the query, and `pre-existing` should be the metadata from the database we wish to
+  the metadata from a run from the query, and `old-metadata` should be the metadata from the database we wish to
   ensure survives."
-  [fresh pre-existing]
-  (let [by-name (m/index-by :name pre-existing)]
-    (for [{:keys [source] :as col} fresh]
-      (if-let [existing (and (not= :aggregation source)
-                             (get by-name (:name col)))]
-        (merge col (select-keys existing preserved-keys))
-        col))))
+  {:deprecated "0.57.0"}
+  [new-metadata old-metadata]
+  ;; deprecated fn using its own deprecated helper; both leave together
+  #_{:clj-kondo/ignore [:deprecated-var]}
+  (map (fn [new-col old-col]
+         (cond-> new-col
+           old-col (merge (select-keys old-col preserved-keys))))
+       new-metadata
+       (lib/match-returned-columns old-metadata new-metadata)))
 
+#_{:clj-kondo/ignore [:metabase/discourage-dynamic-vars]}
 (def ^:dynamic *execute-async?*
-  "Used to control `with-execute-async` to whether or not execute its body asynchronously."
+  "Whether to save QueryExecutions (and other post-execution side effects) asynchronously via the batch-processing
+  queue. Bind (or redef, when the query runs on another thread) to `false` in tests to save synchronously on the
+  calling thread."
   true)
-
-(defn do-with-execute-async
-  "Impl of `with-execute-async`"
-  [thunk]
-  (if *execute-async?*
-    (.submit clojure.lang.Agent/pooledExecutor ^Runnable thunk)
-    (thunk)))
-
-(defmacro with-execute-async
-  "Execute body asynchronously in a pooled executor.
-
-  Used for side effects during query execution like saving query execution info."
-  [thunk]
-  `(do-with-execute-async ~thunk))
 
 (mu/defn userland-query? :- :boolean
   "Returns true if the query is an userland query, else false."
-  [query :- ::qp.schema/qp]
+  [query :- ::qp.schema/any-query]
   (boolean (get-in query [:middleware :userland-query?])))
 
 (mu/defn internal-query? :- :boolean
   "Returns `true` if query is an internal query."
-  [{query-type :type} :- ::qp.schema/qp]
+  [{query-type :type} :- ::qp.schema/any-query]
   (= :internal (keyword query-type)))

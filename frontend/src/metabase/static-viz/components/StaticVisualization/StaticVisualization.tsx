@@ -1,15 +1,22 @@
-import { registerStaticVisualizations } from "metabase/static-viz/register";
-import { getVisualizationTransformed } from "metabase/visualizations";
-import { getComputedSettingsForSeries } from "metabase/visualizations/lib/settings/visualization";
-import type { StaticVisualizationProps } from "metabase/visualizations/types";
+import type { JSX } from "react";
 
+import { registerStaticVisualizations } from "metabase/static-viz/register";
+import {
+  type StaticVisualizationProps,
+  getComputedSettingsForSeries,
+  getVisualizationTransformed,
+} from "metabase/viz-core";
+
+import { BoxPlotChart } from "../BoxPlotChart/BoxPlotChart";
 import { ComboChart } from "../ComboChart";
 import { FunnelBarChart } from "../FunnelBarChart";
 import { PieChart } from "../PieChart/PieChart";
+import { ProgressBar } from "../ProgressBar";
 import { SankeyChart } from "../SankeyChart";
 import { ScalarChart } from "../ScalarChart";
 import { ScatterPlot } from "../ScatterPlot/ScatterPlot";
 import { SmartScalar } from "../SmartScalar";
+import { TreemapChart } from "../TreemapChart";
 import { WaterfallChart } from "../WaterfallChart/WaterfallChart";
 
 registerStaticVisualizations();
@@ -19,7 +26,11 @@ export const StaticVisualization = ({
   renderingContext,
   isStorybook,
   hasDevWatermark,
-}: StaticVisualizationProps) => {
+  width,
+  height,
+  fitWithinBounds,
+  gridSize,
+}: StaticVisualizationProps): JSX.Element => {
   const display = rawSeries[0].card.display;
   const transformedSeries = getVisualizationTransformed(rawSeries).series;
   const settings = getComputedSettingsForSeries(transformedSeries);
@@ -29,6 +40,10 @@ export const StaticVisualization = ({
     renderingContext,
     isStorybook,
     hasDevWatermark,
+    width,
+    height,
+    fitWithinBounds,
+    gridSize,
   };
 
   switch (display) {
@@ -36,9 +51,12 @@ export const StaticVisualization = ({
     case "area":
     case "bar":
     case "combo":
+    case "row":
       return <ComboChart {...props} />;
     case "scatter":
       return <ScatterPlot {...props} />;
+    case "boxplot":
+      return <BoxPlotChart {...props} />;
     case "waterfall":
       return <WaterfallChart {...props} />;
     case "funnel":
@@ -51,6 +69,10 @@ export const StaticVisualization = ({
       return <PieChart {...props} />;
     case "sankey":
       return <SankeyChart {...props} />;
+    case "treemap":
+      return <TreemapChart {...props} />;
+    case "progress":
+      return <ProgressBar {...props} />;
   }
 
   throw new Error(`Unsupported display type: ${display}`);

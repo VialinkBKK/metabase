@@ -1,5 +1,7 @@
 (ns ^:mb/driver-tests metabase.driver.oracle-test
   "Tests for specific behavior of the Oracle driver."
+  {:clj-kondo/config '{:linters {:deprecated-var {:exclude {metabase.test.data/mbql-query {:namespaces [metabase.driver.oracle-test]}
+                                                            metabase.test.data/run-mbql-query {:namespaces [metabase.driver.oracle-test]}}}}}}
   (:require
    [clojure.java.jdbc :as jdbc]
    [clojure.string :as str]
@@ -11,24 +13,26 @@
    [metabase.driver :as driver]
    [metabase.driver.oracle :as oracle]
    [metabase.driver.sql-jdbc.connection :as sql-jdbc.conn]
+   [metabase.driver.sql-jdbc.execute :as sql-jdbc.execute]
    [metabase.driver.sql-jdbc.sync :as sql-jdbc.sync]
    [metabase.driver.sql.query-processor :as sql.qp]
    [metabase.driver.util :as driver.u]
-   [metabase.lib-be.metadata.jvm :as lib.metadata.jvm]
    [metabase.lib.core :as lib]
    [metabase.lib.metadata :as lib.metadata]
    [metabase.lib.test-util :as lib.tu]
+   [metabase.lib.test-util.notebook-helpers :as lib.tu.notebook]
    [metabase.premium-features.core :as premium-features]
-   [metabase.query-processor :as qp]
-   [metabase.query-processor-test.order-by-test :as qp-test.order-by-test]
    [metabase.query-processor.compile :as qp.compile]
+   [metabase.query-processor.order-by-test :as qp-test.order-by-test]
    [metabase.query-processor.preprocess :as qp.preprocess]
-   [metabase.query-processor.store :as qp.store]
+   ;; binds mock metadata providers via the ambient store, which the code under test reads
+   ^{:clj-kondo/ignore [:deprecated-namespace]} [metabase.query-processor.store :as qp.store]
+   [metabase.query-processor.test :as qp]
    [metabase.sync.core :as sync]
    [metabase.sync.util :as sync-util]
    [metabase.test :as mt]
    [metabase.test.data.dataset-definitions :as defs]
-   [metabase.test.data.env :as te]
+   [metabase.test.data.env :as te] ; codespell:ignore
    [metabase.test.data.interface :as tx]
    [metabase.test.data.oracle :as oracle.tx]
    [metabase.test.data.sql :as sql.tx]
@@ -37,6 +41,8 @@
    [metabase.util.date-2 :as u.date]
    [metabase.util.honey-sql-2 :as h2x]
    [metabase.util.log :as log]
+   [metabase.util.log.capture :as log.capture]
+   [metabase.util.malli :as mu]
    [toucan2.core :as t2])
   (:import
    (java.time LocalDateTime)))
@@ -105,13 +111,190 @@
            (try (sql-jdbc.conn/connection-details->spec :oracle {:host "localhost"
                                                                  :port 1521})
                 (catch Throwable e
-                  (driver/humanize-connection-error-message :oracle (.getMessage e))))))))
+                  (driver/humanize-connection-error-message :oracle (u/all-ex-messages e))))))))
+
+;;; The Oracle thin driver reads its connect descriptor -- everything after the `@` -- as instructions, not
+;;; just as an address: `@config-https://host/path` makes it fetch that URL and obey the configuration it returns,
+;;; `@config-file:///path` makes it read that file, and `@ldap://host/...` makes it ask that host for the real
+;;; descriptor. The details below are all built by concatenation into that descriptor, so each one has to be what it
+;;; claims to be before it gets there.
+(deftest ^:parallel reject-connect-descriptor-injection-test
+  (doseq [[message details] [["a host naming Oracle's HTTPS configuration provider (SSRF)"
+                              {:host "config-https://evil.example.com/c", :sid "ORCL"}]
+                             ["a host naming Oracle's file configuration provider (local file read)"
+                              {:host "config-file:///etc/passwd", :sid "ORCL"}]
+                             ["a host naming an LDAP directory (SSRF + connection redirection)"
+                              {:host "ldap://evil.example.com/cn=x,cn=OracleContext", :sid "ORCL"}]
+                             ["a host carrying any other scheme"
+                              {:host "tcps://evil.example.com", :sid "ORCL"}]
+                             ["a host carrying descriptor syntax"
+                              {:host "h)(PORT=1521))(ADDRESS=(HOST=evil", :sid "ORCL", :ssl true}]
+                             ["a host list with a URL in it"
+                              {:host "h1,config-https://evil.example.com/c", :sid "ORCL"}]
+                             ["a host list with descriptor syntax in it"
+                              {:host "h1,h2)(PORT=1521))(ADDRESS=(HOST=evil", :sid "ORCL", :ssl true}]
+                             ["a host list with an empty entry"
+                              {:host "h1,,h2", :sid "ORCL"}]
+                             ["a SID that closes the CONNECT_DATA clause and adds an address"
+                              {:host "h", :sid "x))(ADDRESS=(PROTOCOL=tcp)(HOST=evil)(PORT=80)", :ssl true}]
+                             ["a service name that closes the CONNECT_DATA clause and adds an address"
+                              {:host "h", :service-name "x))(ADDRESS=(PROTOCOL=tcp)(HOST=evil)(PORT=80)", :ssl true}]
+                             ["a service name carrying connection parameters"
+                              {:host "h", :service-name "svc?oracle.net.tns_admin=/etc"}]]]
+    (testing message
+      (testing "is refused when the details are validated"
+        (is (thrown-with-msg?
+             clojure.lang.ExceptionInfo
+             #"(?i)invalid"
+             (driver/validate-db-details! :oracle details))))
+      (testing "is refused when a connection spec is built, so no connection path can skip the check"
+        (is (thrown-with-msg?
+             clojure.lang.ExceptionInfo
+             #"(?i)invalid"
+             (sql-jdbc.conn/connection-details->spec :oracle details)))))))
+
+;;; `::details` types the port as an integer, but that schema is instrumented only in dev and test, so in production a
+;;; string port arrives as-is. These two go through `driver/validate-db-details!`, which is not schema-gated, so they
+;;; exercise what production sees rather than what the schema would have caught first.
+(deftest ^:parallel reject-port-carrying-connection-parameters-test
+  (is (thrown-with-msg?
+       clojure.lang.ExceptionInfo
+       #"(?i)invalid"
+       (driver/validate-db-details! :oracle {:host "h", :port "1521 ?oracle.net.tns_admin=/etc", :sid "ORCL"}))))
+
+(deftest ^:parallel accept-port-sent-as-a-string-test
+  (is (nil? (driver/validate-db-details! :oracle {:host "h", :port "1521", :sid "ORCL"}))))
+
+(deftest ^:parallel accept-ordinary-connection-details-test
+  (doseq [[message details] [["a hostname"      {:host "oracle.example.com", :sid "ORCL"}]
+                             ["an IPv4 literal" {:host "10.0.0.4", :sid "ORCL"}]
+                             ["an IPv6 literal" {:host "[2001:db8::1]", :sid "ORCL"}]
+                             ["an underscore in the hostname" {:host "my_db.internal", :sid "ORCL"}]
+                             ["a comma-separated list of hosts"
+                              {:host "db1.example.com, 10.0.0.4,[2001:db8::1]", :service-name "svc"}]
+                             ["a missing host"  {:sid "ORCL"}]
+                             ["a blank host"    {:host "", :sid "ORCL"}]
+                             ["a qualified service name"
+                              {:host "h", :service-name "g1234_mydb_high.adb.oraclecloud.com"}]
+                             ["a SID with the punctuation Oracle allows in an identifier"
+                              {:host "h", :sid "MY_DB$1#x"}]]]
+    (testing message
+      (is (nil? (driver/validate-db-details! :oracle details)))
+      (is (map? (sql-jdbc.conn/connection-details->spec :oracle details))))))
+
+(deftest ^:parallel descriptor-details-are-normalized-test
+  (testing "the value that was checked is the value the descriptor gets built from"
+    (testing "surrounding whitespace is trimmed rather than passed through"
+      (is (= "@localhost:1521:ORCL/MyService"
+             (:subname (sql-jdbc.conn/connection-details->spec
+                        :oracle
+                        {:host " localhost ", :port 1521, :sid " ORCL ", :service-name " MyService "})))))
+    (testing "a port sent as a string reaches the SSL descriptor as a number"
+      ;; `::details` types the port as an integer, but that schema is instrumented only in dev and test, so in
+      ;; production an API caller's string arrives as-is -- and `ssl-spec` formats the port with `%d`. Enforcement is
+      ;; disabled here to exercise what production does.
+      (is (= "@(DESCRIPTION=(ADDRESS=(PROTOCOL=tcps)(HOST=h)(PORT=1521))(CONNECT_DATA=(SID=ORCL)))"
+             (mu/disable-enforcement
+               (:subname (sql-jdbc.conn/connection-details->spec
+                          :oracle
+                          {:host "h", :port "1521", :sid "ORCL", :ssl true}))))))
+    (testing "a list of hosts"
+      (testing "keeps the hosts in order, without the spaces around the commas"
+        (is (= "@db1,db2:1521/svc"
+               (:subname (sql-jdbc.conn/connection-details->spec
+                          :oracle
+                          {:host "db1 , db2", :port 1521, :service-name "svc"})))))
+      (testing "gives one SSL address for each host, in order"
+        (is (= (str "@(DESCRIPTION=(ADDRESS=(PROTOCOL=tcps)(HOST=db1)(PORT=2484))"
+                    "(ADDRESS=(PROTOCOL=tcps)(HOST=db2)(PORT=2484))(CONNECT_DATA=(SERVICE_NAME=svc)))")
+               (:subname (sql-jdbc.conn/connection-details->spec
+                          :oracle
+                          {:host "db1,db2", :port 2484, :service-name "svc", :ssl true}))))))
+    (testing "a blank detail names nowhere, so the defaults apply rather than an empty string reaching the descriptor"
+      (is (= "@(DESCRIPTION=(ADDRESS=(PROTOCOL=tcps)(HOST=localhost)(PORT=1521))(CONNECT_DATA=(SID=ORCL)))"
+             (mu/disable-enforcement
+               (:subname (sql-jdbc.conn/connection-details->spec
+                          :oracle
+                          {:host "  ", :port "", :sid "ORCL", :ssl true}))))))))
+
+(deftest ^:parallel additional-options-warning-test
+  (let [details {:host "h", :port 1521, :sid "ORCL", :additional-options "oracle.net.tns_admin=/etc"}]
+    (testing "validating details warns that additional-options is ignored, so an admin saving one hears about it"
+      (log.capture/with-log-messages-for-level [messages [metabase.driver.oracle :warn]]
+        (driver/validate-db-details! :oracle details)
+        (is (=? [{:level :warn, :message #"(?i).*additional-options.*"}]
+                (messages)))))
+    (testing "building a connection spec does not, since that runs for every pool and every host check"
+      (log.capture/with-log-messages-for-level [messages [metabase.driver.oracle :warn]]
+        (sql-jdbc.conn/connection-details->spec :oracle details)
+        (is (= [] (messages)))))))
+
+(deftest ^:parallel connection-property-allowlist-test
+  (testing "only allowlisted details become JDBC connection properties"
+    (testing "an extra detail key is not handed to the driver as a property"
+      ;; `oracle.net.tns_admin` makes the driver read files under that directory; `oracle.net.httpsProxyHost` routes
+      ;; its egress through a host of the attacker's choosing.
+      (let [spec (sql-jdbc.conn/connection-details->spec
+                  :oracle
+                  {:host "h", :port 1521, :sid "ORCL", :user "u", :password "p"
+                   (keyword "oracle.net.tns_admin")      "/etc"
+                   (keyword "oracle.net.httpsProxyHost") "evil.example.com"
+                   (keyword "oracle.net.ssl_server_dn_match") "false"})]
+        (is (= #{:classname :subprotocol :subname :user :password (deref #'oracle/prog-name-property)}
+               (set (keys spec))))))
+    (testing "nor when the extra key arrives as a string rather than a keyword"
+      ;; `ms/KeywordizedMap` normalizes details keys on API decode, but the allowlist is what this relies on: it keeps
+      ;; named keys only, so a string key is dropped whichever way the decoding goes.
+      (let [spec (sql-jdbc.conn/connection-details->spec
+                  :oracle
+                  {:host "h", :port 1521, :sid "ORCL"
+                   "oracle.net.tns_admin" "/etc"
+                   "user"                 "not-the-user"})]
+        (is (= #{:classname :subprotocol :subname (deref #'oracle/prog-name-property)}
+               (set (keys spec))))))
+    (testing "Metabase's own bookkeeping details are not handed to the driver either"
+      (let [spec (sql-jdbc.conn/connection-details->spec
+                  :oracle
+                  {:host "h", :port 1521, :sid "ORCL"
+                   :tunnel-enabled true, :tunnel-host "bastion.example.com", :tunnel-user "tunnel"
+                   :advanced-options true, :auto-run-queries true, :let-user-control-scheduling false})]
+        (is (= #{:classname :subprotocol :subname (deref #'oracle/prog-name-property)}
+               (set (keys spec))))))
+    (testing "the SSL truststore properties the driver does need still get through"
+      (let [spec (sql-jdbc.conn/connection-details->spec
+                  :oracle
+                  {:host "h", :port 1521, :sid "ORCL", :ssl true
+                   :ssl-use-truststore            true
+                   :ssl-truststore-options        "uploaded"
+                   :ssl-truststore-value          "data:application/octet-stream;base64,eA=="
+                   :ssl-truststore-password-value "pw"})]
+        (is (= #{:classname :subprotocol :subname (deref #'oracle/prog-name-property)
+                 :javax.net.ssl.trustStore :javax.net.ssl.trustStoreType :javax.net.ssl.trustStorePassword}
+               (set (keys spec))))))))
+
+(deftest ^:parallel ignore-additional-options-test
+  (testing "`additional-options` is not appended to the connect descriptor"
+    ;; Oracle's connection form offers no `additional-options` field, and the only place the driver honored one was
+    ;; the SSL branch, where it became a `?name=value` parameter on the descriptor -- a way around the property
+    ;; allowlist above.
+    (is (= "@(DESCRIPTION=(ADDRESS=(PROTOCOL=tcps)(HOST=h)(PORT=1521))(CONNECT_DATA=(SID=ORCL)))"
+           (:subname (sql-jdbc.conn/connection-details->spec
+                      :oracle
+                      {:host "h", :port 1521, :sid "ORCL", :ssl true
+                       :additional-options "oracle.net.tns_admin=/etc"}))))))
+
+(deftest ^:parallel configuration-providers-disabled-test
+  (testing "Oracle's centralized configuration providers are turned off for the JVM"
+    ;; They are enabled by default, and turn `@config-https://…` / `@config-file://…` descriptors into an outbound
+    ;; fetch or a local file read. `(NONE)` is the driver's spelling for "no providers at all".
+    (is (= "(NONE)" (System/getProperty "oracle.jdbc.configurationProviders")))))
 
 (deftest connection-properties-test
   (testing "Connection properties should be returned properly (including transformation of secret types)"
-    (with-redefs [premium-features/is-hosted? (constantly false)]
-      (let [expected [{:name "host"}
-                      {:name "port"}
+    (mt/with-dynamic-fn-redefs [premium-features/is-hosted? (constantly false)]
+      (let [expected [{:type :group
+                       :fields [{:name "host"}
+                                {:name "port"}]}
                       {:name "sid"}
                       {:name "service-name"}
                       {:name "user"}
@@ -124,13 +307,13 @@
                                      :value "local"}
                                     {:name  "Uploaded file path"
                                      :value "uploaded"}]
-                       :visible-if {:ssl-use-keystore true}}
+                       :visible-if {"ssl-use-keystore" true}}
                       {:name       "ssl-keystore-value"
                        :type       "textFile"
-                       :visible-if {:ssl-keystore-options "uploaded"}}
+                       :visible-if {"ssl-keystore-options" "uploaded"}}
                       {:name       "ssl-keystore-path"
                        :type       "string"
-                       :visible-if {:ssl-keystore-options "local"}}
+                       :visible-if {"ssl-keystore-options" "local"}}
                       {:name "ssl-keystore-password-value"
                        :type "password"}
                       {:name "ssl-use-truststore"}
@@ -140,13 +323,13 @@
                                      :value "local"}
                                     {:name  "Uploaded file path"
                                      :value "uploaded"}]
-                       :visible-if {:ssl-use-truststore true}}
+                       :visible-if {"ssl-use-truststore" true}}
                       {:name       "ssl-truststore-value"
                        :type       "textFile"
-                       :visible-if {:ssl-truststore-options "uploaded"}}
+                       :visible-if {"ssl-truststore-options" "uploaded"}}
                       {:name       "ssl-truststore-path"
                        :type       "string"
-                       :visible-if {:ssl-truststore-options "local"}}
+                       :visible-if {"ssl-truststore-options" "local"}}
                       {:name "ssl-truststore-password-value"
                        :type "password"}
                       {:name "tunnel-enabled"}
@@ -157,8 +340,24 @@
                       {:name "tunnel-pass"}
                       {:name "tunnel-private-key"}
                       {:name "tunnel-private-key-passphrase"}
+                      {:name       "tunnel-known-hosts-options"
+                       :type       "select"
+                       :options    [{:name  "Local file path"
+                                     :value "local"}
+                                    {:name  "Uploaded file path"
+                                     :value "uploaded"}]
+                       :visible-if {"tunnel-enabled" true}}
+                      {:name       "tunnel-known-hosts-value"
+                       :type       "textFile"
+                       :visible-if {"tunnel-known-hosts-options" "uploaded"
+                                    "tunnel-enabled" true}}
+                      {:name       "tunnel-known-hosts-path"
+                       :type       "string"
+                       :visible-if {"tunnel-known-hosts-options" "local"
+                                    "tunnel-enabled" true}}
                       {:name "advanced-options"}
                       {:name "destination-database"}
+                      {:name "write-data-connection"}
                       {:name "auto_run_queries"}
                       {:name "let-user-control-scheduling"}
                       {:name "schedules.metadata_sync"}
@@ -166,7 +365,9 @@
                       {:name "refingerprint"}]
             actual   (->> (driver/connection-properties :oracle)
                           (driver.u/connection-props-server->client :oracle))]
-        (is (= expected (mt/select-keys-sequentially expected actual)))))))
+        (is (= (count expected) (count actual))
+            (str "actual names: " (pr-str (mapv :name actual))))
+        (is (=? expected actual))))))
 
 (deftest ^:parallel test-ssh-connection
   (testing "Gets an error when it can't connect to oracle via ssh tunnel"
@@ -196,10 +397,19 @@
                        (throw e))
                      (some-> (.getCause e) recur))))))))))
 
+(deftest host-list-failover-test
+  (mt/test-driver :oracle
+    (testing "a host list connects through the next host when the first host does not resolve"
+      (let [details (update (:details (mt/db)) :host #(str "db-down.invalid," %))]
+        (is (driver/can-connect? :oracle details))
+        (mt/with-temp-vals-in-db :model/Database (mt/id) {:details details}
+          (is (= [[1M]]
+                 (mt/rows (qp/process-query (lib/native-query (mt/metadata-provider) "SELECT 1 FROM dual"))))))))))
+
 (deftest timezone-id-test
   (mt/test-driver :oracle
     (is (= (t/zone-id "Z")
-           (-> (driver/db-default-timezone :oracle (mt/db))
+           (-> (driver/db-default-timezone :oracle (lib.metadata/database (mt/metadata-provider)))
                t/zone-id
                .normalized)))))
 
@@ -250,27 +460,30 @@
                                                    :database-type "char"
                                                    :base-type     :type/Text}]})
       (let [hsql (sql.qp/mbql->honeysql :oracle
-                                        {:query {:source-query {:source-table 1
+                                        {:database 1
+                                         :type     :query
+                                         :query {:source-query {:source-table 1
                                                                 :expressions  {"s" [:substring [:field 1 nil] 2]}
                                                                 :fields       [[:field 1 nil]
                                                                                [:expression "s"]]}
                                                  :fields       [[:field "s" {:base-type :type/Text}]]
                                                  :limit        3}})]
         (testing (format "Honey SQL =\n%s" (u/pprint-to-str hsql))
-          (is (= [["SELECT"
+          (is (= [["WITH \"__mb_stage_0\" AS ("
+                   "  SELECT"
+                   "    \"public\".\"table\".\"field\" \"field\","
+                   "    SUBSTR(\"public\".\"table\".\"field\", 2) \"s\""
+                   "  FROM"
+                   "    \"public\".\"table\""
+                   ")"
+                   "SELECT"
                    "  *"
                    "FROM"
                    "  ("
                    "    SELECT"
-                   "      \"source\".\"s\" \"s\""
+                   "      \"__mb_source\".\"s\" \"s\""
                    "    FROM"
-                   "      ("
-                   "        SELECT"
-                   "          \"public\".\"table\".\"field\" \"field\","
-                   "          SUBSTR(\"public\".\"table\".\"field\", 2) \"s\""
-                   "        FROM"
-                   "          \"public\".\"table\""
-                   "      ) \"source\""
+                   "      \"__mb_stage_0\" \"__mb_source\""
                    "  )"
                    "WHERE"
                    "  rownum <= 3"]]
@@ -299,7 +512,7 @@
               (execute! "INSERT INTO \"%s\".\"messages\" (\"id\", \"message\") VALUES (1, 'Hello')" username)
               (execute! "INSERT INTO \"%s\".\"messages\" (\"id\", \"message\") VALUES (2, NULL)"    username)
               (binding [oracle.tx/*override-describe-database-to-filter-by-db-name?* false]
-                (sync/sync-database! (mt/db) {:scan :schema}))
+                (sync/sync-database! (mt/id) {:scan :schema}))
               (let [table    (t2/select-one :model/Table :schema username, :name "messages", :db_id (mt/id))
                     id-field (t2/select-one :model/Field :table_id (u/the-id table), :name "id")]
                 (testing "The CLOB is synced as a text field"
@@ -426,7 +639,7 @@
                                                            :details details}]
                     (mt/with-db database
                       (testing " can sync correctly"
-                        (sync/sync-database! database {:scan :schema})
+                        (sync/sync-database! (:id database) {:scan :schema})
                         ;; should be four tables from test-data
                         (is (= 8 (t2/count :model/Table :db_id (u/the-id database) :name [:like "test_data%"])))
                         (binding [api/*current-user-id* orig-user-id ; restore original user-id to avoid perm errors
@@ -441,7 +654,7 @@
                                   tx/*database-name-override* "test-data"
                                   ;; Only run the embedded test with the :oracle driver. For example, run it with :h2
                                   ;; results in errors because of column name formatting.
-                                  te/*test-drivers* (constantly #{:oracle})]
+                                  te/*test-drivers* (constantly #{:oracle})] ; codespell:ignore te
                           (testing " and execute a query correctly"
                             (qp-test.order-by-test/order-by-test))))))))))))
       (log/warn (u/format-color 'yellow
@@ -500,7 +713,7 @@
             sql        (format "SELECT CAST(TIMESTAMP '%s' AS TIMESTAMP WITH LOCAL TIME ZONE) AS timestamp_tz FROM dual" test-date)
             query      (-> (mt/native-query {:query sql})
                            (assoc-in [:middleware :format-rows?] false))
-            spec       #(sql-jdbc.conn/db->pooled-connection-spec (mt/db))
+            spec       #(sql-jdbc.conn/db->pooled-connection-spec (lib.metadata/database (mt/metadata-provider)))
             old-format (-> (jdbc/query (spec) "SELECT value FROM NLS_SESSION_PARAMETERS WHERE PARAMETER = 'NLS_TIMESTAMP_TZ_FORMAT'")
                            ffirst
                            val)
@@ -523,37 +736,44 @@
     [[(t/offset-date-time 2024 11 5 12 12 12)]
      [(t/offset-date-time 2024 11 6 13 13 13)]]]])
 
-(deftest date-column-filtering-test
-  (mt/test-driver
-    :oracle
-    (mt/dataset
-      date-cols-with-datetime-values
+(deftest ^:parallel date-column-filtering-test
+  (mt/test-driver :oracle
+    (mt/dataset date-cols-with-datetime-values
       (testing "Oracle's DATE columns are mapped to type/DateTime (#49440)"
         (testing "Synced field is correctly mapped"
           (let [date-field (t2/select-one :model/Field
-                                          {:where [:and
-                                                   [:= :table_id (t2/select-one-fn :id :model/Table :db_id (mt/id))]
-                                                   [:= :name "date_with_time"]]})]
-            (are [key* expected-type] (= expected-type (key* date-field))
-              :base_type :type/DateTime
-              :database_type "DATE")))
-        (testing "Filtering with day temporal unit returns expected resutls"
-          (is (= [[2M "2024-11-06T13:13:13Z"]]
-                 (mt/rows
-                  (mt/run-mbql-query
-                    dates_with_time
-                    {:filter [:= [:field %date_with_time {:base-type :type/Date :temporal-unit :day}] "2024-11-06"]})))))
-        (testing "Filtering by datetime retuns expected results"
-          (is (= [[1M "2024-11-05T12:12:12Z"]]
-                 (mt/rows
-                  (mt/run-mbql-query
-                    dates_with_time
-                    {:filter [:= [:field %date_with_time {:base-type :type/Date}] "2024-11-05T12:12:12"]})))))))))
+                                          :table_id (t2/select-one-fn :id :model/Table :db_id (mt/id))
+                                          :name "date_with_time")]
+            (is (=? {:base_type     :type/DateTime
+                     :database_type "DATE"}
+                    date-field))))))))
+
+(deftest ^:parallel date-column-filtering-test-2
+  (mt/test-driver :oracle
+    (mt/dataset date-cols-with-datetime-values
+      (testing "Oracle's DATE columns are mapped to type/DateTime (#49440)"
+        (testing "Filtering with day temporal unit returns expected results"
+          (let [query (mt/mbql-query dates_with_time
+                        {:filter [:= [:field %date_with_time {:temporal-unit :day}] "2024-11-06"]})]
+            (mt/with-native-query-testing-context query
+              (is (= [[2M "2024-11-06T13:13:13Z"]]
+                     (mt/rows (qp/process-query query)))))))))))
+
+(deftest ^:parallel date-column-filtering-test-3
+  (mt/test-driver :oracle
+    (mt/dataset date-cols-with-datetime-values
+      (testing "Oracle's DATE columns are mapped to type/DateTime (#49440)"
+        (testing "Filtering by datetime returns expected results"
+          (let [query (mt/mbql-query dates_with_time
+                        {:filter [:= [:field %date_with_time {:base-type :type/DateTime}] "2024-11-05T12:12:12"]})]
+            (mt/with-native-query-testing-context query
+              (is (= [[1M "2024-11-05T12:12:12Z"]]
+                     (mt/rows (qp/process-query query)))))))))))
 
 (deftest ^:parallel repro-49433-test
   (mt/test-driver
     :oracle
-    (let [mp (lib.metadata.jvm/application-database-metadata-provider (mt/id))
+    (let [mp (mt/metadata-provider)
           query (as-> (lib/query mp (lib.metadata/table mp (mt/id :orders))) $
                   (lib/aggregate $ (lib/count))
                   (lib/breakout $ (m/find-first (comp #{"Category"} :display-name)
@@ -576,15 +796,15 @@
         date-cols-with-datetime-values
         (doseq [widget-type [:date/single :date/all-options]]
           (let [query (mt/native-query
-                        {:query "SELECT *
+                       {:query "SELECT *
                                FROM \"mb_test\".\"date_cols_with_datetime_values_dates_with_time\"
                                WHERE {{date_filter}}"
-                         :template-tags {"date_filter"
-                                         {:name         "date_filter"
-                                          :display-name "Date Filter"
-                                          :type         :dimension
-                                          :dimension    [:field (mt/id :date_cols_with_datetime_values_dates_with_time :date_with_time) nil]
-                                          :widget-type  widget-type}}})
+                        :template-tags {"date_filter"
+                                        {:name         "date_filter"
+                                         :display-name "Date Filter"
+                                         :type         :dimension
+                                         :dimension    [:field (mt/id :date_cols_with_datetime_values_dates_with_time :date_with_time) nil]
+                                         :widget-type  widget-type}}})
                 query-with-params (assoc query :parameters [{:type   widget-type
                                                              :target [:dimension [:template-tag "date_filter"]]
                                                              :value  "2024-11-06"}])]
@@ -595,22 +815,18 @@
 (deftest inline-local-date-time-test
   (mt/test-driver
     :oracle
-    (let [mp (lib.metadata.jvm/application-database-metadata-provider (mt/id))
+    (let [mp (mt/metadata-provider)
           query (-> (lib/query mp (lib.metadata/table mp (mt/id :checkins)))
                     (lib/aggregate (lib/count)))
           date-field (m/find-first (comp #{"Date"} :display-name) (lib/filterable-columns query))]
       (doseq [[x y] (partition-all 2 ["1970-01-01 00:00:00"
                                       "to_date('1970-01-01 00:00:00', 'YYYY-MM-DD HH24:MI:SS')"
-
                                       "1970-01-01 10:09:08"
                                       "to_date('1970-01-01 10:09:08', 'YYYY-MM-DD HH24:MI:SS')"
-
                                       "1970-01-01 10:09:08.000"
                                       "to_date('1970-01-01 10:09:08', 'YYYY-MM-DD HH24:MI:SS')"
-
                                       "1970-01-01 10:09:08.001"
                                       "timestamp '1970-01-01 10:09:08.001'"
-
                                       ;; Oracle can't resolve less than milliseconds, so cast to date since we don't lose anything
                                       "1970-01-01 10:09:08.0001"
                                       "to_date('1970-01-01 10:09:08', 'YYYY-MM-DD HH24:MI:SS')"])]
@@ -628,15 +844,15 @@
       (mt/dataset
         date-cols-with-datetime-values
         (let [query (mt/native-query
-                      {:query "SELECT * FROM \"mb_test\".\"date_cols_with_datetime_values_dates_with_time\" WHERE {{date_filter}}"
-                       :template-tags
-                       {"date_filter"
-                        {:name         "date_filter"
-                         :display-name "Date Filter"
-                         :type         :dimension
-                         :widget-type :date/relative
-                         :dimension    [:field (mt/id
-                                                :date_cols_with_datetime_values_dates_with_time :date_with_time) nil]}}})]
+                     {:query "SELECT * FROM \"mb_test\".\"date_cols_with_datetime_values_dates_with_time\" WHERE {{date_filter}}"
+                      :template-tags
+                      {"date_filter"
+                       {:name         "date_filter"
+                        :display-name "Date Filter"
+                        :type         :dimension
+                        :widget-type :date/relative
+                        :dimension    [:field (mt/id
+                                               :date_cols_with_datetime_values_dates_with_time :date_with_time) nil]}}})]
           (doseq [value ["past30days" "past3hours"]
                   :let [query-with-params (assoc query :parameters [{:type   :date/relative
                                                                      :value  value
@@ -648,7 +864,7 @@
 (deftest nest-window-functions-test
   (mt/test-driver
     :oracle
-    (let [mp (lib.metadata.jvm/application-database-metadata-provider (mt/id))
+    (let [mp (mt/metadata-provider)
           orders            (lib.metadata/table mp (mt/id :orders))
           orders-created-at (lib.metadata/field mp (mt/id :orders :created_at))
           orders-id         (lib.metadata/field mp (mt/id :orders :id))
@@ -663,3 +879,95 @@
                                 (lib/breakout (lib/with-temporal-bucket orders-created-at :year))
                                 (lib/breakout products-category))]
       (is (= 20 (count (mt/rows (qp/process-query query))))))))
+
+(deftest table-privileges-test
+  (mt/test-driver :oracle
+    (testing "`current-user-table-privileges` returns correct structure and privileges"
+      (let [conn-spec   (sql-jdbc.conn/db->pooled-connection-spec (lib.metadata/database (mt/metadata-provider)))
+            privileges  (sql-jdbc.sync/current-user-table-privileges :oracle conn-spec)]
+        (is (seq privileges) "Should return at least one table")
+        (doseq [priv privileges]
+          (is (= #{:role :schema :table :select :update :insert :delete}
+                 (set (keys priv)))
+              "Should have all required keys")
+          (is (nil? (:role priv)))
+          (is (string? (:schema priv)))
+          (is (string? (:table priv)))
+          (is (boolean? (:select priv)))
+          (is (boolean? (:update priv)))
+          (is (boolean? (:insert priv)))
+          (is (boolean? (:delete priv))))
+        (testing "Test tables should appear with at least SELECT privilege"
+          (let [test-tables (filter (fn [priv] (str/includes? (u/upper-case-en (:table priv)) "ORDERS")) privileges)]
+            (is (seq test-tables) "ORDERS table should be found in privileges")
+            (is (every? :select test-tables))))
+        (testing "Owned tables should have full DML privileges"
+          (let [test-tables (filter (fn [priv] (str/includes? (u/upper-case-en (:table priv)) "ORDERS")) privileges)]
+            (is (every? (fn [priv] (and (:insert priv) (:update priv) (:delete priv))) test-tables)
+                "Owner should have insert, update, and delete on owned tables")))))))
+(defn- do-with-nls-territory
+  "Execute `thunk` with all Oracle connections using the given `nls-territory` (e.g. \"ARGENTINA\").
+  Wraps `do-with-connection-with-options` to run ALTER SESSION on each connection."
+  [nls-territory thunk]
+  (let [orig-method (get-method sql-jdbc.execute/do-with-connection-with-options :oracle)]
+    (try
+      (defmethod sql-jdbc.execute/do-with-connection-with-options :oracle
+        [driver db-or-id-or-spec options f]
+        (orig-method driver db-or-id-or-spec options
+                     (fn [^java.sql.Connection conn]
+                       (.execute (.createStatement conn)
+                                 (str "ALTER SESSION SET NLS_TERRITORY = '" nls-territory "'"))
+                       (f conn))))
+      (thunk)
+      (finally
+        (defmethod sql-jdbc.execute/do-with-connection-with-options :oracle
+          [driver db-or-id-or-spec options f]
+          (orig-method driver db-or-id-or-spec options f))))))
+
+(deftest day-of-week-nls-territory-test
+  (testing "day-of-week extraction should respect NLS_TERRITORY setting (#57794)"
+    (mt/test-driver :oracle
+      (mt/dataset date-cols-with-datetime-values
+        (do-with-nls-territory
+         "ARGENTINA"
+         (fn []
+           ;; 2024-11-05 is a Tuesday.
+           ;; With start-of-week = sunday, Tuesday should be day-of-week 3.
+           ;; The bug: Oracle's TO_CHAR(date, 'D') returns day numbers relative to NLS_TERRITORY.
+           ;; With ARGENTINA (Monday=1), TO_CHAR returns 2 for Tuesday, but the driver assumes
+           ;; Sunday=1 (AMERICA convention), so it incorrectly reports Tuesday as day 2 instead of 3.
+           (mt/with-temporary-setting-values [start-of-week :sunday]
+             (let [mp    (mt/metadata-provider)
+                   base  (lib/query mp (lib.metadata/table mp (mt/id :dates_with_time)))
+                   date  (lib.tu.notebook/find-col-with-spec base (lib/filterable-columns base)
+                                                             {:is-main-group true} "Date With Time")
+                   query (-> base
+                             (lib/aggregate (lib/count))
+                             (lib.tu.notebook/add-breakout
+                              {:is-main-group true} "Date With Time"
+                              {:col-fn #(lib/with-temporal-bucket % :day-of-week)})
+                             (lib/filter (lib/= (lib/with-temporal-bucket date :day) "2024-11-05")))]
+               (mt/with-native-query-testing-context query
+                 (is (= [[3 1]]
+                        (mt/formatted-rows [int int] (qp/process-query query)))))))))))))
+
+(deftest ^:parallel two-contains-filters-formatted-correct-test
+  (testing "a query with two contains filters should be formatted correctly (#74086)"
+    (mt/test-driver :oracle
+      (let [mp         (mt/metadata-provider)
+            id-field   (lib.metadata/field mp (mt/id :people :id))
+            name-field (lib.metadata/field mp (mt/id :people :name))
+            query (-> (lib/query mp (lib.metadata/table mp (mt/id :people)))
+                      (lib/filter (lib/and
+                                   (lib/contains name-field "Alice")
+                                   (lib/contains name-field "ice")))
+                      (lib/with-fields [id-field name-field]))
+            result (qp/process-query query)
+            native-sql (-> result :data :native_form :query)
+            prettified-sql (driver/prettify-native-form driver/*driver* native-sql)
+            native-query (lib/native-query mp prettified-sql)]
+        (is (= "SELECT\n  *\nFROM\n  (\n    SELECT\n      \"mb_test\".\"test_data_people\".\"id\" \"id\",\n      \"mb_test\".\"test_data_people\".\"name\" \"name\"\n    FROM\n      \"mb_test\".\"test_data_people\"\n    WHERE\n      (\n        \"mb_test\".\"test_data_people\".\"name\" LIKE '%Alice%' ESCAPE CHR(92)\n      )\n      AND (\n        \"mb_test\".\"test_data_people\".\"name\" LIKE '%ice%' ESCAPE CHR(92)\n      )\n  )\nWHERE\n  rownum <= 1048575"
+               prettified-sql))
+        (is (= [[1345 "Alice Connelly"]]
+               (mt/formatted-rows [int str] result)
+               (mt/formatted-rows [int str] (qp/process-query native-query))))))))

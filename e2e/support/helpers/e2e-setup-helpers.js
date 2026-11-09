@@ -19,8 +19,6 @@ export function snapshot(name) {
  * } name
  */
 export function restore(name = "default") {
-  cy.skipOn(name.includes("mongo") && Cypress.env("QA_DB_MONGO") !== true);
-
   cy.log("Restore Data Set");
 
   // automatically reset the data db if this is a test that uses a writable db
@@ -30,5 +28,18 @@ export function restore(name = "default") {
     resetWritableDb({ type: dbType });
   }
 
-  return cy.request("POST", `/api/testing/restore/${name}`);
+  cy.request({
+    method: "POST",
+    url: "/api/testing/reset-throttlers",
+    failOnStatusCode: false,
+  });
+
+  return cy.request({
+    method: "POST",
+    url: `/api/testing/restore/${name}`,
+    // the restore endpoint takes an app DB write lock, drops and reloads
+    // everything, then re-syncs search; under CI load it can exceed the
+    // default 30s responseTimeout (EMB-2363)
+    timeout: 60_000,
+  });
 }

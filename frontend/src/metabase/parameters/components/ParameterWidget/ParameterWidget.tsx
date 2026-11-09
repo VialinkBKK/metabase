@@ -10,13 +10,16 @@ import {
 import { usePrevious } from "react-use";
 
 import { Sortable } from "metabase/common/components/Sortable";
+import { useTranslateContent } from "metabase/content-translation/hooks";
 import CS from "metabase/css/core/index.css";
-import type { DashboardFullscreenControls } from "metabase/dashboard/types";
-import { useTranslateContent } from "metabase/i18n/hooks";
 import { Box, Flex } from "metabase/ui";
-import type Question from "metabase-lib/v1/Question";
 import type { UiParameter } from "metabase-lib/v1/parameters/types";
-import type { Dashboard, Parameter, ParameterId } from "metabase-types/api";
+import type {
+  CardId,
+  DashboardId,
+  Parameter,
+  ParameterId,
+} from "metabase-types/api";
 
 import { ParameterValueWidget } from "../ParameterValueWidget";
 
@@ -25,34 +28,32 @@ import S from "./ParameterWidget.module.css";
 export type ParameterWidgetProps = PropsWithChildren<
   {
     parameter: UiParameter;
-  } & Partial<
-    {
-      setValue: (value: any) => void;
-      question: Question;
-      dashboard: Dashboard | null;
+  } & Partial<{
+    setValue: (value: any) => void;
+    cardId?: CardId;
+    dashboardId?: DashboardId;
 
-      editingParameter: Parameter | null;
-      commitImmediately: boolean;
-      parameters: UiParameter[];
-      setParameterValueToDefault: (parameterId: ParameterId) => void;
-      enableParameterRequiredBehavior: boolean;
-      isSortable: boolean;
-      isEditing: boolean;
-      className: string;
-      isFullscreen: boolean;
-      setEditingParameter: (parameterId: ParameterId | null) => void;
-      dragHandle: ReactNode;
-      withinPortal?: boolean;
-      fullWidth?: boolean;
-      hasTestId?: boolean;
-      popoverPosition: "bottom-start" | "bottom-end";
-    } & Pick<DashboardFullscreenControls, "isFullscreen">
-  >
+    editingParameter: Parameter | null;
+    commitImmediately: boolean;
+    parameters: UiParameter[];
+    setParameterValueToDefault: (parameterId: ParameterId) => void;
+    enableParameterRequiredBehavior: boolean;
+    isSortable: boolean;
+    isEditing: boolean;
+    className: string;
+    isFullscreen: boolean;
+    setEditingParameter: (parameterId: ParameterId | null) => void;
+    dragHandle: ReactNode;
+    withinPortal?: boolean;
+    fullWidth?: boolean;
+    hasTestId?: boolean;
+    popoverPosition: "bottom-start" | "bottom-end";
+  }>
 >;
 
 export const ParameterWidget = ({
-  question,
-  dashboard,
+  cardId,
+  dashboardId,
   parameter,
   editingParameter,
   commitImmediately = false,
@@ -75,7 +76,8 @@ export const ParameterWidget = ({
   const [isFocused, setIsFocused] = useState(false);
   const isEditingParameter = editingParameter?.id === parameter.id;
   const wasEditingParameter = usePrevious(isEditingParameter);
-  const fieldHasValueOrFocus = parameter.value != null || isFocused;
+  const isEmptyValue = parameter.value == null || parameter.value === "";
+  const fieldHasValueOrFocus = !isEmptyValue || isFocused;
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -124,7 +126,7 @@ export const ParameterWidget = ({
           data-testid={hasTestId ? "editing-parameter-widget" : undefined}
           ref={ref}
         >
-          <Box mx="xs">{parameter.name}</Box>
+          <Box mx="xxs">{parameter.name}</Box>
           <Box ml="auto" onClick={(e) => e.stopPropagation()}>
             {dragHandle}
           </Box>
@@ -146,8 +148,8 @@ export const ParameterWidget = ({
       <ParameterValueWidget
         parameter={parameter}
         parameters={parameters}
-        question={question}
-        dashboard={dashboard}
+        cardId={cardId}
+        dashboardId={dashboardId}
         value={parameter.value}
         setValue={(value) => setValue?.(value)}
         isEditing={isEditingParameter}

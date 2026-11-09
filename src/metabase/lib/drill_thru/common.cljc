@@ -1,4 +1,5 @@
 (ns metabase.lib.drill-thru.common
+  (:refer-clojure :exclude [select-keys not-empty])
   (:require
    [medley.core :as m]
    [metabase.lib.card :as lib.card]
@@ -6,6 +7,8 @@
    [metabase.lib.expression :as lib.expression]
    [metabase.lib.filter :as lib.filter]
    [metabase.lib.hierarchy :as lib.hierarchy]
+   [metabase.lib.join :as lib.join]
+   [metabase.lib.join.util :as lib.join.util]
    [metabase.lib.metadata.calculation :as lib.metadata.calculation]
    [metabase.lib.ref :as lib.ref]
    [metabase.lib.schema :as lib.schema]
@@ -14,7 +17,8 @@
    [metabase.lib.types.isa :as lib.types.isa]
    [metabase.lib.underlying :as lib.underlying]
    [metabase.lib.util :as lib.util]
-   [metabase.util.malli :as mu]))
+   [metabase.util.malli :as mu]
+   [metabase.util.performance :refer [not-empty select-keys]]))
 
 (defn mbql-stage?
   "Is this query stage an MBQL stage?"
@@ -59,7 +63,6 @@
   (->> (lib.metadata.calculation/visible-columns
         query
         stage-number
-        (lib.util/query-stage query stage-number)
         {:include-joined?                              false
          :include-expressions?                         false
          :include-implicitly-joinable?                 false
@@ -128,7 +131,7 @@
 (mu/defn- day-bucketed-breakout-column? :- :boolean
   [column :- ::lib.schema.metadata/column]
   (let [breakout-sourced? (boolean (:lib/breakout? column))
-        day-bucketed? (= (:metabase.lib.field/temporal-unit column) :day)]
+        day-bucketed? (= (:lib/temporal-unit column) :day)]
     (and breakout-sourced? day-bucketed?)))
 
 (mu/defn matching-filterable-column :- [:maybe ::lib.schema.metadata/column]
@@ -139,17 +142,37 @@
    column       :- ::lib.schema.metadata/column]
   (let [columns (lib.filter/filterable-columns query stage-number)]
     (or (lib.equality/find-matching-column query stage-number column-ref columns)
+        ;; TODO (Cam 2026-02-11) HACK if we have a column ref that for some reason is missing the
+        ;; `:join-alias` (likely from broken metadata converted from legacy metadata where `:source-alias` was renamed
+        ;; to `:lib/original-join-alias` but not `:lib/join-alias`) we still want find a match, so try
+        ;; using that if we failed without using it. This hack is needed to
+        ;; make [[metabase.lib.drill-thru.column-filter-test/column-filter-join-alias-test]] pass.
+        ;;
+        ;; Ideally I think we'd just update this code to use [[metabase.lib.metadata.calculation/metadata]] (which
+        ;; uses things like [[metabase.lib.field.resolution]] under the hood) but then we'd have to fix a lot of bugs
+        ;; where this is called with the wrong stage number (several callers append a stage to the query and then call
+        ;; with a different `stage-number` than the original even tho `column` is relative to a different stage). I
+        ;; tried doing this fix but it broke a few other things. Investigate further.
+        (when (and (lib.util/clause-of-type? column-ref :field)
+                   (not (lib.join.util/current-join-alias column-ref)))
+          (when-let [original-join-alias (:lib/original-join-alias column)]
+            (let [ref-with-alias (lib.join/with-join-alias column-ref original-join-alias)]
+              (lib.equality/find-matching-column query stage-number ref-with-alias columns))))
         (and (:lib/source-uuid column)
              (m/find-first #(= (:lib/source-uuid %) (:lib/source-uuid column))
                            columns)))))
 
 (mu/defn breakout->resolved-column :- ::lib.schema.metadata/column
   "Given a breakout sourced column, return the resolved metadata for the column in this stage."
-  ([query stage-number column] (breakout->resolved-column query stage-number column nil))
+  ([query        :- ::lib.schema/query
+    stage-number :- :int
+    column       :- ::lib.schema.metadata/column]
+   (breakout->resolved-column query stage-number column nil))
   ([query        :- ::lib.schema/query
     stage-number :- :int
     column       :- ::lib.schema.metadata/column
-    {:keys [preserve-type?]}]
+    {:keys [preserve-type?]} :- [:maybe [:map {:closed true}
+                                         [:preserve-type? {:optional true} :boolean]]]]
    ;; TODO: This is a hack to workaround field refs confusion that should be fixed by the field refs overhaul. Remove
    ;; this function and possible-model-mapped-breakout-column?, above, once the field refs overhaul lands.
    ;;

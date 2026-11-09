@@ -1,13 +1,13 @@
-import { Button, MantineProvider } from "@mantine/core";
 import {
-  CreateDashboardModal,
   EditableDashboard,
   InteractiveDashboard,
   InteractiveQuestion,
   MetabaseProvider,
+  type MetabaseTheme,
   StaticQuestion,
   defineMetabaseTheme,
 } from "@metabase/embedding-sdk-react";
+import { useState } from "react";
 
 import { SAMPLE_DATABASE } from "e2e/support/cypress_sample_database";
 import { ORDERS_QUESTION_ID } from "e2e/support/cypress_sample_instance_data";
@@ -58,11 +58,21 @@ describe("scenarios > embedding-sdk > styles", () => {
         expect(response?.statusCode).to.equal(200);
       });
 
-      getSdkRoot().children().should("have.attr", "dir", "ltr");
+      getSdkRoot().get(".mb-wrapper").should("have.attr", "dir", "ltr");
     });
   });
 
   describe("theming", () => {
+    const assertBrandColor = (color: string) => {
+      getSdkRoot().within(() => {
+        cy.findByTestId("visualization-root").should("be.visible");
+        cy.findByTestId("notebook-button").click();
+        cy.findByText("Back to visualization")
+          .invoke("css", "color")
+          .should("equal", color);
+      });
+    };
+
     const theme = defineMetabaseTheme({
       colors: {
         brand: "#FF0000",
@@ -75,14 +85,11 @@ describe("scenarios > embedding-sdk > styles", () => {
           authConfig={DEFAULT_SDK_AUTH_PROVIDER_CONFIG}
           theme={theme}
         >
-          <InteractiveQuestion questionId="new" />
+          <InteractiveQuestion questionId={ORDERS_QUESTION_ID} />
         </MetabaseProvider>,
       );
 
-      getSdkRoot()
-        .findByText("Pick your starting data")
-        .invoke("css", "color")
-        .should("equal", "rgb(255, 0, 0)");
+      assertBrandColor("rgb(255, 0, 0)");
     });
 
     it("should use the brand color from the app settings as fallback if they're present", () => {
@@ -98,14 +105,11 @@ describe("scenarios > embedding-sdk > styles", () => {
 
       cy.mount(
         <MetabaseProvider authConfig={DEFAULT_SDK_AUTH_PROVIDER_CONFIG}>
-          <InteractiveQuestion questionId="new" />
+          <InteractiveQuestion questionId={ORDERS_QUESTION_ID} />
         </MetabaseProvider>,
       );
 
-      getSdkRoot()
-        .findByText("Pick your starting data")
-        .invoke("css", "color")
-        .should("equal", "rgb(0, 255, 0)");
+      assertBrandColor("rgb(0, 255, 0)");
     });
 
     it("but should prioritize the theme colors over the app settings", () => {
@@ -124,14 +128,47 @@ describe("scenarios > embedding-sdk > styles", () => {
           authConfig={DEFAULT_SDK_AUTH_PROVIDER_CONFIG}
           theme={theme}
         >
-          <InteractiveQuestion questionId="new" />
+          <InteractiveQuestion questionId={ORDERS_QUESTION_ID} />
         </MetabaseProvider>,
       );
 
-      getSdkRoot()
-        .findByText("Pick your starting data")
-        .invoke("css", "color")
-        .should("equal", "rgb(255, 0, 0)");
+      assertBrandColor("rgb(255, 0, 0)");
+    });
+
+    it('should be able to reset theme colors by setting it to "undefined" (EMB-696)', () => {
+      const THEME = defineMetabaseTheme({
+        colors: {
+          "text-primary": "#0000ff",
+        },
+      });
+      function TestComponent() {
+        const [theme, setTheme] = useState<MetabaseTheme | undefined>(
+          undefined,
+        );
+        return (
+          <MetabaseProvider
+            authConfig={DEFAULT_SDK_AUTH_PROVIDER_CONFIG}
+            theme={theme}
+          >
+            <button onClick={() => setTheme(THEME)}>Set theme</button>
+            <button onClick={() => setTheme(undefined)}>Remove theme</button>
+            <InteractiveQuestion questionId={ORDERS_QUESTION_ID} />
+          </MetabaseProvider>
+        );
+      }
+      cy.mount(<TestComponent />);
+
+      getSdkRoot().within(() => {
+        cy.findByRole("button", { name: "Set theme" }).click();
+        cy.findByText("Orders")
+          .invoke("css", "color")
+          .should("equal", "rgb(0, 0, 255)");
+        cy.findByRole("button", { name: "Remove theme" }).click();
+        cy.findByText("Orders")
+          .invoke("css", "color")
+          // --mb-color-text-primary
+          .should("equal", "rgba(7, 23, 34, 0.84)");
+      });
     });
   });
 
@@ -171,7 +208,11 @@ describe("scenarios > embedding-sdk > styles", () => {
           "font-family",
           defaultBrowserFontFamily,
         );
-        cy.findByText("Product ID").should("have.css", "font-family", "Lato");
+        cy.findByText("Product ID").should(
+          "have.css",
+          "font-family",
+          "Lato, Arial, sans-serif",
+        );
       });
     });
 
@@ -218,7 +259,7 @@ describe("scenarios > embedding-sdk > styles", () => {
         cy.findByText(/Failed to fetch the user/).should(
           "have.css",
           "font-family",
-          "Lato",
+          "Lato, Arial, sans-serif",
         );
       });
     });
@@ -241,7 +282,7 @@ describe("scenarios > embedding-sdk > styles", () => {
 
       getSdkRoot()
         .findByText("Product ID")
-        .should("have.css", "font-family", "Impact");
+        .should("have.css", "font-family", "Impact, sans-serif");
     });
 
     it("should fallback to the font from the instance if no fontFamily is set on the theme", () => {
@@ -274,7 +315,7 @@ describe("scenarios > embedding-sdk > styles", () => {
 
       getSdkRoot()
         .findByText("Product ID")
-        .should("have.css", "font-family", '"Roboto Mono"');
+        .should("have.css", "font-family", '"Roboto Mono", monospace');
     });
 
     it("should work with 'Custom' fontFamily, using the font files linked in the instance", () => {
@@ -325,27 +366,11 @@ describe("scenarios > embedding-sdk > styles", () => {
 
       getSdkRoot()
         .findByText("Product ID")
-        .should("have.css", "font-family", "Custom");
+        .should("have.css", "font-family", "Custom, sans-serif");
     });
   });
 
   describe("modals, popovers and tooltips", () => {
-    it("legacy WindowModal modals should render with our styles", () => {
-      // this test renders a create dashboard modal that, at this time, is using the legacy WindowModal
-      cy.mount(
-        <MetabaseProvider authConfig={DEFAULT_SDK_AUTH_PROVIDER_CONFIG}>
-          <CreateDashboardModal />
-        </MetabaseProvider>,
-      );
-
-      H.modal()
-        .findByText("New dashboard")
-        .should("exist")
-        .and("have.css", "font-family", "Lato");
-
-      // TODO: good place for a visual regression test
-    });
-
     it("mantine modals should render with our styles", () => {
       cy.mount(
         <MetabaseProvider authConfig={DEFAULT_SDK_AUTH_PROVIDER_CONFIG}>
@@ -359,7 +384,7 @@ describe("scenarios > embedding-sdk > styles", () => {
       getSdkRoot()
         .findByText("Save")
         .should("exist")
-        .and("have.css", "font-family", "Lato")
+        .and("have.css", "font-family", "Lato, Arial, sans-serif")
         .click();
 
       // TODO: good place for a visual regression test
@@ -370,7 +395,7 @@ describe("scenarios > embedding-sdk > styles", () => {
       getSdkRoot()
         .findByText("Select a collection or dashboard")
         .should("exist")
-        .and("have.css", "font-family", "Lato");
+        .and("have.css", "font-family", "Lato, Arial, sans-serif");
 
       // TODO: good place for a visual regression test
     });
@@ -459,7 +484,7 @@ describe("scenarios > embedding-sdk > styles", () => {
 
           H.popover()
             .findByText("Columns")
-            .should("have.css", "font-family", "Impact");
+            .should("have.css", "font-family", "Impact, sans-serif");
         });
       });
 
@@ -474,12 +499,16 @@ describe("scenarios > embedding-sdk > styles", () => {
           });
         });
 
-        getSdkRoot().findByText("Tooltip test").click();
-        getSdkRoot().findByLabelText("Back to Test Dashboard").realHover();
+        // Set a value on the date filter to make the Clear button appear
+        getSdkRoot().findByText("Date filter").click();
+        H.popover().findByText("Today").click();
+
+        // Hover over the Clear button which has a Mantine Tooltip
+        getSdkRoot().findByRole("button", { name: "Clear" }).realHover();
 
         H.tooltip()
-          .findByText("Back to Test Dashboard")
-          .should("have.css", "font-family", "Impact");
+          .findByText("Clear")
+          .should("have.css", "font-family", "Impact, sans-serif");
       });
 
       it("should render echarts tooltip with our styles", () => {
@@ -501,7 +530,7 @@ describe("scenarios > embedding-sdk > styles", () => {
           .eq(0)
           .should("exist")
           .get(".echarts-tooltip-container")
-          .should("have.css", "font-family", "Impact");
+          .should("have.css", "font-family", "Impact, sans-serif");
       });
 
       it("should render DragOverlay of SortableList with our styles", () => {
@@ -521,16 +550,47 @@ describe("scenarios > embedding-sdk > styles", () => {
         H.moveDnDKitListElement("draggable-item-", {
           startIndex: 0,
           dropIndex: 1,
+          useMouseEvents: true,
           onBeforeDragEnd: () => {
             cy.get(".drag-overlay").within(() => {
               cy.findByTestId("draggable-item-ID").should(
                 "have.css",
                 "font-family",
-                "Impact",
+                "Impact, sans-serif",
               );
             });
           },
         });
+      });
+    });
+  });
+
+  describe("Portal root element position and size", () => {
+    it("should properly render full-page portal root element", () => {
+      mountSdkContent(
+        <>
+          <div
+            style={{
+              padding: "30%",
+            }}
+          >
+            <div style={{ overflow: "hidden", position: "relative" }}>
+              <InteractiveQuestion questionId={ORDERS_QUESTION_ID} />
+            </div>
+          </div>
+
+          <div data-testid="second-question">
+            <InteractiveQuestion questionId={ORDERS_QUESTION_ID} />
+          </div>
+        </>,
+      );
+
+      cy.findByTestId("second-question").within(() => {
+        cy.findByText("Summarize").click();
+      });
+
+      getSdkRoot().within(() => {
+        cy.findByText("Count of rows").should("be.visible");
       });
     });
   });
@@ -569,64 +629,47 @@ describe("scenarios > embedding-sdk > styles", () => {
       }
     });
 
-    it("css variables should not leak outside of mb-wrapper", () => {
+    it("SDK-themed Mantine CSS variables should be scoped to .mb-wrapper and not leak to :root", () => {
+      const SDK_BRAND_HEX = "#bada55";
+
       cy.mount(
-        <MantineProvider
-          theme={{ colors: { brand: colorTuple("rgb(255, 0, 255)") } }}
+        <MetabaseProvider
+          authConfig={DEFAULT_SDK_AUTH_PROVIDER_CONFIG}
+          theme={defineMetabaseTheme({ colors: { brand: SDK_BRAND_HEX } })}
         >
-          <Button color="brand">outside sdk provider</Button>
-
-          <MetabaseProvider
-            authConfig={DEFAULT_SDK_AUTH_PROVIDER_CONFIG}
-            theme={{ colors: { brand: "rgb(255, 0, 0)" } }}
-          >
-            <Button color="brand">outside sdk wrapper</Button>
-
-            <InteractiveQuestion
-              questionId={ORDERS_QUESTION_ID}
-              isSaveEnabled
-            />
-          </MetabaseProvider>
-        </MantineProvider>,
+          <StaticQuestion questionId={ORDERS_QUESTION_ID} />
+        </MetabaseProvider>,
       );
 
-      cy.log(
-        "Customer's elements outside of the SDK provider should have their brand color intact",
-      );
+      getSdkRoot().findByText("Product ID").should("exist");
 
-      cy.contains("button", "outside sdk provider").should(
-        "have.css",
-        "background-color",
-        "rgb(255, 0, 255)",
-      );
+      const MANTINE_VAR = "--mantine-color-core-brand-0";
 
-      cy.log(
-        "Customer's elements outside of the SDK components should have their brand color intact",
-      );
+      cy.get(".mb-wrapper")
+        .first()
+        .then(($wrapper) => {
+          const wrapperValue = getComputedStyle($wrapper[0])
+            .getPropertyValue(MANTINE_VAR)
+            .trim()
+            .toLowerCase();
 
-      cy.contains("button", "outside sdk wrapper").should(
-        "have.css",
-        "background-color",
-        "rgb(255, 0, 255)",
-      );
+          expect(
+            wrapperValue,
+            `${MANTINE_VAR} must be set on .mb-wrapper from SDK theme`,
+          ).to.not.equal("");
 
-      cy.log(
-        "SDK elements should have the brand color from the Metabase theme",
-      );
+          cy.document().then((doc) => {
+            const rootValue = getComputedStyle(doc.documentElement)
+              .getPropertyValue(MANTINE_VAR)
+              .trim()
+              .toLowerCase();
 
-      getSdkRoot().within(() => {
-        cy.get("button")
-          .contains("Filter")
-          .should("have.css", "color", "rgb(255, 0, 0)");
-
-        cy.findByTestId("notebook-button").click();
-
-        cy.findByRole("button", { name: "Visualize" }).should(
-          "have.css",
-          "background-color",
-          "rgb(255, 0, 0)",
-        );
-      });
+            expect(
+              rootValue,
+              `SDK-derived ${MANTINE_VAR}=${wrapperValue} must NOT leak to :root (found ${rootValue || "<empty>"})`,
+            ).to.not.equal(wrapperValue);
+          });
+        });
     });
   });
 });
@@ -648,7 +691,7 @@ const getCssRulesThatApplyToElement = ($element: JQuery<HTMLElement>) => {
   ).flatMap((sheet) => {
     const cssRules = Array.from(sheet.cssRules).filter(
       (rule) => rule instanceof CSSStyleRule,
-    ) as CSSStyleRule[];
+    );
 
     return cssRules.filter((rule) => element.matches(rule.selectorText));
   });
@@ -664,17 +707,3 @@ function wrapBrowserDefaultFont() {
     cy.wrap(fontFamily).as("defaultBrowserFontFamily");
   });
 }
-
-export const colorTuple = (value: string) =>
-  [
-    value,
-    value,
-    value,
-    value,
-    value,
-    value,
-    value,
-    value,
-    value,
-    value,
-  ] as const;

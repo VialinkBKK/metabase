@@ -1,20 +1,22 @@
+import type { JSX } from "react";
 import { t } from "ttag";
 import _ from "underscore";
 
 import { useListPopularItemsQuery } from "metabase/api";
 import { LoadingAndErrorWrapper } from "metabase/common/components/LoadingAndErrorWrapper";
-import { getIcon } from "metabase/lib/icon";
-import { getName } from "metabase/lib/name";
-import * as Urls from "metabase/lib/urls";
+import { useGetIcon } from "metabase/hooks/use-icon";
+import * as Urls from "metabase/urls";
+import { getName } from "metabase/utils/name";
 import type { PopularItem } from "metabase-types/api";
 
 import { HomeCaption } from "../HomeCaption";
 import { HomeHelpCard } from "../HomeHelpCard";
 import { HomeModelCard } from "../HomeModelCard";
 
-import { SectionBody } from "./HomePopularSection.styled";
+import S from "./HomePopularSection.module.css";
 
 export const HomePopularSection = (): JSX.Element => {
+  const getIcon = useGetIcon();
   const {
     data: popularItems = [],
     isLoading,
@@ -28,7 +30,7 @@ export const HomePopularSection = (): JSX.Element => {
   return (
     <div>
       <HomeCaption>{getTitle(popularItems)}</HomeCaption>
-      <SectionBody>
+      <div className={S.SectionBody}>
         {popularItems.map((item, index) => (
           <HomeModelCard
             key={index}
@@ -38,7 +40,7 @@ export const HomePopularSection = (): JSX.Element => {
           />
         ))}
         <HomeHelpCard />
-      </SectionBody>
+      </div>
     </div>
   );
 };

@@ -1,4 +1,3 @@
-import { PointerSensor, useSensor } from "@dnd-kit/core";
 import { useCallback } from "react";
 
 import type {
@@ -6,18 +5,12 @@ import type {
   SortableDivider,
 } from "metabase/common/components/Sortable";
 import { Sortable, SortableList } from "metabase/common/components/Sortable";
-import type { AccentColorOptions } from "metabase/lib/colors/types";
+import { useDndSensors } from "metabase/common/hooks";
 import type { IconProps } from "metabase/ui";
+import type { AccentColorOptions } from "metabase/ui/colors/types";
+import type { ChartSettingOrderedItem } from "metabase/viz-core";
 
 import { ColumnItem } from "../ColumnItem";
-
-export interface SortableItem {
-  enabled: boolean;
-  color?: string;
-  icon?: IconProps["name"];
-  isOther?: boolean;
-  hideSettings?: boolean;
-}
 
 interface SortableColumnFunctions<T> {
   onRemove?: (item: T) => void;
@@ -26,20 +19,22 @@ interface SortableColumnFunctions<T> {
   onAdd?: (item: T) => void;
   onEnable?: (item: T) => void;
   getItemName: (item: T) => string;
-  onColorChange?: (item: T, color: string) => void;
+  onColorChange?: (item: T, hexValue: string, colorName?: string) => void;
 }
-interface ChartSettingOrderedItemsProps<T extends SortableItem>
-  extends SortableColumnFunctions<T> {
+interface ChartSettingOrderedItemsProps<
+  T extends ChartSettingOrderedItem,
+> extends SortableColumnFunctions<T> {
   onSortEnd: ({ id, newIndex }: DragEndEvent) => void;
   items: T[];
   getId: (item: T) => string | number;
+  isSortable?: boolean;
   removeIcon?: IconProps["name"];
   accentColorOptions?: AccentColorOptions;
-  getItemColor?: (item: SortableItem) => string | undefined;
+  getItemColor?: (item: ChartSettingOrderedItem) => string | undefined;
   dividers?: SortableDivider[];
 }
 
-export function ChartSettingOrderedItems<T extends SortableItem>({
+export function ChartSettingOrderedItems<T extends ChartSettingOrderedItem>({
   onRemove,
   onSortEnd,
   onEdit,
@@ -50,15 +45,14 @@ export function ChartSettingOrderedItems<T extends SortableItem>({
   items,
   onColorChange,
   getId,
+  isSortable = true,
   removeIcon,
   accentColorOptions,
   getItemColor = (item) => item.color,
   dividers = [],
 }: ChartSettingOrderedItemsProps<T>) {
-  const isDragDisabled = items.length < 1;
-  const pointerSensor = useSensor(PointerSensor, {
-    activationConstraint: { distance: 15 },
-  });
+  const isDragDisabled = !isSortable || items.length < 2;
+  const sensors = useDndSensors({ distance: 15 });
 
   const renderItem = useCallback(
     ({ item, id }: { item: T; id: string | number }) =>
@@ -86,7 +80,8 @@ export function ChartSettingOrderedItems<T extends SortableItem>({
             }
             onColorChange={
               onColorChange
-                ? (color: string) => onColorChange(item, color)
+                ? (hexValue: string, colorName?: string) =>
+                    onColorChange(item, hexValue, colorName)
                 : undefined
             }
             color={getItemColor(item)}
@@ -119,7 +114,7 @@ export function ChartSettingOrderedItems<T extends SortableItem>({
       renderItem={renderItem}
       items={items}
       onSortEnd={onSortEnd}
-      sensors={[pointerSensor]}
+      sensors={sensors}
       dividers={dividers}
     />
   );

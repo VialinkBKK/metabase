@@ -1,9 +1,9 @@
-import type { MockOptionsMethodGet } from "fetch-mock";
 import fetchMock from "fetch-mock";
 
 import type {
   User,
   UserAttributeKey,
+  UserId,
   UserListResult,
 } from "metabase-types/api";
 
@@ -12,16 +12,45 @@ export function setupUserEndpoints(user: UserListResult) {
   fetchMock.put(`path:/api/user/${user.id}`, user);
 }
 
+export function setupPasswordResetUrlEndpoint(
+  userId: UserId,
+  resetUrl = `http://localhost:3000/auth/reset_password/${userId}_token`,
+) {
+  fetchMock.post(`path:/api/user/${userId}/password-reset-url`, {
+    password_reset_url: resetUrl,
+  });
+}
+
+export function setupUpdatePasswordEndpoint(userId: UserId) {
+  fetchMock.put(`path:/api/user/${userId}/password`, {});
+}
+
+export function setupDisconnectSlackEndpoint(
+  userId: UserId,
+  {
+    status = 204,
+    body,
+    delay = 0,
+  }: {
+    status?: number;
+    body?: { message: string };
+    delay?: number;
+  } = {},
+) {
+  fetchMock.delete(
+    `path:/api/user/${userId}/slack`,
+    { status, body },
+    { delay },
+  );
+}
+
 export function setupUsersEndpoints(users: UserListResult[]) {
   users.forEach((user) => setupUserEndpoints(user));
   return fetchMock.get("path:/api/user", { data: users, total: users.length });
 }
 
-export function setupCurrentUserEndpoint(
-  user: User,
-  options?: MockOptionsMethodGet,
-) {
-  return fetchMock.get("path:/api/user/current", user, options);
+export function setupCurrentUserEndpoint(user: User) {
+  return fetchMock.get("path:/api/user/current", user);
 }
 
 export function setupUserAttributesEndpoint(attributes: UserAttributeKey[]) {

@@ -1,14 +1,21 @@
+import { createMockMetadataFromState } from "__support__/metadata";
+import {
+  createMockQueryBuilderState,
+  createMockQueryBuilderUIControlsState,
+  createMockState,
+} from "__support__/state";
 import { createMockEntitiesState } from "__support__/store";
-import { checkNotNull } from "metabase/lib/types";
 import * as questionActions from "metabase/questions/actions";
-import { getMetadata } from "metabase/selectors/metadata";
-import registerVisualizations from "metabase/visualizations/register";
+import type { QueryBuilderMode } from "metabase/redux/store";
+import { checkNotNull } from "metabase/utils/types";
+import { registerVisualizations } from "metabase/visualizations/register";
 import Question from "metabase-lib/v1/Question";
 import { getQuestionVirtualTableId } from "metabase-lib/v1/metadata/utils/saved-questions";
 import type {
   Card,
   ConcreteFieldReference,
   Join,
+  LegacyDatasetQuery,
   NativeDatasetQuery,
   StructuredDatasetQuery,
   TemplateTag,
@@ -42,23 +49,19 @@ import {
   createSavedStructuredCard,
   createStructuredModelCard,
 } from "metabase-types/api/mocks/presets";
-import type { QueryBuilderMode } from "metabase-types/store";
-import {
-  createMockQueryBuilderState,
-  createMockQueryBuilderUIControlsState,
-  createMockState,
-} from "metabase-types/store/mocks";
 
+import { UPDATE_QUESTION } from "../../store/actions";
+import * as qbActions from "../../store/actions";
 import * as querying from "../querying";
 import * as ui from "../ui";
 import * as url from "../url";
 
 import * as native from "./native";
-import { UPDATE_QUESTION, updateQuestion } from "./updateQuestion";
+import { updateQuestion } from "./updateQuestion";
 
 registerVisualizations();
 
-type TestCard = Card | UnsavedCard;
+type TestCard = Card<LegacyDatasetQuery> | UnsavedCard<LegacyDatasetQuery>;
 
 type SetupOpts = {
   card: TestCard;
@@ -104,7 +107,7 @@ function getModelVirtualTable(card: Card) {
     db_id: SAVED_QUESTIONS_DB.id,
     name: card.name,
     display_name: card.name,
-    fields: card.result_metadata,
+    fields: card.result_metadata ?? [],
   });
 }
 
@@ -118,6 +121,7 @@ async function setup({
   shouldStartAdHocQuestion,
 }: SetupOpts) {
   const isSavedCard = "id" in card;
+  // Unjustified type cast. FIXME
   const isModel = (card as Card).type === "model";
 
   const dispatch = jest.fn().mockReturnValue({ mock: "mock" });
@@ -129,11 +133,14 @@ async function setup({
 
   const entitiesState = createMockEntitiesState({
     databases: [createSampleDatabase(), SAVED_QUESTIONS_DB],
+    // Unjustified type cast. FIXME
     tables: isModel ? [getModelVirtualTable(card as Card)] : [],
     questions: cards,
   });
 
-  const metadata = getMetadata(createMockState({ entities: entitiesState }));
+  const metadata = createMockMetadataFromState(
+    createMockState({ entities: entitiesState }),
+  );
   const ordersTable = createOrdersTable();
   const ordersFields = ordersTable.fields ?? [];
   const question = isSavedCard
@@ -185,7 +192,6 @@ async function setup({
 
 const REVIEW_JOIN_CLAUSE: Join = {
   alias: "Products",
-  ident: "gxyP-LOf7Zn96z8IWueoH",
   condition: [
     "=",
     ["field", ORDERS.ID, null],
@@ -449,7 +455,7 @@ describe("QB Actions > updateQuestion", () => {
 
       describe(questionType, () => {
         it("triggers question details sidebar closing when turning model into ad-hoc question", async () => {
-          const closeSidebarSpy = jest.spyOn(ui, "onCloseQuestionInfo");
+          const closeSidebarSpy = jest.spyOn(qbActions, "onCloseQuestionInfo");
           await setup({ card: getCard(), isShowingTemplateTagsEditor: true });
           expect(closeSidebarSpy).not.toHaveBeenCalled();
         });
@@ -471,7 +477,10 @@ describe("QB Actions > updateQuestion", () => {
           });
 
           it("triggers question details sidebar closing when turning model into ad-hoc question", async () => {
-            const closeSidebarSpy = jest.spyOn(ui, "onCloseQuestionInfo");
+            const closeSidebarSpy = jest.spyOn(
+              qbActions,
+              "onCloseQuestionInfo",
+            );
             await setup({ card: getCard(), isShowingTemplateTagsEditor: true });
             expect(closeSidebarSpy).toHaveBeenCalledTimes(1);
           });
@@ -528,8 +537,7 @@ describe("QB Actions > updateQuestion", () => {
           );
 
           const originalCard = getCard();
-          const originalQuery =
-            originalCard.dataset_query as StructuredDatasetQuery;
+          const originalQuery = originalCard.dataset_query;
 
           const cardWithJoin = {
             ...originalCard,
@@ -576,8 +584,7 @@ describe("QB Actions > updateQuestion", () => {
             "loadMetadataForCard",
           );
           const originalCard = getCard();
-          const originalQuery =
-            originalCard.dataset_query as StructuredDatasetQuery;
+          const originalQuery = originalCard.dataset_query;
 
           const cardWithJoin = {
             ...originalCard,
@@ -592,6 +599,7 @@ describe("QB Actions > updateQuestion", () => {
 
           await setup({
             card: cardWithJoin,
+            // Unjustified type cast. FIXME
             originalCard: originalCard as Card,
           });
 
@@ -677,6 +685,7 @@ describe("QB Actions > updateQuestion", () => {
         ...opts,
         card: cardWithTags,
         originalCard,
+        // Unjustified type cast. FIXME
         queryBuilderMode: (card as Card).type === "model" ? "dataset" : "view",
       });
 

@@ -1,10 +1,12 @@
 (ns metabase.query-processor.streaming
+  (:refer-clojure :exclude [some mapv not-empty])
   (:require
-   [metabase.analytics.core :as analytics]
-   [metabase.driver :as driver]
-   [metabase.legacy-mbql.util :as mbql.u]
+   [clojure.string :as str]
+   [metabase.analytics-interface.core :as analytics]
+   [metabase.lib.core :as lib]
    [metabase.lib.schema.common :as lib.schema.common]
    [metabase.models.visualization-settings :as mb.viz]
+   [metabase.query-processor.error-type :as qp.error-type]
    [metabase.query-processor.pipeline :as qp.pipeline]
    [metabase.query-processor.schema :as qp.schema]
    [metabase.query-processor.streaming.csv :as qp.csv]
@@ -14,7 +16,8 @@
    [metabase.server.streaming-response :as streaming-response]
    [metabase.util :as u]
    [metabase.util.log :as log]
-   [metabase.util.malli :as mu])
+   [metabase.util.malli :as mu]
+   [metabase.util.performance :refer [mapv some not-empty]])
   (:import
    (clojure.core.async.impl.channels ManyToManyChannel)
    (java.io OutputStream)
@@ -29,31 +32,54 @@
          qp.json/keep-me
          qp.xlsx/keep-me)
 
+(defn safe-filename-prefix
+  "Generate a safe filename prefix from a card name. Trims whitespace, slugifies the name,
+  and limits to 200 characters to respect filesystem limitations. Falls back to 'question' if empty."
+  [card-name]
+  (or (some-> card-name
+              str/trim
+              not-empty
+              (u/slugify {:max-length 200}))
+      "question"))
+
 (defn- deduplicate-col-names
   "Deduplicate column names that would otherwise conflict.
 
   TODO: This function includes logic that is normally is done by the annotate middleware, but hasn't been run yet
-  at this point in the code. We should eventually refactor this (#17195)"
-  [cols]
-  (map (fn [col unique-name]
-         (let [col-with-display-name (if (:display_name col)
-                                       col
-                                       (assoc col :display_name (:name col)))]
-           (assoc col-with-display-name :name unique-name)))
-       cols
-       (mbql.u/uniquify-names (map :name cols))))
+  at this point in the code. We should eventually refactor this (#17195)
 
-(defn- validate-table-columms
-  "Validate that all of the columns in `table-columns` correspond to actual columns in `cols`, correlating them by
-  field ref or name. Returns `nil` if any do not, so that we fall back to using `cols` directly for the export (#19465).
-  Otherwise returns `table-columns`."
+  TODO (Cam 9/23/25) -- We should use [[metabase.lib.field.util/add-deduplicated-names]] to do this."
+  [cols]
+  (mapv (let [unique-name-fn (lib/non-truncating-unique-name-generator)]
+          (fn [col]
+            (let [unique-name (unique-name-fn (:name col))]
+              (-> col
+                  (cond-> (not (:display_name col)) (assoc :display_name (:name col)))
+                  (assoc :name unique-name)))))
+        cols))
+
+(defn- not-explicitly-excluded-columns
+  "If a column is not explicitly excluded (it doesn't have a row in `table-columns` that marks it as disabled), we
+  should include it. This way, if e.g. the query has changed from `SELECT id FROM ...` to `SELECT id, created_at FROM
+  ...`, we'll include the new columns. (This is the same behavior as the UI.)"
   [table-columns cols]
-  (let [col-field-refs (set (remove nil? (map :field_ref cols)))
-        col-names      (set (remove nil? (map :name cols)))]
-    (when (every? (fn [table-col] (or (col-field-refs (::mb.viz/table-column-field-ref table-col))
-                                      (col-names (::mb.viz/table-column-name table-col))))
-                  table-columns)
-      table-columns)))
+  (let [{:keys [name->table field-ref->table]} (reduce (fn [m {n ::mb.viz/table-column-name
+                                                               fr ::mb.viz/table-column-field-ref
+                                                               :as table}]
+                                                         (cond-> m
+                                                           true (assoc-in [:name->table n] table)
+                                                           fr (assoc-in [:field-ref->table fr] table)))
+                                                       {}
+                                                       table-columns)]
+    (for [col cols
+          :when (and (not (get name->table (:name col)))
+                     (not (get field-ref->table (:field_ref col))))
+          :let [col-name (:name col)
+                id-or-name (or (:id col) col-name)
+                field-ref (:field_ref col)]]
+      {::mb.viz/table-column-field-ref (or field-ref [:field id-or-name nil])
+       ::mb.viz/table-column-enabled   true
+       ::mb.viz/table-column-name      col-name})))
 
 (defn- pivot-grouping-exists?
   "Returns `true` if there's a column with the :name \"pivot-grouping\",
@@ -61,17 +87,55 @@
   [cols]
   (some #(= (:name %) "pivot-grouping") cols))
 
+(defn- hidden-by-display?
+  "The table viz hides `:details-only` columns whatever `table.columns` says, so a table export drops them too. Object
+  detail shows them and charts plot whatever they are given, so every other display keeps them (#70909)."
+  [display col]
+  (and (= display :table)
+       (= (:visibility_type col) :details-only)))
+
+(defn- setting-value
+  "Look up `k` in a viz-settings map that may be keyed by either keywords or strings."
+  [settings k]
+  (or (get settings k) (get settings (name k))))
+
+(defn simple-pivot-indexes
+  "Column indexes `{:normal i, :pivot j, :cell k}` when the Table viz's \"Pivot table\" toggle applies to `cols`, else
+  nil. Mirrors the browser's `isPivoted` (viz-core/lib/settings/column.ts): `:table.pivot` is set, there are at least
+  three columns, and `:table.pivot_column` and `:table.cell_column` name two different columns. The first remaining
+  column is the normal one; its values become the row labels. Any other columns are ignored."
+  [cols viz-settings]
+  (when (and (setting-value viz-settings :table.pivot)
+             (<= 3 (count cols)))
+    (let [index-of  (fn [k]
+                      (let [col-name (setting-value viz-settings k)]
+                        (u/index-of #(= (:name %) col-name) cols)))
+          pivot-idx (index-of :table.pivot_column)
+          cell-idx  (index-of :table.cell_column)]
+      (when (and pivot-idx cell-idx (not= pivot-idx cell-idx))
+        {:normal (first (remove #{pivot-idx cell-idx} (range (count cols))))
+         :pivot  pivot-idx
+         :cell   cell-idx}))))
+
 (defn- export-column-order
   "For each entry in `table-columns` that is enabled, finds the index of the corresponding
   entry in `cols` by name or id. If a col has been remapped, uses the index of the new column.
+  `display` is the display of the card being exported; `nil` when unknown, which keeps every column.
 
   The resulting list of indices determines the order of column names and data in exports."
-  [cols table-columns]
+  [cols table-columns display]
   (if (pivot-grouping-exists? cols)
     ;; If the columns contain a pivot-grouping, we're exporting a pivot and the cols order is not used,
     ;; so we can just pass the indices in order.
     (range (count cols))
-    (let [table-columns'     (or (validate-table-columms table-columns cols)
+    (let [;; Entries in `table-columns` that don't match any result column (e.g. a stale column left over from a
+          ;; previous version of the query) are silently dropped per-entry: their `cols-index` lookups below produce
+          ;; `nil`, which is filtered out. This way visibility (`enabled false`) and ordering still apply to the
+          ;; entries that do match, instead of being discarded all-or-nothing (#19465, #75791).
+          table-columns'     (or (when (seq table-columns)
+                                   (concat
+                                    (filter ::mb.viz/table-column-enabled table-columns)
+                                    (not-explicitly-excluded-columns table-columns cols)))
                                  ;; If table-columns is not provided (e.g. for saved cards), we can construct a fake one
                                  ;; that retains the original column ordering in `cols`
                                  (for [col cols]
@@ -81,7 +145,6 @@
                                      {::mb.viz/table-column-field-ref (or field-ref [:field id-or-name nil])
                                       ::mb.viz/table-column-enabled   true
                                       ::mb.viz/table-column-name      col-name})))
-          enabled-table-cols (filter ::mb.viz/table-column-enabled table-columns')
           cols-vector        (into [] cols)
           ;; cols-index is a map from keys representing fields to their indices into `cols`
           cols-index         (reduce-kv (fn [m i col]
@@ -101,12 +164,15 @@
                     remapped-to-name   (:remapped_to col)
                     remapped-from-name (:remapped_from col)]
                 (cond
+                  (hidden-by-display? display col)
+                  nil
+
                   remapped-to-name
                   (get cols-index remapped-to-name)
 
                   (not remapped-from-name)
                   index)))
-            enabled-table-cols)
+            table-columns')
            (remove nil?)))))
 
 (defn order-cols
@@ -114,7 +180,10 @@
   returns a list of indices which map the new order to the original order, and is used to reorder individual rows."
   [cols viz-settings]
   (let [deduped-cols  (deduplicate-col-names cols)
-        output-order  (export-column-order deduped-cols (::mb.viz/table-columns viz-settings))
+        ;; the pivot grid is built from every column, so details-only ones are not hidden there
+        display       (when-not (simple-pivot-indexes deduped-cols viz-settings)
+                        (::mb.viz/display viz-settings))
+        output-order  (export-column-order deduped-cols (::mb.viz/table-columns viz-settings) display)
         ordered-cols  (if output-order
                         (let [v (into [] deduped-cols)]
                           (for [i output-order] (v i)))
@@ -136,7 +205,6 @@
          {:data initial-metadata})
 
         ([result]
-         (analytics/inc! :metabase-query-processor/query {:driver driver/*driver* :status "success"})
          (assoc result
                 :row_count @row-count
                 :status :completed))
@@ -176,6 +244,32 @@
     (binding [qp.pipeline/*result* (streaming-result-fn results-writer os)]
       (f rff))))
 
+(defn- status-code
+  "Get a status code for the supplied error object."
+  [err]
+  (cond
+    ;; A raw exception thrown outside the QP's exception-formatting (e.g. during setup) arrives here as
+    ;; a Throwable, not a formatted map, so the keyword lookups below can't read its declared status
+    ;; code off it. Pull it from ex-data.
+    (and (instance? Throwable err) (:status-code (ex-data err)))
+    (:status-code (ex-data err))
+    ;; If the error is setting its own status code use that
+    (:status-code err) (:status-code err)
+    (-> err :ex-data :status-code) (-> err :ex-data :status-code)
+    ;; If the connection pool is saturated (checkout timed out, or the checkout queue is full) return 503 so clients
+    ;; retry/back off
+    (-> err :error_type qp.error-type/connection-pool-saturated?)
+    503
+    ;; If this is a permission error return 403
+    (-> err :error_type qp.error-type/permission-error?)
+    403
+    ;; If this is a client error return 400
+    (-> err :error_type qp.error-type/client-error?)
+    400
+    ;; Use 500 for all other error statuses
+    :else
+    500))
+
 (defn -streaming-response
   "Impl for [[streaming-response]]."
   ^StreamingResponse [export-format filename-prefix f]
@@ -201,7 +295,8 @@
              (assert (not (instance? ManyToManyChannel result)) "QP should not return a core.async channel.")
              (when (or (instance? Throwable result)
                        (= (:status result) :failed))
-               (streaming-response/write-error! os result export-format)))))))))
+               (analytics/inc! :metabase-export/errors {:format (name export-format)})
+               (streaming-response/write-error! os result export-format (status-code result))))))))))
 
 (defn transforming-query-response
   "Decorate the streaming rff to transform the top-level payload."

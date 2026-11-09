@@ -1,8 +1,8 @@
 import { c, t } from "ttag";
 
 import { FormCheckbox } from "metabase/forms";
-import { capitalize } from "metabase/lib/formatting";
 import { Stack } from "metabase/ui";
+import { capitalize } from "metabase/utils/formatting";
 
 import type { ErrorPayload } from "./types";
 
@@ -17,7 +17,7 @@ export const DiagnosticCheckboxes = ({
   errorInfo,
   applicationName,
 }: DiagnosticCheckboxesProps) => (
-  <Stack gap="md" pt="md">
+  <Stack gap="lg" pt="lg">
     <FormCheckbox
       name="reporter"
       label={c("This is part of the bug reporting modal")
@@ -48,7 +48,7 @@ export const DiagnosticCheckboxes = ({
     )}
     <FormCheckbox
       name="bugReportDetails"
-      // eslint-disable-next-line no-literal-metabase-strings -- this is a hidden section of bug report
+      // eslint-disable-next-line metabase/no-literal-metabase-strings -- this is a hidden section of bug report
       label={c("{0} is the name of the application, usually 'Metabase'")
         .t`${applicationName} instance version information`}
     />

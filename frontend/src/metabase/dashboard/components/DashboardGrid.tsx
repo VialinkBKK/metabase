@@ -5,35 +5,36 @@ import type { ConnectedProps } from "react-redux";
 import { t } from "ttag";
 import _ from "underscore";
 
-import ExplicitSize from "metabase/common/components/ExplicitSize";
+import { ExplicitSize } from "metabase/common/components/ExplicitSize";
+import {
+  type OmniPickerItem,
+  type OmniPickerQuestionItem,
+  isInCollectionTree,
+} from "metabase/common/components/Pickers";
 import {
   QuestionPickerModal,
-  type QuestionPickerValueItem,
   getQuestionPickerValue,
 } from "metabase/common/components/Pickers/QuestionPicker";
 import { ContentViewportContext } from "metabase/common/context/ContentViewportContext";
 import DashboardS from "metabase/css/dashboard.module.css";
-import {
-  getVisibleCardIds,
-  isQuestionDashCard,
-} from "metabase/dashboard/utils";
+import { getVisibleCardIds } from "metabase/dashboard/utils";
+import EmbedFrameS from "metabase/embedding/theme.module.css";
+import { connect } from "metabase/redux";
+import type { State } from "metabase/redux/store";
+import { addUndo } from "metabase/redux/undo";
+import { Box, Flex, type FlexProps } from "metabase/ui";
+import { isQuestionDashCard } from "metabase/utils/dashboard";
 import {
   GRID_ASPECT_RATIO,
   GRID_BREAKPOINTS,
   GRID_COLUMNS,
+  GRID_MARGINS,
   GRID_WIDTH,
   MIN_ROW_HEIGHT,
-} from "metabase/lib/dashboard_grid";
-import { connect } from "metabase/lib/redux";
-import EmbedFrameS from "metabase/public/components/EmbedFrame/EmbedFrame.module.css";
-import { addUndo } from "metabase/redux/undo";
-import { Box, Flex, type FlexProps } from "metabase/ui";
+} from "metabase/utils/dashboard_grid";
 import LegendS from "metabase/visualizations/components/Legend.module.css";
 import { VisualizerModal } from "metabase/visualizer/components/VisualizerModal";
-import {
-  isVisualizerDashboardCard,
-  isVisualizerSupportedVisualization,
-} from "metabase/visualizer/utils";
+import { isVisualizerSupportedVisualization } from "metabase/visualizer/utils";
 import type {
   BaseDashboardCard,
   Card,
@@ -41,11 +42,9 @@ import type {
   Dashboard,
   DashboardCard,
   DashboardTabId,
-  RecentItem,
   VisualizerVizDefinition,
 } from "metabase-types/api";
-import { isRecentCollectionItem } from "metabase-types/api";
-import type { State } from "metabase-types/store";
+import { isVisualizerDashboardCard } from "metabase-types/guards/dashboard";
 
 import type { SetDashCardAttributesOpts } from "../actions";
 import {
@@ -89,7 +88,6 @@ interface DashboardGridInnerState {
   };
   replaceCardModalDashCard: BaseDashboardCard | null;
   isDragging: boolean;
-  isAnimationPaused: boolean;
   dashcardCountByCardId: Record<CardId, number>;
   _lastProps?: LastProps;
 
@@ -144,9 +142,8 @@ type DashboardGridContext = {
   | "isEditing"
   | "isEditingParameter"
   | "isFullscreen"
-  | "isNightMode"
   | "clickBehaviorSidebarDashcard"
-  | "getClickActionMode"
+  | "clickActionMode"
   | "navigateToNewCardFromDashboard"
   | "downloadsEnabled"
   | "autoScrollToDashcardId"
@@ -170,8 +167,6 @@ class DashboardGridInner extends Component<
   DashboardGridInnerState
 > {
   static contextType = ContentViewportContext;
-
-  _pauseAnimationTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(props: DashboardGridInnerProps, context: unknown) {
     super(props, context);
@@ -198,28 +193,12 @@ class DashboardGridInner extends Component<
       ),
       replaceCardModalDashCard: null,
       isDragging: false,
-      isAnimationPaused: true,
       _lastProps: {
         dashboard: props.dashboard,
         isEditing: props.isEditing,
         selectedTabId: props.selectedTabId,
       },
     };
-  }
-
-  componentDidMount() {
-    // In order to skip the initial cards animation we must let the grid layout calculate
-    // the initial card positions. The timer is necessary to enable animation only
-    // after the grid layout has been calculated and applied to the DOM.
-    this._pauseAnimationTimer = setTimeout(() => {
-      this.setState({ isAnimationPaused: false });
-    }, 0);
-  }
-
-  componentWillUnmount() {
-    if (this._pauseAnimationTimer !== null) {
-      clearTimeout(this._pauseAnimationTimer);
-    }
   }
 
   componentDidUpdate(prevProps: DashboardGridInnerProps) {
@@ -343,6 +322,7 @@ class DashboardGridInner extends Component<
     isEditing = this.props.isEditing,
     selectedTabId = this.props.selectedTabId,
   ) => {
+    // Unjustified type cast. FIXME
     return getVisibleCards(
       cards,
       visibleCardIds,
@@ -357,14 +337,15 @@ class DashboardGridInner extends Component<
   getIsLastDashboardQuestionDashcard = (dc: BaseDashboardCard): boolean => {
     return Boolean(
       dc.card.dashboard_id !== null &&
-        dc.card_id &&
-        this.state.dashcardCountByCardId[dc.card_id] <= 1,
+      dc.card_id &&
+      this.state.dashcardCountByCardId[dc.card_id] <= 1,
     );
   };
 
   getRowHeight() {
     const { width } = this.props;
 
+    // Unjustified type cast. FIXME
     const contentViewportElement = this.context as any;
     const hasScroll =
       contentViewportElement?.clientHeight <
@@ -387,9 +368,9 @@ class DashboardGridInner extends Component<
       !!replaceCardModalDashCard &&
       isQuestionDashCard(replaceCardModalDashCard);
 
-    const handleSelect = (nextCard: QuestionPickerValueItem) => {
-      if (!hasValidDashCard) {
-        return;
+    const handleSelect = (nextCard: OmniPickerQuestionItem) => {
+      if (!hasValidDashCard || typeof nextCard.id === "string") {
+        throw new Error(t`Invalid card selected`);
       }
 
       replaceCard({
@@ -399,7 +380,6 @@ class DashboardGridInner extends Component<
 
       addUndo({
         message: getUndoReplaceCardMessage(replaceCardModalDashCard.card),
-        undo: true,
         action: () =>
           setDashCardAttributes({
             id: replaceCardModalDashCard.id,
@@ -409,15 +389,18 @@ class DashboardGridInner extends Component<
       handleClose();
     };
 
-    const replaceCardModalRecentFilter = (items: RecentItem[]) => {
-      return items.filter((item) => {
-        if (isRecentCollectionItem(item) && item.dashboard) {
-          if (item.dashboard.id !== dashboard.id) {
-            return false;
-          }
+    const shouldDisableItem = (item: OmniPickerItem) => {
+      // don't allow adding items that are already saved in a different dashboard
+      // proably only applicable to search and recents
+      if (isInCollectionTree(item) && item.dashboard_id) {
+        if (item.dashboard_id !== dashboard.id) {
+          return true;
         }
+      }
+      if (item.model === "dashboard" && item.id !== dashboard.id) {
         return true;
-      });
+      }
+      return false;
     };
 
     const handleClose = () => {
@@ -436,10 +419,11 @@ class DashboardGridInner extends Component<
             ? getQuestionPickerValue(replaceCardModalDashCard.card)
             : undefined
         }
-        models={["card", "dataset", "metric"]}
+        models={["card", "dataset", "metric", "dashboard"]}
+        options={{ hasConfirmButtons: false }}
         onChange={handleSelect}
         onClose={handleClose}
-        recentFilter={replaceCardModalRecentFilter}
+        isDisabledItem={shouldDisableItem}
       />
     );
   }
@@ -519,14 +503,18 @@ class DashboardGridInner extends Component<
     );
   }
 
-  onVisualizerModalSave = (visualization: VisualizerVizDefinition) => {
+  onVisualizerModalSave = async (visualization: VisualizerVizDefinition) => {
     const { visualizerModalStatus } = this.state;
 
     if (!visualizerModalStatus) {
       return;
     }
 
-    this.props.replaceCardWithVisualization({
+    // Await the replacement before closing the modal: it commits the new
+    // card series to the dashcard only after fetching the referenced cards.
+    // Closing early lets a subsequent dashboard save run against the
+    // not-yet-updated dashcard, which would drop the new series.
+    await this.props.replaceCardWithVisualization({
       dashcardId: visualizerModalStatus.dashcardId,
       visualization,
     });
@@ -561,6 +549,7 @@ class DashboardGridInner extends Component<
         initialState={{ state: visualizerModalStatus.state }}
         saveLabel={t`Save`}
         allowSaveWhenPristine={allowSaveWhenPristine}
+        dashboardId={this.props.dashboard.id}
       />
     );
   }
@@ -607,7 +596,6 @@ class DashboardGridInner extends Component<
           S.DashboardCardContainer,
           {
             [DashboardS.BrandColorResizeHandle]: shouldChangeResizeHandle,
-            [S.isAnimationDisabled]: this.state.isAnimationPaused,
           },
         )}
       >
@@ -640,7 +628,7 @@ class DashboardGridInner extends Component<
         breakpoints={GRID_BREAKPOINTS}
         cols={GRID_COLUMNS}
         width={width}
-        margin={{ desktop: [6, 6], mobile: [6, 10] }}
+        margin={GRID_MARGINS}
         containerPadding={[0, 0]}
         rowHeight={rowHeight}
         onLayoutChange={this.onLayoutChange}
@@ -708,17 +696,16 @@ const getUndoReplaceCardMessage = ({ type }: Card) => {
 const DashboardGrid = forwardRef<
   HTMLDivElement,
   DashboardGridForwardedRefProps
->(function _DashboardGrid({ width = 0, ...restProps }, ref) {
+>(function DashboardGridBase({ width = 0, ...restProps }, ref) {
   const {
     dashboard,
     selectedTabId,
     slowCards,
     isEditing = false,
     isEditingParameter = false,
-    isNightMode = false,
     isFullscreen,
     clickBehaviorSidebarDashcard,
-    getClickActionMode,
+    clickActionMode,
     navigateToNewCardFromDashboard,
     downloadsEnabled,
     autoScrollToDashcardId,
@@ -740,10 +727,9 @@ const DashboardGrid = forwardRef<
       slowCards={slowCards}
       isEditing={isEditing}
       isEditingParameter={isEditingParameter}
-      isNightMode={isNightMode}
       isFullscreen={isFullscreen}
       clickBehaviorSidebarDashcard={clickBehaviorSidebarDashcard}
-      getClickActionMode={getClickActionMode}
+      clickActionMode={clickActionMode}
       navigateToNewCardFromDashboard={navigateToNewCardFromDashboard}
       downloadsEnabled={downloadsEnabled}
       autoScrollToDashcardId={autoScrollToDashcardId}
@@ -761,6 +747,7 @@ const DashboardGrid = forwardRef<
   );
 });
 
+// Unjustified type cast. FIXME
 export const DashboardGridConnected = _.compose(
   ExplicitSize(),
   connector,

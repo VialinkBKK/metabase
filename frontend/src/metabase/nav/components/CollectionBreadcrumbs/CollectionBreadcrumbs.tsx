@@ -1,9 +1,7 @@
-import { Fragment } from "react";
+import type { JSX } from "react";
 
-import { Badge } from "metabase/common/components/Badge";
-import { useToggle } from "metabase/common/hooks/use-toggle";
-import * as Urls from "metabase/lib/urls";
-import { CollectionBadge } from "metabase/questions/components/CollectionBadge";
+import { useTranslateContent } from "metabase/content-translation/hooks";
+import * as Urls from "metabase/urls";
 import type {
   Collection,
   CollectionEssentials,
@@ -11,18 +9,15 @@ import type {
   Dashboard,
 } from "metabase-types/api";
 
-import {
-  BreadcrumbsPathSeparator,
-  ExpandButton,
-  PathContainer,
-} from "./CollectionBreadcrumbs.styled";
-import { getCollectionList } from "./utils";
+import { CollectionBreadcrumbsView } from "./CollectionBreadcrumbsView";
+import { collectionToCrumbs } from "./utils";
 
 export interface CollectionBreadcrumbsProps {
   collection?: Collection;
   dashboard?: Dashboard;
   onClick?: (collection: CollectionEssentials) => void;
   baseCollectionId: CollectionId | null;
+  truncateLongestFirst?: boolean;
 }
 
 export const CollectionBreadcrumbs = ({
@@ -30,75 +25,30 @@ export const CollectionBreadcrumbs = ({
   dashboard,
   onClick,
   baseCollectionId = null,
+  truncateLongestFirst,
 }: CollectionBreadcrumbsProps): JSX.Element | null => {
-  const [isExpanded, { toggle }] = useToggle(false);
+  const tc = useTranslateContent();
 
   if (!collection) {
     return null;
   }
 
-  const parts = getCollectionList({
-    baseCollectionId,
-    collection,
-  });
-
-  const separator = <BreadcrumbsPathSeparator>/</BreadcrumbsPathSeparator>;
-
-  const content =
-    parts.length > 1 && !isExpanded ? (
-      <>
-        <CollectionBadge
-          collectionId={parts[0].id}
-          isSingleLine
-          onClick={onClick ? () => onClick(collection) : undefined}
-        />
-        {separator}
-        <ExpandButton
-          small
-          borderless
-          icon="ellipsis"
-          onlyIcon
-          onClick={toggle}
-        />
-        {separator}
-      </>
-    ) : (
-      parts.map((collection) => (
-        <Fragment key={collection.id}>
-          <CollectionBadge
-            collectionId={collection.id}
-            isSingleLine
-            onClick={onClick ? () => onClick(collection) : undefined}
-          />
-          {separator}
-        </Fragment>
-      ))
-    );
-
   return (
-    <>
-      <PathContainer>
-        {content}
-        <CollectionBadge
-          collectionId={collection.id}
-          isSingleLine
-          onClick={onClick ? () => onClick(collection) : undefined}
-        />
-      </PathContainer>
-      {dashboard && (
-        <>
-          {separator}
-          <Badge
-            icon={{ name: "dashboard" }}
-            inactiveColor="text-light"
-            isSingleLine
-            to={Urls.dashboard(dashboard)}
-          >
-            {dashboard.name}
-          </Badge>
-        </>
-      )}
-    </>
+    <CollectionBreadcrumbsView
+      path={collectionToCrumbs({ collection, baseCollectionId, onClick })}
+      terminal={
+        dashboard
+          ? {
+              kind: "static",
+              key: `dashboard-${dashboard.id}`,
+              icon: "dashboard",
+              label: tc(dashboard.name),
+              to: Urls.dashboard(dashboard),
+            }
+          : undefined
+      }
+      truncateLongestFirst={truncateLongestFirst}
+    />
   );
 };
 

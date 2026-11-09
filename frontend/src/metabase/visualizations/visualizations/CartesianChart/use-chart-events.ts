@@ -1,147 +1,149 @@
-import type { EChartsCoreOption, EChartsType } from "echarts/core";
-import type * as React from "react";
-import {
-  useCallback,
-  useEffect,
-  useLayoutEffect,
-  useMemo,
-  useRef,
-} from "react";
+import type { EChartsOption } from "echarts";
+import type { EChartsType } from "echarts/core";
+import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useLatest } from "react-use";
 
-import {
-  GOAL_LINE_SERIES_ID,
-  INDEX_KEY,
-  TIMELINE_EVENT_DATA_NAME,
-} from "metabase/visualizations/echarts/cartesian/constants/dataset";
-import type {
-  BaseCartesianChartModel,
-  ChartDataset,
-} from "metabase/visualizations/echarts/cartesian/model/types";
-import { createAxisVisibilityOption } from "metabase/visualizations/echarts/cartesian/option/axis";
-import type { TimelineEventsModel } from "metabase/visualizations/echarts/cartesian/timeline-events/types";
-import { useClickedStateTooltipSync } from "metabase/visualizations/echarts/tooltip";
-import type {
-  EChartsSeriesBrushEndEvent,
-  EChartsSeriesMouseEvent,
-} from "metabase/visualizations/echarts/types";
+import { isEmbeddingSdk } from "metabase/embedding-sdk/config";
+import { useStore } from "metabase/redux";
+import { useChartYAxisVisibility } from "metabase/visualizations/hooks/use-chart-y-axis-visibility";
 import type { VisualizationProps } from "metabase/visualizations/types";
-import type { EChartsEventHandler } from "metabase/visualizations/types/echarts";
 import {
   canBrush,
+  getAdjustedBrushEndEvent,
+  getBrushClickObject,
   getBrushData,
   getGoalLineHoverData,
   getSeriesClickData,
   getSeriesHovered,
-  getTimelineEventsForEvent,
-  getTimelineEventsHoverData,
-  hasSelectedTimelineEvents,
 } from "metabase/visualizations/visualizations/CartesianChart/events";
-import { getVisualizerSeriesCardIndex } from "metabase/visualizer/utils";
-import type { CardId } from "metabase-types/api";
-
 import {
+  type BaseCartesianChartModel,
+  type ChartDataset,
+  type EChartsEventHandler,
+  type EChartsSeriesBrushEndEvent,
+  type EChartsSeriesBrushEvent,
+  type EChartsSeriesBrushSelectedEvent,
+  type EChartsSeriesMouseEvent,
+  INDEX_KEY,
+  type RenderingContext,
+  buildBrushMirrorGraphics,
+  buildClearBrushMirrorGraphics,
+  getVisualizerSeriesCardIndex,
+  isBreakoutSeries,
+  isGoalLineSeriesId,
+  isLineXBrushRange,
+  useClickedStateTooltipSync,
+} from "metabase/viz-core";
+import type { CardId, SeriesCard } from "metabase-types/api";
+
+import type { CartesianHoveredObject } from "./types";
+import { useBrush } from "./use-brush";
+import { useTooltipMouseLeave } from "./use-tooltip-mouse-leave";
+import {
+  doesSeriesAlwaysOpenQuestion,
   getHoveredEChartsSeriesDataKeyAndIndex,
-  getHoveredSeriesDataKey,
 } from "./utils";
+
+function getSplitPanelGrids(option: EChartsOption) {
+  const { grid } = option;
+  return Array.isArray(grid) && grid.length > 1 ? grid : null;
+}
+
+function clearBrush(
+  chart: EChartsType | undefined,
+  option: EChartsOption | undefined,
+) {
+  if (!chart) {
+    return;
+  }
+
+  const grids = option != null ? getSplitPanelGrids(option) : null;
+  if (grids) {
+    chart.setOption(
+      { graphic: buildClearBrushMirrorGraphics(grids.length) },
+      false,
+    );
+  }
+
+  chart.dispatchAction({
+    type: "brush",
+    command: "clear",
+    areas: [],
+  });
+}
 
 export const useChartEvents = (
   chartRef: React.MutableRefObject<EChartsType | undefined>,
+  containerRef: React.RefObject<HTMLDivElement | null>,
   chartModel: BaseCartesianChartModel,
-  timelineEventsModel: TimelineEventsModel | null,
-  option: EChartsCoreOption,
+  option: EChartsOption,
+  renderingContext: RenderingContext,
+  hovered: CartesianHoveredObject | null,
   {
     card,
     rawSeries,
-    isVisualizerViz,
+    isVisualizerCard,
     visualizerRawSeries = [],
-    selectedTimelineEventIds,
     settings,
     visualizationIsClickable,
     onChangeCardAndRun,
+    onBrush,
     onVisualizationClick,
     onHoverChange,
-    onOpenTimelines,
-    onSelectTimelineEvents,
-    onDeselectTimelineEvents,
-    hovered,
     clicked,
-    metadata,
     isDashboard,
+    getCardHref,
   }: VisualizationProps,
+  // The ECharts instance, mirrored into state by the caller. Used as a signal
+  // to re-run chart-instance-dependent effects (e.g. brush) once it is ready,
+  // which matters because the renderer calls `onInit` only after ExplicitSize
+  // has measured it.
+  chartInstance?: EChartsType,
 ) => {
-  const isBrushing = useRef<boolean>();
+  // Read at call time so the handler list does not rebuild on metadata change.
+  const store = useStore();
+  const isBrushing = useRef<boolean>(undefined);
+  useTooltipMouseLeave(chartRef, onHoverChange, containerRef);
+
+  const getQuestionCard = useCallback(
+    (cardId?: CardId): SeriesCard => {
+      if (isVisualizerCard) {
+        const index = getVisualizerSeriesCardIndex(cardId);
+        return visualizerRawSeries[index].card;
+      }
+      return (
+        rawSeries.find((series) => series.card.id === cardId)?.card ?? card
+      );
+    },
+    [card, rawSeries, visualizerRawSeries, isVisualizerCard],
+  );
 
   const onOpenQuestion = useCallback(
     (cardId?: CardId) => {
-      if (isVisualizerViz) {
-        const index = getVisualizerSeriesCardIndex(cardId);
-        const nextCard = visualizerRawSeries[index].card;
-        onChangeCardAndRun?.({ nextCard });
-      } else {
-        const nextCard =
-          rawSeries.find((series) => series.card.id === cardId)?.card ?? card;
-        onChangeCardAndRun?.({ nextCard });
-      }
+      onChangeCardAndRun?.({ nextCard: getQuestionCard(cardId) });
     },
-    [card, rawSeries, visualizerRawSeries, isVisualizerViz, onChangeCardAndRun],
+    [getQuestionCard, onChangeCardAndRun],
   );
 
-  const hoveredSeriesDataKey = useMemo(
-    () => getHoveredSeriesDataKey(chartModel.seriesModels, hovered),
-    [chartModel.seriesModels, hovered],
+  const isSplitPanels =
+    settings["graph.split_panels"] === true &&
+    chartModel.seriesModels.filter((series) => series.visible).length > 1;
+
+  useChartYAxisVisibility({
+    chartRef,
+    seriesModels: chartModel.seriesModels,
+    leftAxisModel: isSplitPanels ? null : chartModel.leftAxisModel,
+    rightAxisModel: isSplitPanels ? null : chartModel.rightAxisModel,
+    leftAxisSeriesKeys: chartModel.leftAxisModel?.seriesKeys ?? [],
+    hovered,
+  });
+
+  const optionRef = useLatest(option);
+
+  const brushSelectedEventRef = useRef<EChartsSeriesBrushSelectedEvent | null>(
+    null,
   );
-
-  /**
-   * We intentionally use useLayoutEffect here and not useEffect.
-   * This is so that chart.setOption is always called in a different tick than
-   * chart.setOption from useClickedStateTooltipSync. If they're called in the
-   * same tick (which may happen non-deterministically), then the 2nd chart.setOption
-   * call (whichever is 2nd) will throw "Cannot read property 'coordinateSystem' of undefined" error.
-   */
-  useLayoutEffect(
-    function updateYAxisVisibility() {
-      const hasSingleYAxis = !(
-        chartModel.leftAxisModel != null && chartModel.rightAxisModel != null
-      );
-
-      if (hasSingleYAxis) {
-        return;
-      }
-
-      let yAxisShowOption: ReturnType<typeof createAxisVisibilityOption>[];
-
-      const noSeriesHovered = hoveredSeriesDataKey == null;
-      const leftAxisSeriesHovered =
-        hoveredSeriesDataKey != null &&
-        chartModel.leftAxisModel?.seriesKeys.includes(hoveredSeriesDataKey);
-
-      if (noSeriesHovered) {
-        yAxisShowOption = [
-          createAxisVisibilityOption({ show: true, splitLineVisible: true }),
-          createAxisVisibilityOption({ show: true, splitLineVisible: false }),
-        ];
-      } else if (leftAxisSeriesHovered) {
-        yAxisShowOption = [
-          createAxisVisibilityOption({ show: true, splitLineVisible: true }),
-          createAxisVisibilityOption({ show: false, splitLineVisible: false }),
-        ];
-      } else {
-        // right axis series hovered
-        yAxisShowOption = [
-          createAxisVisibilityOption({ show: false, splitLineVisible: false }),
-          createAxisVisibilityOption({ show: true, splitLineVisible: true }),
-        ];
-      }
-
-      chartRef.current?.setOption({ yAxis: yAxisShowOption }, false, true);
-    },
-    [
-      chartModel.leftAxisModel,
-      chartModel.rightAxisModel,
-      chartRef,
-      hoveredSeriesDataKey,
-    ],
-  );
+  const keepBrushForClickActionsRef = useRef(false);
 
   const eventHandlers: EChartsEventHandler[] = useMemo(
     () => [
@@ -160,20 +162,12 @@ export const useChartEvents = (
             return;
           }
 
-          if (timelineEventsModel && event.name === TIMELINE_EVENT_DATA_NAME) {
-            const eventData = getTimelineEventsHoverData(
-              timelineEventsModel,
-              event,
-            );
+          if (isGoalLineSeriesId(event.seriesId)) {
+            chartRef.current?.getZr().setCursorStyle("default");
 
-            onHoverChange?.(eventData);
-            return;
-          }
-
-          if (event.seriesId === GOAL_LINE_SERIES_ID) {
             const eventData = getGoalLineHoverData(
               settings,
-              event,
+              event.event.event.target,
               chartModel.leftAxisModel?.formatGoal,
             );
 
@@ -196,34 +190,9 @@ export const useChartEvents = (
         handler: (event: EChartsSeriesMouseEvent) => {
           const clickData = getSeriesClickData(chartModel, settings, event);
 
-          if (timelineEventsModel && event.name === TIMELINE_EVENT_DATA_NAME) {
-            onOpenTimelines?.();
-
-            const clickedTimelineEvents = getTimelineEventsForEvent(
-              timelineEventsModel,
-              event,
-            );
-
-            if (!clickedTimelineEvents) {
-              return;
-            }
-
-            if (
-              hasSelectedTimelineEvents(
-                clickedTimelineEvents,
-                selectedTimelineEventIds ?? [],
-              )
-            ) {
-              onDeselectTimelineEvents?.();
-              return;
-            }
-
-            onSelectTimelineEvents?.(clickedTimelineEvents);
-            return;
-          }
-
           if (!visualizationIsClickable(clickData)) {
             onOpenQuestion(clickData?.cardId);
+            return;
           }
 
           onVisualizationClick?.(clickData);
@@ -231,25 +200,82 @@ export const useChartEvents = (
       },
       {
         eventName: "brush",
-        handler: () => {
+        handler: (event: EChartsSeriesBrushEvent) => {
           if (!isBrushing.current) {
             chartRef.current?.setOption({ tooltip: { show: false } }, false);
             isBrushing.current = true;
           }
+
+          const grids = getSplitPanelGrids(optionRef.current);
+          const range = event.areas?.[0]?.range;
+          if (grids && isLineXBrushRange(range)) {
+            const graphics = buildBrushMirrorGraphics(
+              grids,
+              range,
+              renderingContext,
+            );
+            chartRef.current?.setOption({ graphic: graphics }, false);
+          }
+        },
+      },
+      {
+        eventName: "brushSelected",
+        handler: (event: EChartsSeriesBrushSelectedEvent) => {
+          brushSelectedEventRef.current = event;
         },
       },
       {
         eventName: "brushEnd",
-        handler: (event: EChartsSeriesBrushEndEvent) => {
-          const eventData = getBrushData(
-            isVisualizerViz ? visualizerRawSeries : rawSeries,
-            metadata,
+        handler: (brushEndEvent: EChartsSeriesBrushEndEvent) => {
+          const adjustedBrushEndEvent = getAdjustedBrushEndEvent(
+            brushEndEvent,
+            brushSelectedEventRef.current,
             chartModel,
-            event,
           );
+          brushSelectedEventRef.current = null;
+          if (!adjustedBrushEndEvent) {
+            return;
+          }
 
-          if (eventData) {
-            onChangeCardAndRun?.(eventData);
+          let openedClickActions = false;
+
+          if (onBrush) {
+            const chartElement = chartRef.current?.getDom();
+            if (chartElement) {
+              const clickObject = getBrushClickObject(
+                chartModel,
+                adjustedBrushEndEvent,
+                chartElement,
+                settings,
+              );
+              if (clickObject) {
+                onBrush({
+                  clickObject,
+                  openClickActions: (clicked) => {
+                    if (!visualizationIsClickable(clicked)) {
+                      return;
+                    }
+                    openedClickActions = true;
+                    keepBrushForClickActionsRef.current = true;
+                    onVisualizationClick(clicked);
+                  },
+                });
+              }
+            }
+          } else {
+            const eventData = getBrushData(
+              store.getState(),
+              isVisualizerCard ? visualizerRawSeries : rawSeries,
+              chartModel,
+              adjustedBrushEndEvent,
+            );
+            if (eventData) {
+              onChangeCardAndRun?.(eventData);
+            }
+          }
+
+          if (!openedClickActions) {
+            clearBrush(chartRef.current, optionRef.current);
           }
         },
       },
@@ -257,24 +283,29 @@ export const useChartEvents = (
     [
       chartRef,
       onHoverChange,
-      timelineEventsModel,
       chartModel,
       hovered,
       settings,
       visualizationIsClickable,
       onVisualizationClick,
-      onOpenTimelines,
-      selectedTimelineEventIds,
-      onSelectTimelineEvents,
-      onDeselectTimelineEvents,
       onOpenQuestion,
+      optionRef,
+      renderingContext,
       rawSeries,
       visualizerRawSeries,
-      isVisualizerViz,
-      metadata,
+      isVisualizerCard,
+      store,
       onChangeCardAndRun,
+      onBrush,
     ],
   );
+
+  useEffect(() => {
+    if (clicked == null && keepBrushForClickActionsRef.current) {
+      keepBrushForClickActionsRef.current = false;
+      clearBrush(chartRef.current, optionRef.current);
+    }
+  }, [clicked, chartRef, optionRef]);
 
   useEffect(
     function handleHoverStates() {
@@ -305,7 +336,7 @@ export const useChartEvents = (
       // all the data labels show
       const isBarSeries =
         seriesModel != null
-          ? settings.series(seriesModel.legacySeriesSettingsObjectKey)
+          ? settings.series?.(seriesModel.legacySeriesSettingsObjectKey)
               .display === "bar"
           : false;
       const shouldHighlightEntireSeries =
@@ -329,12 +360,32 @@ export const useChartEvents = (
         seriesIndex: hoveredEChartsSeriesIndex,
       });
 
+      // a normal hover triggers the tooltip via the tooltip option's `trigger` "item"
+      // but we may need to show the tooltip manually for highlighted items
+      let showTipTimeout: ReturnType<typeof setTimeout> | undefined;
+      if (hovered.shouldShowTooltip) {
+        // setTimeout because ChartItemTooltip/reactNodeToHtmlString uses flushSync
+        showTipTimeout = setTimeout(() => {
+          chart.dispatchAction({
+            type: "showTip",
+            dataIndex,
+            seriesIndex: hoveredEChartsSeriesIndex,
+          });
+        }, 0);
+      }
+
       return () => {
+        clearTimeout(showTipTimeout);
         chart.dispatchAction({
           type: "downplay",
           dataIndex,
           seriesIndex: hoveredEChartsSeriesIndex,
         });
+        if (hovered.shouldShowTooltip) {
+          chart.dispatchAction({
+            type: "hideTip",
+          });
+        }
       };
     },
     [
@@ -349,53 +400,41 @@ export const useChartEvents = (
 
   useClickedStateTooltipSync(chartRef.current, clicked);
 
-  // In order to keep brushing always enabled we have to re-enable it on every model change
-  useEffect(
-    function toggleBrushing() {
-      const shouldEnableBrushing =
-        canBrush(rawSeries, settings, onChangeCardAndRun) &&
-        !hovered &&
-        !clicked;
-
-      setTimeout(() => {
-        if (shouldEnableBrushing) {
-          chartRef.current?.dispatchAction({
-            type: "takeGlobalCursor",
-            key: "brush",
-            brushOption: {
-              brushType: "lineX",
-              brushMode: "single",
-            },
-          });
-        } else {
-          chartRef.current?.dispatchAction({
-            type: "takeGlobalCursor",
-          });
-        }
-      }, 0);
-    },
-    [
-      chartRef,
-      hovered,
-      onChangeCardAndRun,
-      option,
-      rawSeries,
-      settings,
-      clicked,
-    ],
+  const canBrushChart = canBrush(
+    rawSeries,
+    settings,
+    chartModel.dimensionModel.column,
+    onChangeCardAndRun,
+    onBrush,
   );
+  const isBrushable = canBrushChart && !hovered && !clicked;
+
+  useBrush(
+    chartRef,
+    containerRef,
+    canBrushChart,
+    isBrushable,
+    option,
+    chartInstance,
+  );
+
+  const hasMultipleCards = rawSeries.length > 1;
 
   const onSelectSeries = useCallback(
     (event: React.MouseEvent, seriesIndex: number) => {
-      const areMultipleCards = rawSeries.length > 1;
       const seriesModel = chartModel.seriesModels[seriesIndex];
 
-      if (areMultipleCards) {
+      if (
+        doesSeriesAlwaysOpenQuestion(seriesModel, {
+          hasMultipleCards,
+          isDashboard,
+        })
+      ) {
         onOpenQuestion(seriesModel.cardId);
         return;
       }
 
-      const hasBreakout = "breakoutColumn" in seriesModel;
+      const hasBreakout = isBreakoutSeries(seriesModel);
       const dimensions = hasBreakout
         ? [
             {
@@ -409,20 +448,18 @@ export const useChartEvents = (
         cardId: seriesModel.cardId,
         dimensions,
         settings,
+        element: event.currentTarget,
       };
 
       if (hasBreakout && visualizationIsClickable(clickData)) {
-        onVisualizationClick({
-          ...clickData,
-          element: event.currentTarget,
-        });
+        onVisualizationClick(clickData);
       } else if (isDashboard) {
         onOpenQuestion(seriesModel.cardId);
       }
     },
     [
       chartModel.seriesModels,
-      rawSeries,
+      hasMultipleCards,
       settings,
       visualizationIsClickable,
       onVisualizationClick,
@@ -431,8 +468,35 @@ export const useChartEvents = (
     ],
   );
 
+  const getSeriesHref = useCallback(
+    (seriesIndex: number) => {
+      const seriesModel = chartModel.seriesModels[seriesIndex];
+      return seriesModel
+        ? getCardHref?.(getQuestionCard(seriesModel.cardId))
+        : undefined;
+    },
+    [chartModel.seriesModels, getCardHref, getQuestionCard],
+  );
+
+  // Legend titles are links only when clicking one always opens a question:
+  // breakout series can open drills instead. The Embedding SDK has no
+  // in-app routes to link to.
+  const canNavigate =
+    getCardHref !== undefined &&
+    onChangeCardAndRun != null &&
+    !isEmbeddingSdk();
+  const canLinkSeries =
+    canNavigate &&
+    chartModel.seriesModels.every((seriesModel) =>
+      doesSeriesAlwaysOpenQuestion(seriesModel, {
+        hasMultipleCards,
+        isDashboard,
+      }),
+    );
+
   return {
     onSelectSeries,
+    getSeriesHref: canLinkSeries ? getSeriesHref : undefined,
     onOpenQuestion,
     eventHandlers,
   };

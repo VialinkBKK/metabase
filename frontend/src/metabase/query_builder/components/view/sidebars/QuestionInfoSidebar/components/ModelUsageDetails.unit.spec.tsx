@@ -1,22 +1,23 @@
 import userEvent from "@testing-library/user-event";
-import fetchMock from "fetch-mock";
-import { Route } from "react-router";
 
 import { createMockMetadata } from "__support__/metadata";
 import {
   setupCardQueryMetadataEndpoint,
   setupCardsEndpoints,
+  setupCardsUsingModelEndpoint,
   setupCollectionsEndpoints,
   setupDatabasesEndpoints,
 } from "__support__/server-mocks";
+import { createMockSettingsState, createMockState } from "__support__/state";
 import {
   renderWithProviders,
   screen,
   waitForLoaderToBeRemoved,
 } from "__support__/ui";
-import { checkNotNull } from "metabase/lib/types";
+import { Route } from "metabase/router";
+import * as Urls from "metabase/urls";
+import { checkNotNull } from "metabase/utils/types";
 import { TYPE } from "metabase-lib/v1/types/constants";
-import * as ML_Urls from "metabase-lib/v1/urls";
 import type { Card, Collection, Database, Settings } from "metabase-types/api";
 import {
   createMockCardQueryMetadata,
@@ -34,10 +35,6 @@ import {
   createSavedNativeCard,
   createSavedStructuredCard,
 } from "metabase-types/api/mocks/presets";
-import {
-  createMockSettingsState,
-  createMockState,
-} from "metabase-types/store/mocks";
 
 import { ModelUsageDetails } from "./ModelUsageDetails";
 import { DEFAULT_LIST_LIMIT } from "./hooks";
@@ -152,15 +149,7 @@ async function setup({
   );
 
   setupDatabasesEndpoints(databases);
-
-  fetchMock.get(
-    {
-      url: "path:/api/card",
-      query: { f: "using_model", model_id: card.id },
-    },
-    usedBy,
-  );
-
+  setupCardsUsingModelEndpoint(card, usedBy);
   setupCardsEndpoints([card]);
   setupCardQueryMetadataEndpoint(
     card,
@@ -170,15 +159,15 @@ async function setup({
         createMockTable({
           id: `card__${card.id}`,
           name: card.name,
-          fields: card.result_metadata,
+          fields: card.result_metadata ?? [],
         }),
       ],
     }),
   );
   setupCollectionsEndpoints({ collections });
 
-  const { history } = renderWithProviders(
-    <Route path="*" component={() => <ModelUsageDetails model={model} />} />,
+  const { router } = renderWithProviders(
+    <Route path="*" element={<ModelUsageDetails model={model} />} />,
     {
       withRouter: true,
       storeInitialState,
@@ -186,7 +175,7 @@ async function setup({
   );
   await waitForLoaderToBeRemoved();
 
-  return { model, history, metadata, usedByQuestions };
+  return { model, router, metadata, usedByQuestions };
 }
 
 describe("ModelUsageDetails", () => {
@@ -217,7 +206,7 @@ describe("ModelUsageDetails", () => {
         for (const q of usedByQuestions) {
           const link = await screen.findByLabelText(q._card.name);
           expect(link).toBeInTheDocument();
-          expect(link).toHaveAttribute("href", ML_Urls.getUrl(q));
+          expect(link).toHaveAttribute("href", Urls.question(q));
         }
 
         expect(
@@ -243,7 +232,7 @@ describe("ModelUsageDetails", () => {
         for (const q of slicedQuestions) {
           const link = await screen.findByLabelText(q._card.name);
           expect(link).toBeInTheDocument();
-          expect(link).toHaveAttribute("href", ML_Urls.getUrl(q));
+          expect(link).toHaveAttribute("href", Urls.question(q));
         }
 
         // Expect sixth card to be hidden

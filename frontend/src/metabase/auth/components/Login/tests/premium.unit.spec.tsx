@@ -1,3 +1,4 @@
+import "metabase/auth/plugins";
 import { screen } from "__support__/ui";
 
 import { setup } from "./setup";
@@ -7,7 +8,7 @@ describe("Login", () => {
     setup({
       isPasswordLoginEnabled: false,
       isGoogleAuthEnabled: true,
-      hasEnterprisePlugins: true,
+      enterprisePlugins: ["auth"],
       tokenFeatures: { disable_password_login: true },
     });
 

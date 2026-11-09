@@ -1,8 +1,8 @@
-import { has24HourModeSetting } from "metabase/lib/time";
+import { has24HourModeSetting } from "metabase/utils/time-dayjs";
 
 import { getHours } from "./strings";
 
-jest.mock("metabase/lib/time", () => ({
+jest.mock("metabase/utils/time-dayjs", () => ({
   has24HourModeSetting: jest.fn(),
 }));
 
@@ -12,6 +12,7 @@ describe("getHours", () => {
   });
 
   const setup = ({ isClock24Hour }: { isClock24Hour: boolean }) => {
+    // Unjustified type cast. FIXME
     (has24HourModeSetting as jest.Mock).mockReturnValue(isClock24Hour);
   };
 

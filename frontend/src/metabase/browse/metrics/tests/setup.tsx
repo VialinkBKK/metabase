@@ -1,28 +1,26 @@
-import { setupEnterprisePlugins } from "__support__/enterprise";
+import { setupEnterpriseOnlyPlugin } from "__support__/enterprise";
 import {
   setupCardEndpoints,
   setupCardQueryEndpoints,
-  setupDatabasesEndpoints,
   setupRecentViewsEndpoints,
   setupSearchEndpoints,
+  setupSearchErrorEndpoint,
   setupSettingsEndpoints,
 } from "__support__/server-mocks";
 import { mockSettings } from "__support__/settings";
+import { createMockSetupState, createMockState } from "__support__/state";
 import { renderWithProviders } from "__support__/ui";
-import type { Database, TokenFeatures } from "metabase-types/api";
+import { Route } from "metabase/router";
+import type { TokenFeatures } from "metabase-types/api";
 import {
   createMockCard,
   createMockCollection,
-  createMockDatabase,
   createMockDataset,
   createMockSearchResult,
   createMockTokenFeatures,
   createMockUser,
+  createMockUserPermissions,
 } from "metabase-types/api/mocks";
-import {
-  createMockSetupState,
-  createMockState,
-} from "metabase-types/store/mocks";
 
 import { BrowseMetrics } from "../BrowseMetrics";
 import { createMockMetricResult, createMockRecentMetric } from "../test-utils";
@@ -207,20 +205,20 @@ export type SetupOpts = {
   metricCount?: number;
   recentMetricCount?: number;
   showMetabaseLinks?: boolean;
-  hasEnterprisePlugins?: boolean;
   tokenFeatures?: Partial<TokenFeatures>;
-  databases?: Database[];
+  canCreateQueries?: boolean;
+  enterprisePlugins?: Parameters<typeof setupEnterpriseOnlyPlugin>[0][];
+  searchError?: boolean;
 };
-
-const MOCK_DATABASE = createMockDatabase({ id: 1, name: "Database Name" });
 
 export function setup({
   metricCount = Infinity,
   recentMetricCount = 5,
   showMetabaseLinks = true,
-  hasEnterprisePlugins,
   tokenFeatures = {},
-  databases = [MOCK_DATABASE],
+  canCreateQueries = true,
+  enterprisePlugins = [],
+  searchError = false,
 }: SetupOpts = {}) {
   const state = createMockState({
     setup: createMockSetupState({
@@ -230,24 +228,33 @@ export function setup({
       "show-metabase-links": showMetabaseLinks,
       "token-features": createMockTokenFeatures(tokenFeatures),
     }),
-    currentUser: createMockUser({ id: 1 }),
+    currentUser: createMockUser({
+      id: 1,
+      permissions: createMockUserPermissions({
+        can_create_queries: canCreateQueries,
+      }),
+    }),
   });
 
-  if (hasEnterprisePlugins) {
-    setupEnterprisePlugins();
-  }
+  enterprisePlugins.forEach((plugin) => {
+    setupEnterpriseOnlyPlugin(plugin);
+  });
 
   const mockMetricResults = mockMetrics.map(createMockMetricResult);
   const mockRecentMetrics = mockMetrics.map((metric) =>
+    // Unjustified type cast. FIXME
     createMockRecentMetric(metric as RecentMetric),
   );
 
   const metrics = mockMetricResults.slice(0, metricCount);
   const recentMetrics = mockRecentMetrics.slice(0, recentMetricCount);
 
-  setupDatabasesEndpoints(databases);
   setupSettingsEndpoints([]);
-  setupSearchEndpoints(metrics.map(createMockSearchResult));
+  if (searchError) {
+    setupSearchErrorEndpoint();
+  } else {
+    setupSearchEndpoints(metrics.map(createMockSearchResult));
+  }
   setupRecentViewsEndpoints(recentMetrics);
 
   for (const metric of metrics) {
@@ -259,5 +266,17 @@ export function setup({
     setupCardQueryEndpoints(card, TEST_DATASET);
   }
 
-  return renderWithProviders(<BrowseMetrics />, { storeInitialState: state });
+  return renderWithProviders(
+    <>
+      <Route path="/" element={<BrowseMetrics />} />
+      <Route
+        path="/metric/:cardId"
+        element={<div data-testid="metric-detail-page" />}
+      />
+    </>,
+    {
+      storeInitialState: state,
+      withRouter: true,
+    },
+  );
 }

@@ -1,37 +1,54 @@
-import { goBack, push } from "react-router-redux";
-import _ from "underscore";
+import { t } from "ttag";
 
-import Timelines from "metabase/entities/timelines";
-import { connect } from "metabase/lib/redux";
-import * as Urls from "metabase/lib/urls";
-import DeleteTimelineModal from "metabase/timelines/common/components/DeleteTimelineModal";
+import {
+  skipToken,
+  useDeleteTimelineMutation,
+  useGetTimelineQuery,
+} from "metabase/api";
+import type { ModalComponentProps } from "metabase/common/components/ModalRoute";
+import { DeleteConfirmationFooter } from "metabase/timelines/common/components/DeleteConfirmationFooter";
+import {
+  TimelineModal,
+  TimelineModalLoadingState,
+} from "metabase/timelines/common/components/TimelineModal";
+import * as Urls from "metabase/urls";
 import type { Timeline } from "metabase-types/api";
-import type { State } from "metabase-types/store";
 
-import type { ModalParams } from "../../types";
+function DeleteTimelineModalContainer({
+  params,
+  onClose,
+}: ModalComponentProps) {
+  const [deleteTimeline] = useDeleteTimelineMutation();
+  const id = Urls.extractEntityId(params.timelineId);
+  const {
+    data: timeline,
+    isLoading,
+    error,
+  } = useGetTimelineQuery(id != null ? { id, include: "events" } : skipToken);
 
-interface DeleteTimelineModalProps {
-  params: ModalParams;
+  const handleSubmit = async (timeline: Timeline) => {
+    await deleteTimeline(timeline.id).unwrap();
+    onClose();
+  };
+
+  return (
+    <TimelineModal
+      title={timeline ? t`Delete ${timeline.name}?` : undefined}
+      onClose={onClose}
+      animated={false}
+      tall={isLoading || !!error || !timeline}
+    >
+      {isLoading || error || !timeline ? (
+        <TimelineModalLoadingState loading={isLoading} error={error} />
+      ) : (
+        <DeleteConfirmationFooter
+          onDelete={() => handleSubmit(timeline)}
+          onCancel={onClose}
+        />
+      )}
+    </TimelineModal>
+  );
 }
 
-const timelineProps = {
-  id: (state: State, props: DeleteTimelineModalProps) =>
-    Urls.extractEntityId(props.params.timelineId),
-  query: { include: "events" },
-};
-
-const mapDispatchToProps = (dispatch: any) => ({
-  onSubmit: async (timeline: Timeline) => {
-    await dispatch(Timelines.actions.delete(timeline));
-    dispatch(push(Urls.timelinesArchiveInCollection(timeline.collection)));
-  },
-  onCancel: () => {
-    dispatch(goBack());
-  },
-});
-
 // eslint-disable-next-line import/no-default-export -- deprecated usage
-export default _.compose(
-  Timelines.load(timelineProps),
-  connect(null, mapDispatchToProps),
-)(DeleteTimelineModal);
+export default DeleteTimelineModalContainer;

@@ -1,14 +1,15 @@
+import cx from "classnames";
 import { useCallback, useMemo, useState } from "react";
 import {
   type ItemCallback,
   Responsive as ReactGridLayout,
 } from "react-grid-layout";
 
+import { useHasPaintedSinceMount } from "metabase/common/hooks/use-has-painted-since-mount";
 import { useMantineTheme } from "metabase/ui";
-
 import "react-grid-layout/css/styles.css";
 import "react-resizable/css/styles.css";
-
+import S from "./GridLayout.module.css";
 import { generateGridBackground } from "./utils";
 
 // We need to omit onLayoutChange and margin from the props of ReactGridLayout
@@ -81,19 +82,31 @@ export function GridLayout<T extends { id: number | null }>(
     rowHeight,
     isEditing,
     onLayoutChange,
+    className,
     ...otherProps
   } = props;
   const theme = useMantineTheme();
 
+  // Cards only animate while editing, where the motion shows where a dragged
+  // or resized card lands. Even then, wait for a paint after mount:
+  // react-grid-layout swaps top/left positioning for CSS transforms right after
+  // mounting, and animating that swap slides every card in from the top-left.
+  const hasPaintedSinceMount = useHasPaintedSinceMount();
+  const areTransitionsEnabled = isEditing && hasPaintedSinceMount;
+
   const [currentBreakpoint, setCurrentBreakpoint] = useState(
+    // Unjustified type cast. FIXME
     (ReactGridLayout as any).utils.getBreakpointFromWidth(
       breakpoints,
       gridWidth,
     ),
   );
 
+  const [localLayout, setLocalLayout] = useState<ReactGridLayout.Layout[]>();
+
   const onLayoutChangeWrapped = useCallback(
     (currentLayout: ReactGridLayout.Layout[]) => {
+      setLocalLayout(currentLayout);
       onLayoutChange({
         layout: currentLayout,
         // Calculating the breakpoint right here,
@@ -159,13 +172,18 @@ export function GridLayout<T extends { id: number | null }>(
   );
 
   const height = useMemo(() => {
-    let lowestLayoutCellPoint = Math.max(...layout.map((l) => l.y + l.h));
+    // Once `localLayout` is set, use it instead of the prop layout.
+    // The prop layout includes all cards (visible and hidden), causing
+    // incorrect y/height calculations. `localLayout` only includes visible cards.
+    let lowestLayoutCellPoint = Math.max(
+      ...(localLayout ?? layout).map((l) => l.y + l.h),
+    );
     if (isEditing) {
       lowestLayoutCellPoint += Math.ceil(window.innerHeight / cellSize.height);
     }
-    const verticalMargin = margin[1];
+    const [_horizontalMargin, verticalMargin] = margin;
     return (cellSize.height + verticalMargin) * lowestLayoutCellPoint;
-  }, [cellSize.height, layout, margin, isEditing]);
+  }, [localLayout, layout, isEditing, margin, cellSize.height]);
 
   const background = useMemo(
     () =>
@@ -179,7 +197,7 @@ export function GridLayout<T extends { id: number | null }>(
         // lives a separate style tree from the rest of the app.
         cellStrokeColor:
           theme.other?.dashboard?.gridBorderColor ??
-          theme.fn.themeColor("border"),
+          theme.fn.themeColor("border-neutral"),
       }),
     [cellSize, gridWidth, margin, cols, theme],
   );
@@ -226,6 +244,9 @@ export function GridLayout<T extends { id: number | null }>(
       isDraggable={isEditing && !isMobile}
       isResizable={isEditing && !isMobile}
       {...otherProps}
+      className={cx(className, {
+        [S.withoutTransitions]: !areTransitionsEnabled,
+      })}
       autoSize={false}
       onLayoutChange={onLayoutChangeWrapped}
       onBreakpointChange={onBreakpointChange}
@@ -234,6 +255,7 @@ export function GridLayout<T extends { id: number | null }>(
       onDragStop={enableTextSelection}
       onResizeStart={disableTextSelection}
       onResizeStop={enableTextSelection}
+      draggableCancel="[data-dontdrag]"
     >
       {children}
     </ReactGridLayout>

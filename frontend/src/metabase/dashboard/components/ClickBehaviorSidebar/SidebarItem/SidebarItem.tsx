@@ -1,5 +1,4 @@
 import cx from "classnames";
-import type * as React from "react";
 
 import type { IconProps } from "metabase/ui";
 import { Box, Flex, Icon } from "metabase/ui";
@@ -36,7 +35,7 @@ function CloseIcon({
 }) {
   return (
     <Box
-      p="md"
+      p="lg"
       ml="auto"
       component="span"
       className={cx(S.CloseIconContainer, className)}

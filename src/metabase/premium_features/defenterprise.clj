@@ -9,6 +9,8 @@
    [metabase.util.i18n :refer [trs tru]]
    [metabase.util.malli :as mu]))
 
+(set! *warn-on-reflection* true)
+
 (defn- in-ee?
   "Is the current namespace an Enterprise Edition namespace?"
   []
@@ -45,7 +47,10 @@
   availability of EE code and the necessary premium feature. Returns a fn which, when invoked, applies its args to one
   of the EE implementation, the OSS implementation, or the fallback function."
   [ee-ns ee-fn-name]
-  (let [try-require-ee-ns-once (delay (u/ignore-exceptions (classloader/require ee-ns)))]
+  (let [try-require-ee-ns-once (delay (u/ignore-exceptions
+                                        ;; The namespace is supplied by `defenterprise` at macro-expansion time.
+                                        #_{:clj-kondo/ignore [:metabase/modules]}
+                                        (classloader/require ee-ns)))]
     (fn [& args]
       @try-require-ee-ns-once
       (let [{:keys [ee oss feature fallback]} (get @registry ee-fn-name)]
@@ -94,7 +99,7 @@
   (let [oss-or-ee (if (in-ee?) :ee :oss)]
     (case oss-or-ee
       :ee  (validate-ee-args options)
-      :oss (validate-oss-args '~ee-ns options))
+      :oss (validate-oss-args ee-ns options))
     `(let [ee-ns#        '~(or ee-ns (ns-name *ns*))
            ee-fn-name#   (symbol (str ee-ns# "/" '~fn-name))
            oss-or-ee-fn# ~(if schema?
@@ -102,7 +107,7 @@
                             `(fn ~(symbol (str fn-name)) ~@fn-tail))]
        (register-mapping! ee-fn-name# (merge ~options {~oss-or-ee oss-or-ee-fn#}))
        (def
-         ~(vary-meta fn-name assoc :arglists ''([& args]))
+         ~(vary-meta fn-name merge {:arglists ''([& args])})
          ~docstr
          (dynamic-ee-oss-fn ee-ns# ee-fn-name#)))))
 

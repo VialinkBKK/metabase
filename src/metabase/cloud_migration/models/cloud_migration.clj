@@ -5,13 +5,15 @@
    [clojure.java.io :as io]
    [clojure.set :as set]
    [metabase.app-db.core :as mdb]
+   [metabase.app-db.quartz :as app-db.quartz]
+   [metabase.cloud-migration.db :as cloud-migration.db]
    [metabase.cloud-migration.settings :as cloud-migration.settings]
    [metabase.cmd.copy :as copy]
    [metabase.cmd.dump-to-h2 :as dump-to-h2]
    [metabase.config.core :as config]
    [metabase.models.interface :as mi]
    [metabase.settings.core :as setting]
-   [metabase.task.bootstrap :as task.bootstrap]
+   [metabase.store-api.core :as store-api]
    [metabase.task.core :as task]
    [metabase.util :as u]
    [metabase.util.i18n :refer [tru]]
@@ -42,7 +44,7 @@
   (update-keys {;; Migrations need to update their own state
                 :model/CloudMigration :all :model/Setting :all
                 ;; Users need to login, make queries, and we need need to audit them.
-                :model/User :all :model/Session :all :model/LoginHistory :all
+                :model/User :all :model/LoginHistory :all
                 :model/UserParameterValue :all
                 :model/AuditLog :all :model/ViewLog :all
                 ;; Cards need to able to update their last used at timestamp, but we don't want to create
@@ -76,7 +78,7 @@
 (defn migration-url
   "Store API URL for migrations."
   ([]
-   (str (cloud-migration.settings/store-api-url) "/api/v2/migration"))
+   (str (store-api/store-api-url) "/api/v2/migration"))
   ([external-id path]
    (str (migration-url) "/" external-id path)))
 
@@ -89,10 +91,7 @@
   Works by checking how many Quartz nodes there are.
   See https://github.com/quartz-scheduler/quartz/issues/733"
   []
-  (>= (t2/count (if (= (mdb/db-type) :postgres)
-                  "qrtz_scheduler_state"
-                  "QRTZ_SCHEDULER_STATE"))
-      2))
+  (>= (cloud-migration.db/quartz-node-count) 2))
 
 (defn- progress-file-input-stream
   "File input stream that calls on-percent-progress with current read progress as int from 0 to 100."
@@ -124,8 +123,7 @@
   This is the main cluster coordination mechanism for migrations, since any instance
   can cancel the migration, not just the one that initiated it."
   [id state progress]
-  (when (= 0 (t2/update! :model/CloudMigration :id id :state [:not-in terminal-states]
-                         {:state state :progress progress}))
+  (when (= 0 (cloud-migration.db/set-cloud-migration-progress-if-not-in-states! id terminal-states state progress))
     (throw (ex-info "Cannot update migration in terminal state" {:terminal true}))))
 
 (defn abs-progress
@@ -139,7 +137,9 @@
   Returns a sub-stream that should be used inside with-open."
   [^InputStream stream start end]
   (.skip stream start)
-  (BoundedInputStream. stream (- end start)))
+  (.get (doto (BoundedInputStream/builder)
+          (.setInputStream stream)
+          (.setMaxCount (- end start)))))
 
 (defn- put-file
   "Put file, whole or from start to end, on url, reporting on-progress. Retries up to 3 times."
@@ -180,7 +180,12 @@
                           {:form-params  {:part_count (count parts)}
                            :content-type :json})
                 :body
-                json/decode+kw)
+                json/decode+kw
+                ;; This endpoint, and only this one in this ns, needs a backwards and forward compatible
+                ;; key conversion. This can be removed when Harbormaster does only underscores in the API,
+                ;; and the keys above (multipart-upload-id multipart-urls) renamed to use underscores.
+                ;; But it can also stay here indefinitely and will be correct.
+                u/deep-kebab-keys)
 
             etags
             (->> parts
@@ -208,15 +213,14 @@
   Will exit early if migration has been cancelled in any cluster instance.
   Should run in a separate thread since it can take a long time to complete."
   [{:keys [id external_id] :as migration} & {:keys [retry?]}]
-  ;; dump-to-h2 starts behaving oddly if you try to dump repeatly to the same file
+  ;; dump-to-h2 starts behaving oddly if you try to dump repeatedly to the same file
   ;; in the same process, so use a random name.
   ;; The docker image process runs in non-root, so write to a dir it can access.
   (let [dump-file (io/file (System/getProperty "java.io.tmpdir")
                            (str "cloud_migration_dump_" (random-uuid) ".mv.db"))]
     (try
       (when retry?
-        (t2/update! :model/CloudMigration :id id {:state :init}))
-
+        (cloud-migration.db/set-cloud-migration-state! id :init))
       (log/info "Setting read-only mode")
       (set-progress id :setup 1)
       (cloud-migration.settings/read-only-mode! true)
@@ -225,7 +229,6 @@
         (Thread/sleep (int (* 1.5 setting/cache-update-check-interval-ms))))
       (log/info "Stopping scheduler")
       (task/stop-scheduler!)
-
       (log/info "Dumping h2 backup to" (.getAbsolutePath dump-file))
       (set-progress id :dump 20)
       (dump-to-h2/dump-to-h2! (.getAbsolutePath dump-file) {:dump-plaintext? true})
@@ -233,28 +236,24 @@
         (throw (ex-info "Read-only mode disabled before h2 dump was completed, contents might not be self-consistent!"
                         {:id id})))
       (cloud-migration.settings/read-only-mode! false)
-
       (log/info "Uploading dump to store")
       (set-progress id :upload 50)
       (upload migration dump-file)
-
       (log/info "Notifying store that upload is done")
       (http/put (migration-url external_id "/uploaded"))
-
       ;; Need to restore the previous scheduler configuration because the database quartz is pointing at has changed
       ;; after finishing the dump to h2 migration
-      (task.bootstrap/set-jdbc-backend-properties! (mdb/db-type))
+      (app-db.quartz/set-jdbc-backend-properties! (mdb/db-type))
       (log/info "Restarting scheduler")
       (task/start-scheduler!)
-
       (log/info "Migration finished")
       (set-progress id :done 100)
       (catch Exception e
         ;; See set-progress for when :terminal is set.
         (if (-> e ex-data :terminal)
-          (log/info "Migration interruped due to terminal state")
+          (log/info "Migration interrupted due to terminal state")
           (do
-            (t2/update! :model/CloudMigration id {:state :error})
+            (cloud-migration.db/set-cloud-migration-state! id :error)
             (log/info "Migration failed")
             (throw (ex-info "Error performing migration" {} e)))))
       (finally
@@ -279,7 +278,7 @@
 
   ;; test settings you might want to change manually
   ;; local HM store api url
-  #_(cloud-migration.settings/store-api-url! "http://localhost:5010")
+  #_(store-api/store-api-url! "http://localhost:5010")
   ;; make sure to use a version that store supports, and a dump for that version.
   #_(cloud-migration.settings/migration-dump-version! "v0.49.7")
   ;; make a new dump with any released metabase jar using the command below:
@@ -290,10 +289,10 @@
   #_(def ^:private part-size 6e6)
 
   ;; add new
-  (t2/insert-returning-instance! :model/CloudMigration (get-store-migration))
+  (cloud-migration.db/insert-cloud-migration! (get-store-migration))
 
   ;; get migration
-  @(def mig (t2/select-one :model/CloudMigration {:order-by [[:created_at :desc]]}))
+  @(def mig (cloud-migration.db/latest-cloud-migration))
 
   ;; migrate
   (migrate! mig)
@@ -302,4 +301,4 @@
   (migrate! mig :retry? true)
 
   ;; cancel all
-  (t2/update! :model/CloudMigration {:state [:not-in terminal-states]} {:state :cancelled}))
+  (cloud-migration.db/cancel-cloud-migrations-not-in-states! terminal-states))

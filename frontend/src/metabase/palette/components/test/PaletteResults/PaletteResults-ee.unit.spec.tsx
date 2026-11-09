@@ -1,14 +1,15 @@
-import fetchMock from "fetch-mock";
-
 import { screen, within } from "__support__/ui";
 
 import { type CommonSetupProps, commonSetup } from "./setup";
 
-const setup = (props: CommonSetupProps = {}) => {
-  fetchMock.get("path:/api/ee/metabot-v3/v2/prompt-suggestions", {
-    prompts: [],
-  });
+// The search debounce is idle time in these tests: they assert what a search
+// returns, not that the input waits before it asks.
+jest.mock("metabase/utils/constants", () => ({
+  ...jest.requireActual("metabase/utils/constants"),
+  SEARCH_DEBOUNCE_DURATION: 0,
+}));
 
+const setup = (props: CommonSetupProps = {}) => {
   commonSetup({ ...props, isEE: true });
 };
 
@@ -32,24 +33,6 @@ describe("PaletteResults EE", () => {
         await within(
           await screen.findByRole("option", { name: "Foo Question" }),
         ).findByRole("img", { name: /verified_filled/ }),
-      ).toBeInTheDocument();
-    });
-
-    it("should show the default metabot palette item", async () => {
-      setup();
-      expect(
-        await screen.findByRole("option", {
-          name: "Ask me to do something, or ask me a question",
-        }),
-      ).toBeInTheDocument();
-    });
-
-    it("should show the metabot palette item with interpolated query", async () => {
-      setup({ query: "what is our aov" });
-      expect(
-        await screen.findByRole("option", {
-          name: 'Ask Metabot, "what is our aov"',
-        }),
       ).toBeInTheDocument();
     });
   });

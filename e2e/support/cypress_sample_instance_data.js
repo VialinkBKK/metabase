@@ -28,6 +28,11 @@ export const ORDERS_COUNT_QUESTION_ID = _.findWhere(
   { name: "Orders, Count" },
 ).id;
 
+export const ORDERS_COUNT_QUESTION_ENTITY_ID = _.findWhere(
+  SAMPLE_INSTANCE_DATA.questions,
+  { name: "Orders, Count" },
+).entity_id;
+
 export const ORDERS_BY_YEAR_QUESTION_ID = _.findWhere(
   SAMPLE_INSTANCE_DATA.questions,
   { name: "Orders, Count, Grouped by Created At (year)" },
@@ -71,6 +76,11 @@ export const NO_DATA_PERSONAL_COLLECTION_ID = _.findWhere(
 export const NO_COLLECTION_PERSONAL_COLLECTION_ID = _.findWhere(
   SAMPLE_INSTANCE_DATA.collections,
   { name: "No Collection Tableton's Personal Collection" },
+).id;
+
+export const NO_SQL_PERSONAL_COLLECTION_ID = _.findWhere(
+  SAMPLE_INSTANCE_DATA.collections,
+  { name: "No SQL Tableton's Personal Collection" },
 ).id;
 
 /**
@@ -137,12 +147,23 @@ export const IMPERSONATED_USER_ID = _.findWhere(SAMPLE_INSTANCE_DATA.users, {
 
 export const ADMINISTRATORS_GROUP_ID = _.findWhere(
   SAMPLE_INSTANCE_DATA.groups,
-  { name: "Administrators" },
+  { magic_group_type: "admin" },
 ).id;
 
 export const ALL_USERS_GROUP_ID = _.findWhere(SAMPLE_INSTANCE_DATA.groups, {
-  name: "All Users",
+  magic_group_type: "all-internal-users",
 }).id;
+
+export const ALL_EXTERNAL_USERS_GROUP_ID = _.findWhere(
+  SAMPLE_INSTANCE_DATA.groups,
+  {
+    magic_group_type: "all-external-users",
+  },
+)?.id;
+
+export const DATA_ANALYSTS_GROUP_ID = _.findWhere(SAMPLE_INSTANCE_DATA.groups, {
+  magic_group_type: "data-analyst",
+})?.id;
 
 export const COLLECTION_GROUP_ID = _.findWhere(SAMPLE_INSTANCE_DATA.groups, {
   name: "collection",

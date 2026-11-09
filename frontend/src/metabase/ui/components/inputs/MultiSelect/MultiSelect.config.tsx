@@ -7,7 +7,7 @@ import S from "./MultiSelect.module.css";
 export const multiSelectOverrides = {
   MultiSelect: MultiSelect.extend({
     defaultProps: {
-      radius: "sm",
+      radius: "xs",
       size: "md",
       variant: "default",
       maxDropdownHeight: 512,
@@ -21,7 +21,7 @@ export const multiSelectOverrides = {
         keepMounted: false,
       },
       clearButtonProps: {
-        color: "text-dark",
+        color: "text-primary",
       },
       "data-testid": "multi-select",
       inputWrapperOrder: ["label", "description", "input", "error"],

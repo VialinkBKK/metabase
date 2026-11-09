@@ -3,20 +3,19 @@ import {
   createAction,
   createSlice,
 } from "@reduxjs/toolkit";
-import { LOCATION_CHANGE, push } from "react-router-redux";
 
-import {
-  isSmallScreen,
-  openInBlankWindow,
-  shouldOpenInBlankWindow,
-} from "metabase/lib/dom";
-import { combineReducers, handleActions } from "metabase/lib/redux";
+import { findErrorMessage } from "metabase/api/utils/errors";
+import { combineReducers, handleActions } from "metabase/redux";
 import type {
-  Dispatch,
+  DetailViewState,
   TempStorage,
   TempStorageKey,
   TempStorageValue,
-} from "metabase-types/store";
+} from "metabase/redux/store";
+import { LOCATION_CHANGE, navigate } from "metabase/router";
+import { shouldOpenInBlankWindow } from "metabase/urls";
+import { isSmallScreen, openInBlankWindow } from "metabase/utils/dom";
+import { isObject } from "metabase-types/guards/common";
 
 interface LocationChangeAction {
   type: string; // "@@router/LOCATION_CHANGE"
@@ -47,42 +46,25 @@ export function resetErrorPage() {
   };
 }
 
-interface IOpenUrlOptions {
-  blank?: boolean;
-  event?: Event;
-  blankOnMetaOrCtrlKey?: boolean;
-  blankOnDifferentOrigin?: boolean;
-}
-
-export const openUrl =
-  (url: string, options: IOpenUrlOptions = {}) =>
-  (dispatch: Dispatch) => {
-    if (shouldOpenInBlankWindow(url, options)) {
-      openInBlankWindow(url);
-    } else {
-      dispatch(push(url));
-    }
-  };
+export const openUrl = (url: string) => () => {
+  if (shouldOpenInBlankWindow(url)) {
+    openInBlankWindow(url);
+  } else {
+    navigate(url);
+  }
+};
 
 const errorPage = handleActions(
   {
-    [SET_ERROR_PAGE]: (_, { payload }) => payload,
+    [SET_ERROR_PAGE]: (_, { payload }: { payload: unknown }) =>
+      isObject(payload)
+        ? { ...payload, message: findErrorMessage(payload) }
+        : payload,
     [RESET_ERROR_PAGE]: () => null,
     [LOCATION_CHANGE]: () => null,
   },
   null,
 );
-
-// regexr.com/7r89i
-// A word boundary is added to /model so it doesn't match /browse/models
-const PATH_WITH_COLLAPSED_NAVBAR =
-  /\/(model\b|question|dashboard|metabot|embed-iframe).*/;
-
-export function isNavbarOpenForPathname(pathname: string, prevState: boolean) {
-  return (
-    !isSmallScreen() && !PATH_WITH_COLLAPSED_NAVBAR.test(pathname) && prevState
-  );
-}
 
 export const OPEN_NAVBAR = "metabase/app/OPEN_NAVBAR";
 export const CLOSE_NAVBAR = "metabase/app/CLOSE_NAVBAR";
@@ -97,6 +79,9 @@ const isNavbarOpen = handleActions(
     [OPEN_NAVBAR]: () => true,
     [TOGGLE_NAVBAR]: (isOpen) => !isOpen,
     [CLOSE_NAVBAR]: () => false,
+    // The navbar only opens or closes on explicit user action, so navigation
+    // keeps whatever state the user last chose. The one exception is small
+    // screens, where an open navbar would cover the whole page.
     [LOCATION_CHANGE]: (
       prevState: boolean,
       { payload }: LocationChangeAction,
@@ -105,7 +90,7 @@ const isNavbarOpen = handleActions(
         return prevState;
       }
 
-      return isNavbarOpenForPathname(payload.pathname, prevState);
+      return isSmallScreen() ? false : prevState;
     },
   },
   true,
@@ -125,8 +110,24 @@ const isErrorDiagnosticsOpen = handleActions(
   false,
 );
 
+export const SET_DETAIL_VIEW = "metabase/app/SET_DETAIL_VIEW";
+
+export const setDetailView = createAction<DetailViewState | null>(
+  SET_DETAIL_VIEW,
+);
+
+const detailView = handleActions(
+  {
+    [SET_DETAIL_VIEW]: {
+      next: (_oldState, { payload: newState }) => newState,
+    },
+  },
+  null,
+);
+
 const tempStorageSlice = createSlice({
   name: "tempStorage",
+  // Unjustified type cast. FIXME
   initialState: {} as TempStorage,
   reducers: {
     setTempSetting: (
@@ -145,6 +146,7 @@ export const { setTempSetting } = tempStorageSlice.actions;
 
 // eslint-disable-next-line import/no-default-export -- deprecated usage
 export default combineReducers({
+  detailView,
   errorPage,
   isNavbarOpen,
   isDndAvailable: (initValue: unknown) => {

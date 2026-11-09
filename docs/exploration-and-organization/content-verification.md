@@ -36,19 +36,20 @@ To remove verification from an item, admins can:
 
 If anyone makes any changes to a question, metric, or model's _query_, Metabase will remove the verification status (the check mark will disappear). The logic here is that changing the results in any way should require re-verification.
 
-Dashboards verification works a little differently (since there's no underlying query). Dashboard verification is sticky; you can modify a verified dashboard and it'll retain its verified status.
+Dashboard verification works a little differently (since there's no underlying query). Dashboard verification is sticky; you can modify a verified dashboard and it'll retain its verified status.
 
 ## Verifiable items
 
 Admins can verify the following items:
 
 - [Questions](../questions/start.md)
-- [Models](../data-modeling/models.md)
-- [Metrics](../data-modeling/metrics.md)
+- [Models](../data-modeling/models/models.md)
+- [Metrics](../data-modeling/semantic-layer/metrics.md)
 - [Dashboards](../dashboards/introduction.md)
 
-Dashboard verification status has no affect on its questions. Questions must be verified independently.
+Dashboard verification status has no effect on its questions. Questions must be verified independently.
 
 ## Further reading
 
 - [Official collections](./collections.md#official-collections)
+- [Library](../data-modeling/semantic-layer/library.md)

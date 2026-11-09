@@ -1,12 +1,15 @@
 (ns metabase.appearance.settings
   (:require
+   [buddy.core.codecs :as codecs]
+   [buddy.core.hash :as buddy-hash]
    [clojure.java.io :as io]
    [clojure.string :as str]
+   [metabase.appearance.db :as appearance.db]
    [metabase.settings.core :as setting :refer [defsetting]]
    [metabase.util :as u]
    [metabase.util.fonts :as u.fonts]
    [metabase.util.i18n :refer [deferred-tru tru]]
-   [toucan2.core :as t2]))
+   [metabase.util.jvm :as u.jvm]))
 
 (set! *warn-on-reflection* true)
 
@@ -35,14 +38,16 @@
   :default    false
   :type       :boolean
   :audit      :getter
-  :visibility :public)
+  :visibility :public
+  :export?    true)
 
 (defsetting custom-homepage-dashboard
   (deferred-tru "ID of dashboard to use as a homepage")
   :encryption :no
   :type       :integer
   :visibility :public
-  :audit      :getter)
+  :audit      :getter
+  :export?    true)
 
 (defn- coerce-to-relative-url
   "Get the path of a given URL if the URL contains an origin.
@@ -55,9 +60,9 @@
     :else landing-page))
 
 (defsetting landing-page
-  (deferred-tru "Enter a URL of the landing page to show the user. This overrides the custom homepage setting above.")
+  (deferred-tru "Enter a relative URL like /dashboard/1 or /collection/2.")
   :encryption :no
-  :visibility :public
+  :visibility :authenticated
   :export?    true
   :type       :string
   :default    ""
@@ -208,7 +213,8 @@ See [fonts](../configuring-metabase/fonts.md).")
   :type       :boolean
   :audit      :getter
   :feature    :whitelabel
-  :default    true)
+  :default    true
+  :doc        false)
 
 (defsetting login-page-illustration
   (deferred-tru "Options for displaying the illustration on the login page.")
@@ -220,6 +226,57 @@ See [fonts](../configuring-metabase/fonts.md).")
   :feature    :whitelabel
   :default    "default")
 
+(def ^:private image-data-uri-header
+  ;; possessive `*+`: a plain `*` recurses per parameter and overflows the stack on long headers
+  #"(?i)(image/[\w.+-]+)((?:;[\w.+-]+=[\w.+-]+)*+);base64")
+
+(defn- parse-image-data-uri
+  "Parse a base64 `data:image/...` URI into `{:content-type :media-type :bytes :hash}`, or nil if `s` is not one."
+  [^String s]
+  (when-let [comma (and (str/starts-with? s "data:") (str/index-of s ","))]
+    (when-let [[_ media-type params] (re-matches image-data-uri-header (subs s 5 comma))]
+      (try
+        {:content-type (str (u/lower-case-en media-type) params)
+         :media-type   (u/lower-case-en media-type)
+         :bytes        (u.jvm/decode-base64-to-bytes (subs s (inc comma)))
+         :hash         (subs (codecs/bytes->hex (buddy-hash/sha256 s)) 0 16)}
+        (catch IllegalArgumentException _
+          nil)))))
+
+(def custom-illustration-settings
+  "The settings that hold a custom illustration, uploaded as a data URI or given as a URL."
+  #{:login-page-illustration-custom
+    :landing-page-illustration-custom
+    :no-data-illustration-custom
+    :no-object-illustration-custom})
+
+(def ^:private parsed-illustrations
+  "The last raw value of each custom illustration setting and its parsed image, as `{setting-key [raw parsed]}`."
+  (atom {}))
+
+(defn- parsed-illustration
+  [setting-key raw]
+  (let [[cached-raw cached] (get @parsed-illustrations setting-key)
+        ;; `raw` is usually the same String instance, but any setting change reloads all settings and gives a new
+        ;; instance. with only `=`, the cache would keep the old instance (same content, different reference), so
+        ;; every later read would do a content comparison. that's why we also use `identical?` to store the new
+        ;; instance: it costs one content comparison per reload, then reads only compare references. with only
+        ;; `identical?`, every reload would parse the image again.
+        parsed              (if (= raw cached-raw) cached (some-> raw parse-image-data-uri))]
+    (when-not (identical? raw cached-raw)
+      (swap! parsed-illustrations assoc setting-key [raw parsed]))
+    parsed))
+
+;; keep uploaded images out of the bootstrap and session properties, they are served by
+;; `GET /api/session/illustration/:key`
+(defn- illustration-getter
+  [setting-key]
+  (fn []
+    (let [raw (setting/get-value-of-type :string setting-key)]
+      (if-let [{image-hash :hash} (parsed-illustration setting-key raw)]
+        (str "api/session/illustration/" (name setting-key) "?v=" image-hash)
+        raw))))
+
 (defsetting login-page-illustration-custom
   (deferred-tru "The custom illustration for the login page.")
   :encryption :no
@@ -227,7 +284,8 @@ See [fonts](../configuring-metabase/fonts.md).")
   :export?    true
   :type       :string
   :audit      :getter
-  :feature    :whitelabel)
+  :feature    :whitelabel
+  :getter     (illustration-getter :login-page-illustration-custom))
 
 (defsetting landing-page-illustration
   (deferred-tru "Options for displaying the illustration on the landing page.")
@@ -242,11 +300,12 @@ See [fonts](../configuring-metabase/fonts.md).")
 (defsetting landing-page-illustration-custom
   (deferred-tru "The custom illustration for the landing page.")
   :encryption :no
-  :visibility :public
+  :visibility :authenticated
   :export?    true
   :type       :string
   :audit      :getter
-  :feature    :whitelabel)
+  :feature    :whitelabel
+  :getter     (illustration-getter :landing-page-illustration-custom))
 
 (defsetting no-data-illustration
   (deferred-tru "Options for displaying the illustration when there are no results after running a question.")
@@ -265,7 +324,8 @@ See [fonts](../configuring-metabase/fonts.md).")
   :export?    true
   :type       :string
   :audit      :getter
-  :feature    :whitelabel)
+  :feature    :whitelabel
+  :getter     (illustration-getter :no-data-illustration-custom))
 
 (defsetting no-object-illustration
   (deferred-tru "Options for displaying the illustration when there are no results after searching.")
@@ -284,7 +344,16 @@ See [fonts](../configuring-metabase/fonts.md).")
   :export?    true
   :type       :string
   :audit      :getter
-  :feature    :whitelabel)
+  :feature    :whitelabel
+  :getter     (illustration-getter :no-object-illustration-custom))
+
+(defn illustration-image
+  "The uploaded image of the custom illustration setting `setting-key` as `{:content-type :media-type :bytes :hash}`,
+  or nil if there is none."
+  [setting-key]
+  (when (and (contains? custom-illustration-settings setting-key)
+             (setting/get setting-key))
+    (parsed-illustration setting-key (setting/get-value-of-type :string setting-key))))
 
 (def ^:private help-link-options
   #{:metabase :hidden :custom})
@@ -322,10 +391,10 @@ See [fonts](../configuring-metabase/fonts.md).")
 (defsetting help-link-custom-destination
   (deferred-tru "Custom URL for the help link.")
   :encryption :no
-  :visibility :public
+  :visibility :authenticated
   :type       :string
   :audit      :getter
-  :default   "https://www.metabase.com/help/premium"
+  :default   "https://www.metabase.com/help-premium"
   :feature    :whitelabel
   :setter     (fn [new-value]
                 (let [new-value-string (str new-value)]
@@ -340,6 +409,23 @@ See [fonts](../configuring-metabase/fonts.md).")
   :audit      :getter
   :feature    :whitelabel)
 
+(def avaialable-number-separators
+  "Number separators that are available to use in uploads csv parsing. Values match what is implemented
+  `metabase.upload.types` namespace, specifically e.g. [[metabase.upload.types/int-regex]]."
+  #{"."
+    ".,"
+    ",."
+    ", "
+    ".’"})
+
+(defn- validate-custom-formatting!
+  [new-value]
+  (when-some [separators (some-> new-value :type/Number :number_separators)]
+    (when-not (avaialable-number-separators separators)
+      (throw (ex-info (tru "Invalid number separators.")
+                      {:separators separators
+                       :available-separators avaialable-number-separators})))))
+
 (defsetting custom-formatting
   (deferred-tru "Object keyed by type, containing formatting settings")
   :encryption :no
@@ -347,7 +433,10 @@ See [fonts](../configuring-metabase/fonts.md).")
   :export?    true
   :default    {}
   :visibility :public
-  :audit      :getter)
+  :audit      :getter
+  :setter     (fn [new-value]
+                (validate-custom-formatting! new-value)
+                (setting/set-value-of-type! :json :custom-formatting new-value)))
 
 (defsetting show-homepage-data
   (deferred-tru
@@ -379,7 +468,7 @@ See [fonts](../configuring-metabase/fonts.md).")
   :setter     :none
   :getter     (fn []
                 (let [id (setting/get-value-of-type :integer :example-dashboard-id)]
-                  (when (and id (t2/exists? :model/Dashboard :id id :archived false))
+                  (when (and id (appearance.db/unarchived-dashboard-exists? id))
                     id)))
   :doc        false)
 

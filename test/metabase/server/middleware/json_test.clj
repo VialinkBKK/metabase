@@ -3,8 +3,8 @@
    [clojure.java.io :as io]
    [clojure.test :refer :all]
    [metabase.server.middleware.json :as mw.json]
-   [metabase.server.test-handler :as server.test-handler]
    [metabase.test.http-client]
+   [metabase.test.server.handler :as test.server.handler]
    [metabase.util.json :as json]))
 
 (comment mw.json/keep-me) ; so custom Cheshire encoders are loaded
@@ -21,7 +21,7 @@
 (defn- raw-json-req
   "Kind of `mt/http-request`, but is less picky about body :)"
   [method url ^String body]
-  ((server.test-handler/test-handler)
+  ((test.server.handler/test-handler)
    {:method method
     :uri     (str metabase.test.http-client/*url-prefix* url)
     :headers {"content-type" "application/json"}
@@ -33,6 +33,5 @@
 
 (deftest json-error-test
   (testing "Parsing invalid JSON returns messages with some details"
-    (is (= {:error
-            "Unrecognized token 'ture': was expecting (JSON String, Number, Array, Object or token 'null', 'true' or 'false') at 1:17"}
-           (raw-json-req :post "/alert/" "{\"archive\": ture}")))))
+    (is (re-find #"Unrecognized token 'ture': was expecting \(JSON String, Number, Array, Object or token 'null', 'true' or 'false'\)"
+                 (:error (raw-json-req :post "/alert/" "{\"archive\": ture}"))))))

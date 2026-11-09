@@ -1,23 +1,23 @@
 ---
-title: Upgrading Metabase and the Embedded analytics SDK
-summary: How to upgrade your Metabase and Embedded analytics SDK versions, test the changes, and check for breaking changes that might affect your app.
+title: Upgrading Metabase and the modular embedding SDK
+summary: How to upgrade your Metabase and modular embedding SDK versions, test the changes, and check for breaking changes that might affect your app.
 ---
 
-# Upgrading Metabase and the Embedded analytics SDK
+# Upgrading Metabase and the modular embedding SDK
 
 Here's a basic overview of the steps you'll want to take when upgrading your SDK.
 
-## 1. Read the release post and changelog for both Metabase and the Embedded analytics SDK
+> **Using an AI coding agent?** The [agent skills pack](../ai-agent-resources.md) includes a skill that walks your agent through SDK upgrades step by step.
+
+## 1. Read the release post and changelog for Metabase and the modular embedding SDK
 
 - [Release posts](https://www.metabase.com/releases) give a good overview of what's in each release, and call out breaking changes (which are rare).
-- [Metabase changelogs](https://www.metabase.com/changelog) list Metabase changes.
-- [Embedded analytics SDK changelogs](https://www.metabase.com/changelog/55) list changes specific to the SDK package.
+- [Metabase changelog](https://www.metabase.com/changelog) lists all Metabase and modular embedding SDK changes.
+- [Modular embedding SDK changelog](https://github.com/metabase/metabase/blob/master/enterprise/frontend/src/embedding-sdk-package/CHANGELOG.md) lists changes specific to the SDK's `@metabase/embedding-sdk-react` package.
 
-Check for any relevant changes, especially breaking changes that require you to update your application's code. If there are breaking changes, we'll have docs that'll walk you through what changes you'll need to make and why.
+Check for any relevant changes, especially deprecations or breaking changes that require you to update your application's code. If there are deprecation changes, we'll have docs that'll walk you through what changes you'll need to make and why.
 
 ## 2. Test the upgrade
-
-When upgrading to a new major version, you'll want to upgrade both Metabase and the SDK version in parallel, as having Metabase and the SDK major versions out of sync can cause errors.
 
 ### Spin up the new version of Metabase for testing
 
@@ -25,37 +25,34 @@ You can do this locally or in a dev instance. If your testing setup involves a l
 
 See [upgrading Metabase](../../installation-and-operation/upgrading-metabase.md).
 
-### Upgrade the SDK with npm or yarn
+### Upgrade the SDK with npm or Yarn
 
 You'll want to test the changes locally first, as there may be breaking changes that require you to upgrade your application code.
 
-Check out a new branch in your application and install the next stable version, either with npm or yarn:
-
-Via npm:
+Check out a new branch in your application and install the SDK that matches your Metabase major version. For Metabase 60.x:
 
 ```bash
-npm install @metabase/embedding-sdk-react@{next-major-version-number}-stable
+npm install @metabase/embedding-sdk-react@60-stable
 ```
 
-For example, if you were upgrading to version 55 of the SDK:
+or with Yarn:
 
 ```bash
-npm install @metabase/embedding-sdk-react@55-stable
+yarn add @metabase/embedding-sdk-react@60-stable
 ```
 
-If you're using yarn:
-
-```bash
-yarn add @metabase/embedding-sdk-react@{next-major-version-number}-stable
-```
+To track the latest published SDK major instead, install without a dist-tag (`npm install @metabase/embedding-sdk-react`).
 
 See more on [SDK versions](./version.md).
 
-### If there are breaking changes, make the necessary changes to your application code
+### If there are deprecations or breaking changes, make the necessary changes to your application code
 
-Breaking changes are rare, but if you do need to make changes, we'll mention it in the release notes for the new major version and have docs that walk you through the changes.
+Deprecations or breaking changes are rare, but if you do need to make changes to your application code, we'll mention it in the [release notes](https://www.metabase.com/releases) for the new major version and have docs that walk you through the changes.
 
 Update or add tests for any application code changes that you make.
+
+In most cases, a deprecated change becomes a breaking change in the release following its deprecation.
+For example, if we plan to remove a prop from an SDK React component, we first mark it as **deprecated**, and then remove it in the next release.
 
 ### Deploy to your staging environment
 
@@ -67,10 +64,14 @@ If all goes well with your local tests, deploy to your staging environment. Chec
 
 If everything is working in staging, you're ready to deploy to production.
 
-Be sure to deploy your application changes and upgrade your Metabase in parallel so that the SDK version and the Metabase version stay in sync.
+### Caching may delay the upgrade by up to a minute
 
-### If your instance is on Metabase Cloud, you'll need to request an upgrade
+This is intentional. After upgrading, Metabase may still serve the previous, cached version of the SDK Bundle for up to 60 seconds (`Cache-Control: public, max-age=60`). This short cache window helps ensure fast performance while still allowing updates to propagate quickly.
 
-If you're on Metabase Cloud, your instance version is pinned, so you'll need to request an upgrade by [contacting support](https://www.metabase.com/help-premium).
+If you don’t see your changes immediately, clear your browser's cache or just wait a minute. After that, the SDK Package will load the newly deployed SDK Bundle.
+
+### If your instance is pinned on Metabase Cloud, you'll need to request an upgrade
+
+If you're on Metabase Cloud, and you've [pinned the version of your Metabase](./version.md#you-can-pin-instances-to-a-version-on-metabase-cloud), you'll need to request an upgrade by [contacting support](https://www.metabase.com/help-premium).
 
 We'll coordinate with you so that your instance is upgraded when you deploy the changes to your application.

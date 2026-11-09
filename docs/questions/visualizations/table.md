@@ -20,7 +20,7 @@ When viewing tables, you can click on the **gear** icon in the bottom left to br
 
 ![Adding or removing columns](../images/column-selection.png)
 
-Admins (and people in groups with access to table metadata) can hide columns across your entire Metabase by marking them as hidden in the [table metadata settings](../../data-modeling/metadata-editing.md#field-visibility).
+Admins (and people in groups with access to table metadata) can hide columns across your entire Metabase by marking them as hidden in the [table metadata settings](../../data-modeling/metadata/metadata-editing.md#field-visibility).
 
 > **Hiding columns should _not_ be used to secure sensitive information**. Hiding columns in table visualization settings only affects the visibility of the columns _in the visualization_, not in the query results. Even people with view-only permissions to the question will be able to change the visualization settings and unhide columns. To exclude a column from the results of a specific query, uncheck the column in the "Data" block of the query builder.
 
@@ -39,13 +39,36 @@ For more complicated calculations, you can use the editor to [add a custom colum
 
 ## Add row numbers to a table
 
-To number the rows of a table, click on the **gear** icon in bottom left to bring up the table formatting sidebar. In the **Columns** tab, and toggle on **Show row index**. Metabase will add a column to the left of the table displaying a number for each row.
+To number the rows of a table, click on the **gear** icon in bottom left to bring up the table formatting sidebar. In the **Columns** tab, toggle on **Show row index**. Metabase will add a column to the left of the table displaying a number for each row.
 
 ![Add row numbers to a table](../images/show-row-index.png)
 
 ## Resize columns
 
 To change the width of a column, you can click and drag the edges of the column's header.
+
+## Stripe rows
+
+To make wide tables easier to read, you can shade every other row.
+
+1. Click the **gear** icon in the bottom left to open visualization settings.
+2. Switch to the **Display** tab.
+3. Toggle on **Striped rows**.
+
+Striped rows also apply when the table is sent in a [dashboard subscription or alert](../../dashboards/subscriptions.md). Any [conditional formatting](#conditional-table-formatting) colors take precedence over the striped row effect.
+
+## Freeze columns or rows
+
+You can freeze a number of columns and/or rows, so that they'd stay on the screen while you scroll. Sticky columns are especially useful when viewing wide tables, as you can keep the column that identifies the row (like `account_name`) on the screen as you scroll across the columns.
+
+To freeze rows or columns when viewing a table:
+
+1. Click the **gear** icon in the bottom left to open visualization settings.
+2. Switch to the **Display** tab.
+3. Toggle on **Freeze rows** and/or **Freeze columns**.
+4. Enter the number of columns or rows you want to freeze. You can [rearrange columns](#rearranging-adding-and-hiding-columns) to make sure the columns you want to freeze appear first.
+
+![Freeze columns](../images/freeze-columns.png)
 
 ## Column heading options for filtering and summarizing
 
@@ -265,11 +288,12 @@ Lets you change the unit of currency from whatever the system default is.
 
 ### Currency label style
 
-Allows you to switch between displaying the currency label as:
+Choose how to display the currency label. For example, for Canadian dollars:
 
-- a symbol (like $)
-- a code (like USD)
-- the full name of the currency (like "US dollars")
+- **Symbol**: `CA$`
+- **Local symbol**: `$`
+- **Code**: `CAD`
+- **Name**: `Canadian dollars`
 
 ### Where to display the unit of currency
 
@@ -290,11 +314,11 @@ You can set as many rules on a table as you want, and change the order in which 
 
 ## Adding tables to dashboards
 
-When you add a table to a dashboard, you can add [custom destinations](../../dashboards/interactive.md#custom-destinations) to individual columns, wire up filter widgets, and more. To see an example of a table used in a dashboard, check out our article on [building a record lookup tool with Metabase](/learn/metabase-basics/querying-and-dashboards/dashboards/build-a-record-lookup-tool).
+When you add a table to a dashboard, you can add [custom destinations](../../dashboards/interactive.md#custom-destinations) to individual columns, wire up filter widgets, and more. To see an example of a table used in a dashboard, check out our article on [building a record lookup tool with Metabase](https://www.metabase.com/learn/metabase-basics/querying-and-dashboards/dashboards/build-a-record-lookup-tool).
 
 ## Table pagination on dashboard cards
 
-When you add a table to dashboard, the table will be scrollable by default. You can paginate the rows by:
+When you add a table to a dashboard, the table will be scrollable by default. You can paginate the rows by:
 
 1. Clicking on the **Pencil** icon to edit the dashboard.
 2. Hovering over the dashcard containing the table, and clicking the **Visualization** icon.

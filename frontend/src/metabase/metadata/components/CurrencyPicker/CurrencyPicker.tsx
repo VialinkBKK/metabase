@@ -1,7 +1,5 @@
-import type { FocusEvent } from "react";
 import { t } from "ttag";
 
-import { currency } from "cljs/metabase.util.currency";
 import {
   Combobox,
   Flex,
@@ -11,6 +9,7 @@ import {
   type SelectProps,
   Text,
 } from "metabase/ui";
+import { currency } from "metabase/utils/formatting";
 
 import S from "./CurrencyPicker.module.css";
 
@@ -26,17 +25,12 @@ export const CurrencyPicker = ({
   comboboxProps,
   value,
   onChange,
-  onFocus,
   ...props
 }: Props) => {
-  const handleFocus = (event: FocusEvent<HTMLInputElement>) => {
-    event.target.select();
-    onFocus?.(event);
-  };
-
   return (
     <Select
       comboboxProps={{
+        keepMounted: false,
         middlewares: {
           flip: true,
           size: {
@@ -56,11 +50,11 @@ export const CurrencyPicker = ({
           <SelectItem selected={selected}>
             <Icon name={selected ? "check" : "empty"} />
 
-            <Flex align="center" flex="1" gap="xs" justify="space-between">
+            <Flex align="center" flex="1" gap="xxs" justify="space-between">
               <span>{item.option.label}</span>
 
               <Text
-                c="text-light"
+                c="text-secondary"
                 className={S.symbol}
                 flex="0 0 auto"
                 lh="1rem"
@@ -72,14 +66,8 @@ export const CurrencyPicker = ({
         );
       }}
       rightSection={
-        <Flex align="center" gap="xs" pos="relative">
-          <Text
-            bg="var(--input-bg)"
-            c="text-light"
-            pos="absolute"
-            px="sm"
-            right="100%"
-          >
+        <Flex align="center" gap="xxs" pos="relative">
+          <Text c="text-secondary" pos="absolute" px="sm" right="100%">
             {SYMBOLS[value]}
           </Text>
 
@@ -89,22 +77,13 @@ export const CurrencyPicker = ({
       searchable
       value={value}
       onChange={(value) => onChange(value)}
-      onFocus={handleFocus}
       {...props}
     />
   );
 };
 
-type Currency = {
-  name: string;
-  code: string;
-  symbol: string;
-};
-
 function getData() {
-  const currencyData = currency as [Currency["symbol"], Currency][];
-
-  return currencyData.map(([, currency]) => ({
+  return currency.map(([, currency]) => ({
     label: currency.name,
     value: currency.code,
     symbol: currency.symbol,

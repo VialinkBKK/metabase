@@ -1,50 +1,67 @@
-import { goBack, push } from "react-router-redux";
-import _ from "underscore";
+import { t } from "ttag";
 
-import TimelineEvents from "metabase/entities/timeline-events";
-import Timelines from "metabase/entities/timelines";
-import { connect } from "metabase/lib/redux";
-import * as Urls from "metabase/lib/urls";
-import NewEventModal from "metabase/timelines/common/components/NewEventModal";
-import type { Collection, Timeline, TimelineEvent } from "metabase-types/api";
-import type { State } from "metabase-types/store";
+import {
+  skipToken,
+  useCreateTimelineEventMutation,
+  useGetTimelineQuery,
+} from "metabase/api";
+import type { ModalComponentProps } from "metabase/common/components/ModalRoute";
+import { useNavigate } from "metabase/router";
+import NewEventForm from "metabase/timelines/common/components/NewEventForm";
+import {
+  TimelineModal,
+  TimelineModalLoadingState,
+} from "metabase/timelines/common/components/TimelineModal";
+import * as Urls from "metabase/urls";
+import type {
+  CreateTimelineEventRequest,
+  Timeline,
+  TimelineEvent,
+} from "metabase-types/api";
 
-import LoadingAndErrorWrapper from "../../components/LoadingAndErrorWrapper";
-import type { ModalParams } from "../../types";
+function NewEventModalContainer({ params, onClose }: ModalComponentProps) {
+  const navigate = useNavigate();
+  const [createTimelineEvent] = useCreateTimelineEventMutation();
+  const id = Urls.extractEntityId(params.timelineId);
+  const {
+    data: timeline,
+    isLoading,
+    error,
+  } = useGetTimelineQuery(id != null ? { id, include: "events" } : skipToken);
 
-interface NewEventModalProps {
-  params: ModalParams;
-  timeline: Timeline;
+  const onSubmit = async (
+    values: Partial<TimelineEvent>,
+    _collection?: unknown,
+    timeline?: Timeline,
+  ) => {
+    // Unjustified type cast. FIXME
+    await createTimelineEvent(values as CreateTimelineEventRequest).unwrap();
+    if (timeline) {
+      navigate(Urls.timelineInCollection(timeline));
+    }
+  };
+
+  return (
+    <TimelineModal
+      title={t`New event`}
+      onClose={onClose}
+      animated={false}
+      density="relaxed"
+      tall={isLoading || !!error || !timeline}
+    >
+      {isLoading || error || !timeline ? (
+        <TimelineModalLoadingState loading={isLoading} error={error} />
+      ) : (
+        <NewEventForm
+          source="collections"
+          timelines={[timeline]}
+          onSubmit={onSubmit}
+          onCancel={onClose}
+        />
+      )}
+    </TimelineModal>
+  );
 }
 
-const timelineProps = {
-  id: (state: State, props: NewEventModalProps) =>
-    Urls.extractEntityId(props.params.timelineId),
-  query: { include: "events" },
-  LoadingAndErrorWrapper,
-};
-
-const mapStateToProps = (state: State, { timeline }: NewEventModalProps) => ({
-  source: "collections",
-  timelines: [timeline],
-});
-
-const mapDispatchToProps = (dispatch: any) => ({
-  onSubmit: async (
-    values: Partial<TimelineEvent>,
-    collection: Collection,
-    timeline: Timeline,
-  ) => {
-    await dispatch(TimelineEvents.actions.create(values));
-    dispatch(push(Urls.timelineInCollection(timeline)));
-  },
-  onCancel: () => {
-    dispatch(goBack());
-  },
-});
-
 // eslint-disable-next-line import/no-default-export -- deprecated usage
-export default _.compose(
-  Timelines.load(timelineProps),
-  connect(mapStateToProps, mapDispatchToProps),
-)(NewEventModal);
+export default NewEventModalContainer;

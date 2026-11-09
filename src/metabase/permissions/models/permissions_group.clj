@@ -8,9 +8,10 @@
 
   See documentation in [[metabase.permissions.models.permissions]] for more information about the Metabase permissions system."
   (:require
+   [clojure.set :as set]
    [metabase.app-db.core :as mdb]
    [metabase.models.interface :as mi]
-   [metabase.models.serialization :as serdes]
+   [metabase.permissions.db :as permissions.db]
    [metabase.permissions.models.data-permissions :as data-perms]
    [metabase.premium-features.core :as premium-features]
    [metabase.settings.core :as setting]
@@ -19,6 +20,8 @@
    [methodical.core :as methodical]
    [toucan2.core :as t2]
    [toucan2.tools.hydrate :as t2.hydrate]))
+
+(set! *warn-on-reflection* true)
 
 (methodical/defmethod t2/table-name :model/PermissionsGroup [_model] :permissions_group)
 (methodical/defmethod t2/model-for-automagic-hydration [:default :permissions_group] [_original-model _k] :model/PermissionsGroup)
@@ -30,16 +33,12 @@
   (derive :metabase/model)
   (derive :hook/entity-id))
 
-(defmethod serdes/hash-fields :model/PermissionsGroup
-  [_user]
-  [:name])
-
 ;;; -------------------------------------------- Magic Groups Getter Fns ---------------------------------------------
 
 (defn- magic-group [magic-group-type]
   (mdb/memoize-for-application-db
    (fn []
-     (u/prog1 (t2/select-one [:model/PermissionsGroup :id :name :magic_group_type] :magic_group_type magic-group-type)
+     (u/prog1 (permissions.db/magic-group magic-group-type)
        ;; normally it is impossible to delete the magic [[all-users]] or [[admin]] Groups -- see
        ;; [[check-not-magic-group]]. This assertion is here to catch us if we do something dumb when hacking on
        ;; the MB code -- to make tests fail fast. For that reason it's not i18n'ed.
@@ -56,27 +55,12 @@
   (magic-group all-users-magic-group-type))
 
 (def all-external-users-magic-group-type
-  "The magic group type of the \"All External Users\" magic group."
+  "The magic group type of the \"All tenant users\" magic group."
   "all-external-users")
 
-#_(def ^{:arglists '([])} all-external-users
-    "Fetch the `all-external-users` magic group"
-    (mdb/memoize-for-application-db
-     (fn []
-     ;; Don't use `magic-group` here, because this one might not exist and that's ok.
-       (t2/select-one [:model/PermissionsGroup :id :name :magic_group_type] :magic_group_type all-external-users-magic-group-type))))
-
-(defn create-all-external-users!
-  "Creates the \"All External Users\" magic group."
-  []
-  (t2/insert! :model/PermissionsGroup {:magic_group_type all-external-users-magic-group-type
-                                       :name "All External Users"
-                                       :is_tenant_group true}))
-
-(defn delete-all-external-users!
-  "Deletes the \"All External Users\" magic group."
-  []
-  (t2/delete! :model/PermissionsGroup {:magic_group_type all-external-users-magic-group-type}))
+(def ^{:arglists '([])} all-external-users
+  "Fetch the `All tenant users` permissions group"
+  (magic-group all-external-users-magic-group-type))
 
 (def admin-magic-group-type
   "The magic-group type of the \"Administrators\" magic group."
@@ -86,14 +70,28 @@
   "Fetch the `Administrators` permissions group"
   (magic-group admin-magic-group-type))
 
+(def data-analyst-magic-group-type
+  "The magic-group type of the \"Data Analysts\" magic group."
+  "data-analyst")
+
+(defn group-display-name
+  "The group's display name, with internal membership explicit when tenants are enabled."
+  [{:keys [magic_group_type name]} using-tenants?]
+  (if (and (= magic_group_type all-users-magic-group-type) using-tenants?)
+    "All internal users"
+    name))
+
+(def ^{:arglists '([])} data-analyst
+  "Fetch the `Data Analysts` permissions group"
+  (magic-group data-analyst-magic-group-type))
+
 ;;; --------------------------------------------------- Validation ---------------------------------------------------
 
 (defn exists-with-name?
   "Does a `PermissionsGroup` with `group-name` exist in the DB? (case-insensitive)"
   ^Boolean [group-name]
   {:pre [((some-fn keyword? string?) group-name)]}
-  (t2/exists? :model/PermissionsGroup
-              :%lower.name (u/lower-case-en (name group-name))))
+  (permissions.db/group-exists-with-lower-name? (u/lower-case-en (name group-name))))
 
 (defn- check-name-not-already-taken
   [group-name]
@@ -105,7 +103,9 @@
   [{id :id}]
   {:pre [(integer? id)]}
   (doseq [magic-group [(all-users)
-                       (admin)]]
+                       (all-external-users)
+                       (admin)
+                       (data-analyst)]]
     (when (= id (:id magic-group))
       (throw (ex-info (tru "You cannot edit or delete the ''{0}'' permissions group!" (:name magic-group))
                       {:status-code 400})))))
@@ -119,9 +119,9 @@
 
 (defn- set-default-permission-values!
   [group]
-  (t2/with-transaction [_conn]
-    (doseq [db-id (t2/select-pks-vec :model/Database)]
-      (data-perms/set-new-group-permissions! group db-id (u/the-id (all-users))))))
+  (data-perms/with-global-permissions-lock
+    (let [db-ids (permissions.db/non-destination-database-ids)]
+      (data-perms/set-default-group-permissions! group db-ids (not (:is_tenant_group group))))))
 
 (t2/define-after-insert :model/PermissionsGroup
   [group]
@@ -155,38 +155,55 @@
   [_model k groups]
   (mi/instances-with-hydrated-data
    groups k
-   #(group-by :group_id (t2/select :model/User {:select    [:u.id
-                                                            ;; user_id is for legacy reasons, we should remove it
-                                                            [:u.id :user_id]
-                                                            :u.first_name
-                                                            :u.last_name
-                                                            :u.email
-                                                            :u.is_superuser
-                                                            :pgm.group_id
-                                                            [:pgm.id :membership_id]
-                                                            (when (premium-features/enable-advanced-permissions?)
-                                                              [:pgm.is_group_manager :is_group_manager])]
-                                                :from      [[:core_user :u]]
-                                                :left-join [[:permissions_group_membership :pgm] [:= :u.id :pgm.user_id]]
-                                                :where     [:and
-                                                            [:= :u.is_active true]
-                                                            [:in :pgm.group_id (map :id groups)]]
-                                                :order-by  [[[:lower :u.first_name] :asc]
-                                                            [[:lower :u.last_name] :asc]]}))
+   ;; `user_id` in the result is for legacy reasons, we should remove it
+   #(group-by :group_id (permissions.db/group-members (map :id groups)
+                                                      (boolean (premium-features/enable-advanced-permissions?))))
    :id
    {:default []}))
 
 (defn non-admin-groups
   "Return a set of the IDs of all `PermissionsGroups`, aside from the admin group."
   []
-  (t2/select :model/PermissionsGroup :magic_group_type [:not= admin-magic-group-type]))
+  (permissions.db/groups-except-magic-type admin-magic-group-type))
 
 (defn non-magic-groups
   "Return a set of the IDs of all `PermissionsGroups`, aside from the admin group and the All Users group."
   []
-  (t2/select :model/PermissionsGroup {:where [:= :magic_group_type nil]}))
+  (permissions.db/non-magic-groups))
 
 (defn is-tenant-group?
   "Returns a boolean representing whether this group is a tenant group."
   [group-id]
-  (t2/select-one-fn :is_tenant_group :model/PermissionsGroup :id (u/the-id group-id)))
+  (permissions.db/tenant-group? (u/the-id group-id)))
+
+(defn hidden-tenant-group-ids
+  "Returns the subset of `group-ids` that are tenant groups while the Tenants feature is disabled
+  (i.e. invisible to API consumers right now). Returns an empty set if the feature is enabled, or
+  if no supplied IDs are tenant groups."
+  [group-ids]
+  (if (or (setting/get :use-tenants) (empty? group-ids))
+    #{}
+    (set/intersection (set (map u/the-id group-ids))
+                      (permissions.db/tenant-group-ids))))
+
+(defn check-tenant-groups-visible!
+  "Throws a 400 if any of `group-ids` is a tenant group while the Tenants feature is disabled.
+  The error payload includes the offending IDs under `[:errors :tenant-group-ids]`."
+  [group-ids]
+  (when-let [offending (seq (hidden-tenant-group-ids group-ids))]
+    (throw (ex-info (tru "Tenant groups are not editable while the Tenants feature is disabled.")
+                    {:status-code 400
+                     :errors      {:tenant-group-ids (sort offending)}}))))
+
+(defn- group-id->num-members
+  "Return a map of `PermissionsGroup` ID -> number of members in the group. (This doesn't include entries for empty
+  groups.)"
+  []
+  (permissions.db/group-member-counts))
+
+(methodical/defmethod t2/batched-hydrate [:model/PermissionsGroup :member_count]
+  "Efficiently add `:member_count` to PermissionGroups."
+  [_model _k groups]
+  (let [group-id->num-members (group-id->num-members)]
+    (for [group groups]
+      (assoc group :member_count (get group-id->num-members (u/the-id group) 0)))))

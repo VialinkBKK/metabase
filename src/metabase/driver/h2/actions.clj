@@ -32,7 +32,7 @@
 (defn- db-identifier->name
   "Get the name of identifier from JDBC error message.
   An identifier can contains quote and full schema, database, table , etc.
-  This formats so that we get  only the identifer name with quote removed.
+  This formats so that we get  only the identifier name with quote removed.
 
 
     (db-identifier->name \"PUBLIC.TABLE\" ) => \"TABLE\""
@@ -45,7 +45,7 @@
 (defn- constraint->column-names
   "Given a constraint with `constraint-name` fetch the column names associated with that constraint."
   [database table-name constraint-name]
-  (let [jdbc-spec (sql-jdbc.conn/db->pooled-connection-spec (u/the-id database))
+  (let [jdbc-spec (sql-jdbc.conn/db->pooled-connection-spec database)
         sql-args  ["SELECT C.TABLE_CATALOG, C.TABLE_SCHEMA, K.COLUMN_NAME
                    FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS C
                    JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE K ON C.CONSTRAINT_NAME = K.CONSTRAINT_NAME
@@ -61,7 +61,7 @@
                          constraint-name table-name)
               (reduced nil))))
       [[] nil nil]
-      (jdbc/reducible-query jdbc-spec sql-args {:identifers identity, :transaction? false})))))
+      (jdbc/reducible-query jdbc-spec sql-args {:transaction? false})))))
 
 (defmethod sql-jdbc.actions/maybe-parse-sql-error [:h2 driver-api/violate-not-null-constraint]
   [_driver error-type _database _action-type error-message]
@@ -85,22 +85,23 @@
 
 (defmethod sql-jdbc.actions/maybe-parse-sql-error [:h2 driver-api/violate-foreign-key-constraint]
   [_driver error-type _database action-type error-message]
-  (when-let [[_match column]
-             (re-find #"Referential integrity constraint violation: \"[^\:]+: [^\s]+ FOREIGN KEY\(([^\s]+)\)" error-message)]
-    (let [column (db-identifier->name column)]
+  (when-let [[_match column table]
+             (re-find #"Referential integrity constraint violation: \"[^\:]+: [^\s]+ FOREIGN KEY\(([^\s]+)\) REFERENCES ([^(]+)" error-message)]
+    (let [column (db-identifier->name column)
+          table  (-> table (str/replace #"^PUBLIC\." "") (str/replace "\"\"" "") u/lower-case-en)]
       (merge {:type error-type}
              (case action-type
                (:table.row/create :model.row/create)
                {:message (tru "Unable to create a new record.")
-                :errors {column (tru "This {0} does not exist." (str/capitalize column))}}
+                :errors {column (tru "This value does not exist in table \"{0}\"." table)}}
 
                (:table.row/delete :model.row/delete)
-               {:message (tru "Other tables rely on this row so it cannot be deleted.")
+               {:message (tru "Other rows refer to this row so it cannot be deleted.")
                 :errors  {}}
 
                (:table.row/update :model.row/update)
                {:message (tru "Unable to update the record.")
-                :errors  {column (tru "This {0} does not exist." (str/capitalize column))}})))))
+                :errors  {column (tru "This value does not exist in table \"{0}\"." table)}})))))
 
 (defmethod sql-jdbc.actions/maybe-parse-sql-error [:h2 driver-api/incorrect-value-type]
   [_driver error-type _database _action-type error-message]
@@ -108,4 +109,30 @@
              (re-find #"Data conversion error converting .*" error-message)]
     {:type    error-type
      :message (tru "Some of your values aren’t of the correct type for the database.")
+     :errors  {}}))
+
+(defmethod sql-jdbc.actions/maybe-parse-sql-error [:h2 driver-api/violate-permission-constraint]
+  [_driver error-type _database action-type error-message]
+  (when-let [[_match _table-name]
+             (re-find #"Not enough rights for object \"(.+)\"" error-message)]
+    (merge {:type error-type}
+           (case action-type
+             (:table.row/create :model.row/create)
+             {:message (tru "You don''t have permission to add data to this table.")
+              :errors  {}}
+
+             (:table.row/update :model.row/update)
+             {:message (tru "You don''t have permission to update data in this table.")
+              :errors  {}}
+
+             (:table.row/delete :model.row/delete)
+             {:message (tru "You don''t have permission to delete data from this table.")
+              :errors  {}}))))
+
+(defmethod sql-jdbc.actions/maybe-parse-sql-error [:h2 driver-api/violate-check-constraint]
+  [_driver error-type _database _action-type error-message]
+  (when-let [[_match constraint-name]
+             (re-find #"Check constraint violation: \"([^\"]+)\"" error-message)]
+    {:type    error-type
+     :message (tru "Some of your values violate the constraint: {0}" constraint-name)
      :errors  {}}))

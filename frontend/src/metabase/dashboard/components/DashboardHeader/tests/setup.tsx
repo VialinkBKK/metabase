@@ -1,6 +1,4 @@
-import { Route } from "react-router";
-
-import { setupEnterprisePlugins } from "__support__/enterprise";
+import { setupEnterpriseOnlyPlugin } from "__support__/enterprise";
 import {
   setupBookmarksEndpoints,
   setupCollectionByIdEndpoint,
@@ -8,17 +6,19 @@ import {
 } from "__support__/server-mocks";
 import { setupNotificationChannelsEndpoints } from "__support__/server-mocks/pulse";
 import { mockSettings } from "__support__/settings";
+import { createMockDashboardState } from "__support__/state";
 import { renderWithProviders, waitForLoaderToBeRemoved } from "__support__/ui";
 import { getDefaultTab } from "metabase/dashboard/actions";
 import { DASHBOARD_APP_ACTIONS } from "metabase/dashboard/containers/DashboardApp/DashboardApp";
-import { MockDashboardContext } from "metabase/public/containers/PublicOrEmbeddedDashboard/mock-context";
+import { MockDashboardContext } from "metabase/dashboard/context/mock-context";
+import { Route } from "metabase/router";
+import type { Collection, TokenFeatures } from "metabase-types/api";
 import {
   createMockDashboard,
   createMockDashboardCard,
   createMockTokenFeatures,
   createMockUser,
 } from "metabase-types/api/mocks";
-import { createMockDashboardState } from "metabase-types/store/mocks";
 
 import { DashboardHeader } from "../DashboardHeader";
 
@@ -45,8 +45,16 @@ export const setup = async ({
   email = false,
   slack = false,
   collections = [],
-  hasEnterprisePlugins = false,
+  enterprisePlugins,
   tokenFeatures = {},
+}: {
+  dashboard?: typeof TEST_DASHBOARD;
+  isAdmin?: boolean;
+  email?: boolean;
+  slack?: boolean;
+  collections?: Collection[];
+  enterprisePlugins?: Parameters<typeof setupEnterpriseOnlyPlugin>[0][];
+  tokenFeatures?: Partial<TokenFeatures>;
 }) => {
   setupCollectionsEndpoints({ collections });
   setupCollectionByIdEndpoint({ collections });
@@ -56,8 +64,10 @@ export const setup = async ({
     "token-features": createMockTokenFeatures(tokenFeatures),
   });
 
-  if (hasEnterprisePlugins) {
-    setupEnterprisePlugins();
+  if (enterprisePlugins) {
+    enterprisePlugins.forEach((plugin) => {
+      setupEnterpriseOnlyPlugin(plugin);
+    });
   }
 
   const channelData: {
@@ -90,7 +100,11 @@ export const setup = async ({
           name: "channel",
           type: "select",
           displayName: "Post to",
-          options: ["#general", "#random", "#alerts"],
+          options: [
+            { displayName: "#general", id: "C001" },
+            { displayName: "#random", id: "C002" },
+            { displayName: "#alerts", id: "C003" },
+          ],
           required: true,
         },
       ],
@@ -102,25 +116,22 @@ export const setup = async ({
   renderWithProviders(
     <Route
       path="*"
-      component={() => (
+      element={
         <MockDashboardContext
           dashboardId={dashboard.id}
           dashboard={dashboard}
           isFullscreen={false}
-          isNightMode={false}
-          hasNightModeToggle={false}
           isAdditionalInfoVisible={false}
           refreshPeriod={0}
           setRefreshElapsedHook={jest.fn()}
           onRefreshPeriodChange={jest.fn()}
-          onNightModeChange={jest.fn()}
           onFullscreenChange={jest.fn()}
           parameterQueryParams={{}}
           dashboardActions={DASHBOARD_APP_ACTIONS}
         >
           <DashboardHeader />
         </MockDashboardContext>
-      )}
+      }
     />,
     {
       withRouter: true,

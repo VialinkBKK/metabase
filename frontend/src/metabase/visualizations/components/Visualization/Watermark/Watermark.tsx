@@ -1,9 +1,13 @@
-import { isVirtualDashCard } from "metabase/dashboard/utils";
-import type { BaseDashboardCard, Card } from "metabase-types/api";
+import { isVirtualDashCard } from "metabase/utils/dashboard";
+import type { BaseDashboardCard, SeriesCard } from "metabase-types/api";
 
 import S from "./Watermark.module.css";
 
-export const Watermark = ({ card }: { card: Card | BaseDashboardCard }) => {
+export const Watermark = ({
+  card,
+}: {
+  card: SeriesCard | BaseDashboardCard;
+}) => {
   if (isVirtualDashCard(card)) {
     return null;
   }
@@ -27,12 +31,13 @@ export const Watermark = ({ card }: { card: Card | BaseDashboardCard }) => {
               fontWeight="700"
               transform="translate(35, 330) rotate(-45)"
               textAnchor="start"
+              className={S.text}
             >
               {"Development"}
             </text>
           </pattern>
         </defs>
-        <rect opacity=".1" height="100%" width="100%" fill="url(#text)" />
+        <rect opacity=".2" height="100%" width="100%" fill="url(#text)" />
       </svg>
     </div>
   );

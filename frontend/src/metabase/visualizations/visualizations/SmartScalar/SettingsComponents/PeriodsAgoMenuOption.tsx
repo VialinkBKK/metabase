@@ -2,12 +2,12 @@ import type { KeyboardEvent, MouseEvent } from "react";
 import { useCallback, useRef, useState } from "react";
 import { t } from "ttag";
 
-import { Box, Group, Text, rem } from "metabase/ui";
+import { Box, Group, NumberInput, Text, rem } from "metabase/ui";
 import type { COMPARISON_TYPES } from "metabase/visualizations/visualizations/SmartScalar/constants";
 import type { SmartScalarComparisonPeriodsAgo } from "metabase-types/api";
 
 import { MenuItemStyled } from "./MenuItem.styled";
-import { NumberInputStyled } from "./PeriodsAgoMenuOption.styled";
+import S from "./PeriodsAgoMenuOption.module.css";
 
 type PeriodsAgoMenuOptionProps = {
   "aria-selected": boolean;
@@ -48,7 +48,7 @@ export function PeriodsAgoMenuOption({
 
   const value = editedValue?.value ?? MIN_VALUE;
   const handleInputChange = useCallback(
-    (value: number | "") => {
+    (value: number | string) => {
       if (message) {
         setMessage(null);
       }
@@ -64,12 +64,6 @@ export function PeriodsAgoMenuOption({
         setMessage(
           t`${value} is beyond the date range. Auto-adjusted to the max.`,
         );
-        reSelectInput();
-        return;
-      }
-
-      if (!Number.isInteger(value)) {
-        onChange({ type, value: Math.floor(value) ?? MIN_VALUE });
         reSelectInput();
         return;
       }
@@ -99,11 +93,12 @@ export function PeriodsAgoMenuOption({
   );
 
   return (
-    <MenuItemStyled py="xs" aria-selected={isSelected}>
+    <MenuItemStyled py="xxs" aria-selected={isSelected}>
       <Box px="sm" onClick={() => onChange({ type, value }, true)}>
         <Group gap="sm">
-          <NumberInputStyled
-            type="number"
+          <NumberInput
+            classNames={{ input: S.input }}
+            allowDecimal={false}
             value={value}
             onChange={(value) => handleInputChange(value)}
             onKeyPress={handleInputEnter}
@@ -116,7 +111,7 @@ export function PeriodsAgoMenuOption({
           <Text fw="bold">{name}</Text>
         </Group>
         {!!message && (
-          <Text size="xs" color="text-light" mt="xs">
+          <Text size="xs" color="text-secondary" mt="xxs">
             {message}
           </Text>
         )}

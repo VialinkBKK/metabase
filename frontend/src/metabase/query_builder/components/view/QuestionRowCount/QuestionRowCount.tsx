@@ -1,30 +1,32 @@
+import { useDisclosure } from "@mantine/hooks";
 import cx from "classnames";
 import { useMemo } from "react";
-import { msgid, ngettext, t } from "ttag";
-import _ from "underscore";
+import { t } from "ttag";
 
-import PopoverWithTrigger from "metabase/common/components/PopoverWithTrigger";
+import { skipToken, useGetDatabaseQuery } from "metabase/api";
 import {
   type NumberFormatter,
   useNumberFormatter,
 } from "metabase/common/hooks/use-number-formatter";
+import { formatRowCount } from "metabase/common/utils/format-row-count";
+import { getRowCountMessage } from "metabase/common/utils/get-row-count-message";
 import CS from "metabase/css/core/index.css";
-import Database from "metabase/entities/databases";
-import { connect } from "metabase/lib/redux";
-import { setLimit } from "metabase/query_builder/actions";
-import LimitPopover from "metabase/query_builder/components/LimitPopover";
-import {
-  getFirstQueryResult,
-  getIsResultDirty,
-  getQuestion,
-} from "metabase/query_builder/selectors";
-import { Box } from "metabase/ui";
+import { connect } from "metabase/redux";
+import { Box, Popover, UnstyledButton } from "metabase/ui";
 import type { Limit } from "metabase-lib";
 import * as Lib from "metabase-lib";
 import type Question from "metabase-lib/v1/Question";
 import { HARD_ROW_LIMIT } from "metabase-lib/v1/queries/utils";
 import type { Dataset } from "metabase-types/api";
-import type { State } from "metabase-types/store";
+
+import { setLimit } from "../../../actions";
+import {
+  getFirstQueryResult,
+  getIsResultDirty,
+  getQuestion,
+} from "../../../store/selectors";
+import type { QueryBuilderStoreState } from "../../../store/state";
+import { LimitPopover } from "../../LimitPopover";
 
 import QuestionRowCountS from "./QuestionRowCount.module.css";
 
@@ -36,24 +38,17 @@ interface OwnProps {
 
 interface StateProps {
   question: Question;
-  result: Dataset;
+  result: Dataset | null;
   isResultDirty: boolean;
-}
-
-interface EntityLoaderProps {
-  loading: boolean;
 }
 
 interface DispatchProps {
   onChangeLimit: (limit: Limit) => void;
 }
 
-type QuestionRowCountProps = OwnProps &
-  StateProps &
-  DispatchProps &
-  EntityLoaderProps;
+type QuestionRowCountProps = OwnProps & StateProps & DispatchProps;
 
-function mapStateToProps(state: State) {
+function mapStateToProps(state: QueryBuilderStoreState) {
   // Not expected to render before question is loaded
   const question = getQuestion(state) as Question;
 
@@ -68,17 +63,24 @@ const mapDispatchToProps = {
   onChangeLimit: setLimit,
 };
 
-function QuestionRowCount({
+function QuestionRowCountInner({
   question,
   result,
   isResultDirty,
-  loading,
   className,
   onChangeLimit,
 }: QuestionRowCountProps) {
+  const [opened, { close, toggle }] = useDisclosure(false);
+  const databaseId = question.databaseId();
+  const { isLoading: loading } = useGetDatabaseQuery(
+    databaseId != null ? { id: databaseId } : skipToken,
+  );
   const { isEditable, isNative } = Lib.queryDisplayInfo(question.query());
   const formatNumber = useNumberFormatter();
   const message = useMemo(() => {
+    if (result == null) {
+      return "";
+    }
     if (isNative) {
       return isResultDirty ? "" : getRowCountMessage(result, formatNumber);
     }
@@ -87,8 +89,8 @@ function QuestionRowCount({
       : getRowCountMessage(result, formatNumber);
   }, [question, result, isResultDirty, isNative, formatNumber]);
 
-  const handleLimitChange = (limit: number) => {
-    onChangeLimit(limit > 0 ? limit : null);
+  const handleLimitChange = (limit: number | null) => {
+    onChangeLimit(limit !== null && limit > 0 ? limit : null);
   };
 
   const canChangeLimit = !isNative && isEditable;
@@ -99,31 +101,42 @@ function QuestionRowCount({
     return null;
   }
 
+  if (!canChangeLimit) {
+    return (
+      <RowCountLabel
+        className={className}
+        data-testid="question-row-count"
+        highlighted={limit != null}
+        disabled={!canChangeLimit}
+      >
+        {message}
+      </RowCountLabel>
+    );
+  }
+
   return (
-    <PopoverWithTrigger
-      triggerElement={
-        <RowCountLabel
-          className={className}
-          data-testid="question-row-count"
-          highlighted={limit != null}
-          disabled={!canChangeLimit}
-        >
-          {message}
-        </RowCountLabel>
-      }
-      id={POPOVER_ID}
-      aria-role="dialog"
-      disabled={!canChangeLimit}
-    >
-      {({ onClose }: { onClose: () => void }) => (
+    <Popover opened={opened} onDismiss={close} position="bottom-end">
+      <Popover.Target>
+        <UnstyledButton onClick={toggle} id={POPOVER_ID} aria-haspopup="dialog">
+          <RowCountLabel
+            className={className}
+            data-testid="question-row-count"
+            highlighted={limit != null}
+            disabled={false}
+          >
+            {message}
+          </RowCountLabel>
+        </UnstyledButton>
+      </Popover.Target>
+      <Popover.Dropdown>
         <LimitPopover
           className={CS.p2}
           limit={limit}
           onChangeLimit={handleLimitChange}
-          onClose={onClose}
+          onClose={close}
         />
-      )}
-    </PopoverWithTrigger>
+      </Popover.Dropdown>
+    </Popover>
   );
 }
 
@@ -139,34 +152,24 @@ function RowCountLabel({
 }) {
   const label = t`Row count`;
   const { highlighted, ...propsForChild } = props;
-  return disabled ? (
+  return (
     <Box
       component="span"
-      className={cx(QuestionRowCountS.RowCountStaticLabel, className)}
-      {...propsForChild}
-      aria-label={label}
-    />
-  ) : (
-    <button
       className={cx(
-        QuestionRowCountS.RowCountButton,
+        disabled
+          ? QuestionRowCountS.RowCountStaticLabel
+          : QuestionRowCountS.RowCountButton,
         {
-          [QuestionRowCountS.isHighlighted]: highlighted,
+          [QuestionRowCountS.isHighlighted]: !disabled && highlighted,
         },
         className,
       )}
       {...propsForChild}
       aria-label={label}
-      aria-haspopup="dialog"
-      aria-controls={POPOVER_ID}
+      aria-controls={disabled ? undefined : POPOVER_ID}
     />
   );
 }
-
-const formatRowCount = (count: number, formatNumber: NumberFormatter) => {
-  const countString = formatNumber(count);
-  return ngettext(msgid`${countString} row`, `${countString} rows`, count);
-};
 
 function getLimitMessage(
   question: Question,
@@ -193,30 +196,13 @@ function getLimitMessage(
   return t`Showing first ${formatRowCount(HARD_ROW_LIMIT, formatNumber)} rows`;
 }
 
-function getRowCountMessage(result: Dataset, formatNumber: NumberFormatter) {
-  if (result.data.rows_truncated > 0) {
-    return t`Showing first ${formatRowCount(result.row_count, formatNumber)}`;
-  }
-  if (result.row_count === HARD_ROW_LIMIT) {
-    return t`Showing first ${formatRowCount(HARD_ROW_LIMIT, formatNumber)} rows`;
-  }
-  return t`Showing ${formatRowCount(result.row_count, formatNumber)}`;
-}
-
-function getDatabaseId(_state: State, { question }: OwnProps & StateProps) {
-  return question.databaseId();
-}
-
-const ConnectedQuestionRowCount = _.compose(
-  connect(mapStateToProps, mapDispatchToProps),
-  Database.load({
-    id: getDatabaseId,
-    loadingAndErrorWrapper: false,
-  }),
-)(QuestionRowCount);
+const ConnectedQuestionRowCount = connect(
+  mapStateToProps,
+  mapDispatchToProps,
+)(QuestionRowCountInner);
 
 export type QuestionRowCountOpts = {
-  result?: Dataset;
+  result?: Dataset | null;
   isObjectDetail: boolean;
 };
 
@@ -224,5 +210,6 @@ function shouldRender({ result, isObjectDetail }: QuestionRowCountOpts) {
   return result?.data && !isObjectDetail;
 }
 
-// eslint-disable-next-line import/no-default-export -- deprecated usage
-export default Object.assign(ConnectedQuestionRowCount, { shouldRender });
+export const QuestionRowCount = Object.assign(ConnectedQuestionRowCount, {
+  shouldRender,
+});

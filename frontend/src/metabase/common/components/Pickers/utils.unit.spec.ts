@@ -1,148 +1,140 @@
-import { getCollectionIdPath } from "./utils";
+import { setupEnterpriseOnlyPlugin } from "__support__/enterprise";
+import { mockSettings } from "__support__/settings";
+import { reinitialize } from "metabase/plugins";
+import type { CollectionItemModel } from "metabase-types/api";
+import { createMockTokenFeatures } from "metabase-types/api/mocks";
 
-describe("getCollectionIdPath", () => {
-  it("should handle the current user's personal collection", () => {
-    const path = getCollectionIdPath(
-      {
-        id: 1337,
-        location: "/",
-        effective_location: "/",
-        is_personal: true,
-        model: "collection",
-      },
-      1337,
-    );
+import {
+  getCollectionItemsOptions,
+  getValidCollectionItemModels,
+  isItemInCollectionOrItsDescendants,
+} from "./utils";
 
-    expect(path).toEqual([1337]);
+describe("isItemInCollectionOrItsDescendants", () => {
+  it("returns false when collectionId is undefined", () => {
+    const item = {
+      id: 1,
+      effective_location: "/2/3",
+      location: "/2/3",
+      model: "collection" as const,
+      name: "Test",
+    };
+    expect(isItemInCollectionOrItsDescendants(item, undefined)).toBe(false);
   });
 
-  it("should handle subcollections of the current user's personal collection", () => {
-    const path = getCollectionIdPath(
-      {
-        id: 1339,
-        location: "/1337/",
-        effective_location: "/1337/",
-        is_personal: true,
-        model: "collection",
-      },
-      1337,
-    );
-
-    expect(path).toEqual([1337, 1339]);
+  it("returns true when item.id matches collectionId", () => {
+    const item = {
+      id: 5,
+      effective_location: "/2/3",
+      location: "/2/3",
+      model: "collection" as const,
+      name: "Test",
+    };
+    expect(isItemInCollectionOrItsDescendants(item, 5)).toBe(true);
   });
 
-  it("should handle all users' personal collections", () => {
-    const path = getCollectionIdPath(
-      {
-        id: "personal",
-        location: "/",
-        effective_location: "/",
-        model: "collection",
-      },
-      1337,
-    );
-
-    expect(path).toEqual(["personal"]);
+  it("returns false when item.id does not match and is not a descendant", () => {
+    const item = {
+      id: 10,
+      effective_location: "/2/3",
+      location: "/2/3",
+      model: "collection" as const,
+      name: "Test",
+    };
+    expect(isItemInCollectionOrItsDescendants(item, 5)).toBe(false);
   });
 
-  it("should handle subcollections of all users' personal collections", () => {
-    const path = getCollectionIdPath(
-      {
-        id: 8675309,
-        location: "/1400/",
-        effective_location: "/1400/",
-        is_personal: true,
-        model: "collection",
-      },
-      1337,
-    );
-
-    expect(path).toEqual(["personal", 1400, 8675309]);
+  it("returns true when item is a descendant (collectionId in effective_location)", () => {
+    const item = {
+      id: 10,
+      effective_location: "/2/5/8",
+      location: "/2/5/8",
+      model: "collection" as const,
+      name: "Test",
+    };
+    expect(isItemInCollectionOrItsDescendants(item, 5)).toBe(true);
   });
 
-  it("should handle the current user's personal collection within all users' personal collections", () => {
-    const path = getCollectionIdPath(
-      {
-        id: 1337,
-        location: "/",
-        effective_location: "/",
-        is_personal: true,
-        model: "collection",
-      },
-      1337,
-    );
-
-    expect(path).toEqual([1337]);
+  it("returns true when item is a nested descendant", () => {
+    const item = {
+      id: 20,
+      effective_location: "/1/2/3/4/5",
+      location: "/1/2/3/4/5",
+      model: "collection" as const,
+      name: "Test",
+    };
+    expect(isItemInCollectionOrItsDescendants(item, 3)).toBe(true);
   });
 
-  it("should handle subcollections of the current user's personal collection within all users' personal collections 🥴", () => {
-    const path = getCollectionIdPath(
-      {
-        id: 1339,
-        location: "/1337/",
-        effective_location: "/1337/",
-        is_personal: true,
-        model: "collection",
-      },
-      1337,
-    );
-
-    expect(path).toEqual([1337, 1339]);
+  it("uses location as fallback when effective_location is undefined", () => {
+    const item = {
+      id: 10,
+      effective_location: undefined,
+      location: "/2/5/8",
+      model: "collection" as const,
+      name: "Test",
+    };
+    expect(isItemInCollectionOrItsDescendants(item, 5)).toBe(true);
   });
 
-  it("should handle root collection", () => {
-    const path = getCollectionIdPath(
-      {
-        id: "root",
-        location: "/",
-        effective_location: "/",
-        model: "collection",
-      },
-      1337,
-    );
+  it("does not match partial IDs in location path", () => {
+    const item = {
+      id: 100,
+      effective_location: "/12/123/1234",
+      model: "collection" as const,
+      name: "Test",
+    };
+    expect(isItemInCollectionOrItsDescendants(item, 1)).toBe(false);
+    expect(isItemInCollectionOrItsDescendants(item, 12)).toBe(true);
+    expect(isItemInCollectionOrItsDescendants(item, 123)).toBe(true);
+  });
+});
 
-    expect(path).toEqual(["root"]);
+describe("getValidCollectionItemModels", () => {
+  it("should filter valid collection models and append 'collection'", () => {
+    const input = [
+      "card",
+      "dashboard",
+      "pikachu",
+      "table",
+      "transform",
+      "snippet",
+      "",
+    ];
+    const result = getValidCollectionItemModels(
+      // Unjustified type cast. FIXME
+      input as CollectionItemModel[],
+    );
+    expect(result).toEqual([
+      "card",
+      "dashboard",
+      "table",
+      "transform",
+      "snippet",
+      "collection",
+    ]);
+  });
+});
+
+describe("getCollectionItemsOptions", () => {
+  afterEach(() => {
+    reinitialize();
   });
 
-  it("should handle subcollections of the root collection", () => {
-    const path = getCollectionIdPath(
-      {
-        id: 9,
-        location: "/6/7/8/",
-        effective_location: "/6/7/8/",
-        model: "collection",
-      },
-      1337,
-    );
-
-    expect(path).toEqual(["root", 6, 7, 8, 9]);
+  it("should include library collections when the library plugin is disabled (metabase#73143)", () => {
+    expect(
+      getCollectionItemsOptions({ models: ["card"] })["include-library"],
+    ).toBe(true);
   });
 
-  it("should use effective location", () => {
-    const path = getCollectionIdPath(
-      {
-        id: 9,
-        location: "/4/5/6/7/8/",
-        effective_location: "/6/7/8/",
-        model: "collection",
-      },
-      1337,
-    );
+  it("should not include library collections when the library plugin is enabled", () => {
+    mockSettings({
+      "token-features": createMockTokenFeatures({ library: true }),
+    });
+    setupEnterpriseOnlyPlugin("library");
 
-    expect(path).toEqual(["root", 6, 7, 8, 9]);
-  });
-
-  it("should use a negative id when the model is a dashboard", () => {
-    const path = getCollectionIdPath(
-      {
-        id: 9,
-        location: "/4/5/6/7/8/",
-        effective_location: "/6/7/8/",
-        model: "dashboard",
-      },
-      1337,
-    );
-
-    expect(path).toEqual(["root", 6, 7, 8, -9]);
+    expect(
+      getCollectionItemsOptions({ models: ["card"] })["include-library"],
+    ).toBe(false);
   });
 });

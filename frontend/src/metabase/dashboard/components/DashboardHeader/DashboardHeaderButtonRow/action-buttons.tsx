@@ -1,4 +1,4 @@
-import { DashboardSharingMenu } from "metabase/embedding/components/SharingMenu/DashboardSharingMenu";
+import { PLUGIN_NOTIFICATIONS_SDK } from "metabase/plugins";
 import { Center, Divider } from "metabase/ui";
 
 import { DashboardBookmark } from "../../DashboardBookmark";
@@ -13,14 +13,16 @@ import {
   CopyAnalyticsDashboardButton,
   DashboardActionMenu,
   DashboardInfoButton,
+  DashboardSubscriptionsButton,
   EditDashboardButton,
   ExportAsPdfButton,
   FullscreenAnalyticsDashboard,
   FullscreenToggle,
-  NightModeToggleButton,
 } from "../buttons";
 import { AddLinkOrEmbedButton } from "../buttons/AddLinkOrEmbedButton";
+import { RefreshIndicator } from "../buttons/RefreshIndicator";
 
+import { DashboardSharingMenu } from "./DashboardSharingMenu/DashboardSharingMenu";
 import { DASHBOARD_ACTION } from "./dashboard-action-keys";
 import type { DashboardActionButton, DashboardActionKey } from "./types";
 
@@ -69,26 +71,13 @@ export const dashboardActionButtons: Record<
     component: DashboardSharingMenu,
     enabled: ({ isEditing }) => !isEditing,
   },
+  [DASHBOARD_ACTION.DASHBOARD_SUBSCRIPTIONS_BUTTON]: {
+    component: DashboardSubscriptionsButton,
+    enabled: ({ isEditing, dashboard }) => !isEditing && !dashboard?.archived,
+  },
   [DASHBOARD_ACTION.REFRESH_WIDGET]: {
     component: () => <RefreshWidget />,
     enabled: ({ dashboard, isEditing }) => !isEditing && !dashboard?.archived,
-  },
-  [DASHBOARD_ACTION.NIGHT_MODE_TOGGLE]: {
-    component: () => <NightModeToggleButton />,
-    enabled: ({
-      isEditing,
-      isFullscreen,
-      dashboard,
-      hasNightModeToggle,
-      onNightModeChange,
-    }) =>
-      Boolean(
-        !isEditing &&
-          isFullscreen &&
-          !dashboard.archived &&
-          hasNightModeToggle &&
-          onNightModeChange,
-      ),
   },
   [DASHBOARD_ACTION.FULLSCREEN_TOGGLE]: {
     component: FullscreenToggle,
@@ -101,6 +90,14 @@ export const dashboardActionButtons: Record<
   [DASHBOARD_ACTION.DASHBOARD_INFO]: {
     component: () => <DashboardInfoButton />,
     enabled: ({ isEditing }) => !isEditing,
+  },
+  [DASHBOARD_ACTION.AUTO_REFRESH_INDICATOR]: {
+    component: () => <RefreshWidget />,
+    enabled: ({ isEditing, dashboard, refreshPeriod }) =>
+      !isEditing &&
+      !dashboard?.archived &&
+      refreshPeriod != null &&
+      refreshPeriod > 0,
   },
   [DASHBOARD_ACTION.DASHBOARD_ACTION_MENU]: {
     component: ({
@@ -134,7 +131,7 @@ export const dashboardActionButtons: Record<
     enabled: ({ isAnalyticsDashboard = false }) => isAnalyticsDashboard,
   },
 
-  //   UTILITY
+  // UTILITY
   [DASHBOARD_ACTION.DASHBOARD_HEADER_ACTION_DIVIDER]: {
     component: () => (
       <Center h="1.25rem" px="sm">
@@ -146,5 +143,14 @@ export const dashboardActionButtons: Record<
   DOWNLOAD_PDF: {
     component: () => <ExportAsPdfButton />,
     enabled: ({ downloadsEnabled }) => Boolean(downloadsEnabled.pdf),
+  },
+  // Modular embedding
+  [DASHBOARD_ACTION.DASHBOARD_SUBSCRIPTIONS]: {
+    enabled: ({ withSubscriptions }) => withSubscriptions,
+    component: () => <PLUGIN_NOTIFICATIONS_SDK.DashboardSubscriptionsButton />,
+  },
+  [DASHBOARD_ACTION.REFRESH_INDICATOR]: {
+    enabled: ({ refreshPeriod }) => refreshPeriod != null && refreshPeriod > 0,
+    component: () => <RefreshIndicator />,
   },
 };

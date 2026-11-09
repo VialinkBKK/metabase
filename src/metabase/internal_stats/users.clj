@@ -1,21 +1,23 @@
 (ns metabase.internal-stats.users
   (:require
-   [metabase.app-db.core :as db]
-   [toucan2.core :as t2]))
+   [metabase.internal-stats.db :as internal-stats.db]))
 
 (defn email-domain-count
   "Count all unique normalized domains found in active user emails"
   []
-  (:count (t2/query-one {:select [[:%count.* :count]]
-                         :from [[{:select-distinct (condp contains? (db/db-type)
-                                                     #{:postgres}  [[[:split_part :email [:inline "@"] [:inline 2]]]]
-                                                     #{:h2 :mysql} [[[:substring :email [:locate "@" :email]]]])
-                                  :from [:core_user]
-                                  :where [:and
-                                          [:= :is_active true]
-                                          [:= :type [:inline "personal"]]]} :distinct_emails]]})))
+  (:count (internal-stats.db/active-personal-user-email-domain-count)))
 
 (defn external-users-count
-  "Number of users with sso-source: JWT as a proxy for external users of embedded views"
+  "Number of users with sso-source: JWT as a proxy for tenant users of embedded views"
   []
-  (t2/count :model/User :is_active true :sso_source :jwt :type :personal))
+  (internal-stats.db/active-jwt-user-count))
+
+(defn tenant-users-count
+  "Number of active users that belong to a tenant."
+  []
+  (internal-stats.db/active-tenant-user-count))
+
+(defn tenants-with-active-users-count
+  "Number of tenants that have at least one active user."
+  []
+  (:count (internal-stats.db/tenants-with-active-users-count)))

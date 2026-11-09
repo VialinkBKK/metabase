@@ -14,46 +14,61 @@ describe("scenarios > search", () => {
     cy.signInAsAdmin();
   });
 
-  it("should not search on an empty string", () => {
-    cy.intercept("/api/search", (req) => {
-      expect("Unexpected call to /api/search").to.be.false;
+  describe("multiple pages of results", () => {
+    before(() => {
+      cy.signInAsAdmin();
+      H.restore();
+      generateQuestions(TOTAL_ITEMS);
+      H.snapshot("many-questions");
     });
-    H.visitFullAppEmbeddingUrl({
-      url: "/",
-      qs: { top_nav: true, search: true },
+
+    beforeEach(() => {
+      H.restore("many-questions");
     });
-    H.getSearchBar().type(" ");
-  });
 
-  it("should allow users to paginate results", () => {
-    generateQuestions(TOTAL_ITEMS);
+    it("should allow users to paginate results and reset the page when filters change (metabase#65501)", () => {
+      cy.visit("/");
+      H.commandPaletteSearch("generated_question");
+      cy.findByLabelText("Previous page").should("be.disabled");
 
-    cy.visit("/");
-    H.commandPaletteSearch("generated_question");
-    cy.findByLabelText("Previous page").should("be.disabled");
+      // First page
+      // eslint-disable-next-line metabase/no-unscoped-text-selectors -- deprecated usage
+      cy.findByText(`1 - ${PAGE_SIZE}`);
+      cy.findByTestId("pagination-total").should("have.text", TOTAL_ITEMS);
+      cy.findAllByTestId("search-result-item").should("have.length", PAGE_SIZE);
 
-    // First page
-    // eslint-disable-next-line no-unscoped-text-selectors -- deprecated usage
-    cy.findByText(`1 - ${PAGE_SIZE}`);
-    cy.findByTestId("pagination-total").should("have.text", TOTAL_ITEMS);
-    cy.findAllByTestId("search-result-item").should("have.length", PAGE_SIZE);
+      cy.findByLabelText("Next page").click();
 
-    cy.findByLabelText("Next page").click();
+      // Second page
+      // eslint-disable-next-line metabase/no-unscoped-text-selectors -- deprecated usage
+      cy.findByText(`${PAGE_SIZE + 1} - ${TOTAL_ITEMS}`);
+      cy.findByTestId("pagination-total").should("have.text", TOTAL_ITEMS);
+      cy.findAllByTestId("search-result-item").should("have.length", 1);
+      cy.findByLabelText("Next page").should("be.disabled");
 
-    // Second page
-    // eslint-disable-next-line no-unscoped-text-selectors -- deprecated usage
-    cy.findByText(`${PAGE_SIZE + 1} - ${TOTAL_ITEMS}`);
-    cy.findByTestId("pagination-total").should("have.text", TOTAL_ITEMS);
-    cy.findAllByTestId("search-result-item").should("have.length", 1);
-    cy.findByLabelText("Next page").should("be.disabled");
+      cy.findByLabelText("Previous page").click();
 
-    cy.findByLabelText("Previous page").click();
-
-    // First page
-    // eslint-disable-next-line no-unscoped-text-selectors -- deprecated usage
-    cy.findByText(`1 - ${PAGE_SIZE}`);
-    cy.findByTestId("pagination-total").should("have.text", TOTAL_ITEMS);
-    cy.findAllByTestId("search-result-item").should("have.length", PAGE_SIZE);
+      // First page
+      // eslint-disable-next-line metabase/no-unscoped-text-selectors -- deprecated usage
+      cy.findByText(`1 - ${PAGE_SIZE}`);
+      cy.findByTestId("pagination-total").should("have.text", TOTAL_ITEMS);
+      cy.findAllByTestId("search-result-item").should("have.length", PAGE_SIZE);
+      cy.visit("/search?q=");
+      cy.findByLabelText("Next page").click();
+      cy.location("search").should("contain", "page=1");
+      cy.findByLabelText("Previous page").should("be.enabled");
+      cy.findByTestId("type-search-filter").click();
+      H.popover().findByText("Table").click();
+      H.popover().findByText("Apply").click();
+      cy.location("search")
+        .should("include", "type=table")
+        .and("not.include", "page=");
+      cy.findAllByTestId("search-result-item").should(($items) => {
+        $items.each((_index, item) => {
+          expect(item).to.have.attr("data-model-type", "table");
+        });
+      });
+    });
   });
 });
 

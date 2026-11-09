@@ -1,35 +1,68 @@
-import { AccordionList } from "metabase/common/components/AccordionList";
+import {
+  AccordionList,
+  type Section,
+} from "metabase/common/components/AccordionList";
+import { useTranslateContent } from "metabase/content-translation/hooks";
 import CS from "metabase/css/core/index.css";
-import { Box, Icon } from "metabase/ui";
-import type Schema from "metabase-lib/v1/metadata/Schema";
+import type {
+  DataSelectorDatabase,
+  DataSelectorSchema,
+} from "metabase/querying/common/components/DataSelector";
+import { Box, Icon, UnstyledButton } from "metabase/ui";
+import { getSchemaDisplayName } from "metabase-lib/v1/metadata/utils/schema";
 import type { SchemaId } from "metabase-types/api";
 
 import { CONTAINER_WIDTH } from "../constants";
 
 type DataSelectorSchemaPickerProps = {
-  hasBackButton: boolean;
-  hasFiltering: boolean;
   hasInitialFocus: boolean;
   hasNextStep: boolean;
-  isLoading: boolean;
-  schemas: Schema[];
-  selectedSchemaId: SchemaId;
-  onBack: () => void;
-  onChangeSchema: (item: { schema: Schema }) => void;
+  schemas: DataSelectorSchema[];
+  selectedDatabase?: DataSelectorDatabase | null;
+  selectedSchemaId?: SchemaId | null;
+  onBack?: (() => void) | null;
+  onChangeSchema: (schema?: DataSelectorSchema) => void;
 };
 
-const DataSelectorSchemaPicker = ({
+type Item = {
+  name: string | null;
+  schema: DataSelectorSchema;
+};
+
+export const DataSelectorSchemaPicker = ({
   schemas,
+  selectedDatabase,
   selectedSchemaId,
+  onBack,
   onChangeSchema,
   hasNextStep,
-  hasFiltering,
   hasInitialFocus,
 }: DataSelectorSchemaPickerProps) => {
-  const sections = [
+  const tc = useTranslateContent();
+  const sections: Section<Item>[] = [
     {
+      name: (
+        <UnstyledButton
+          display="flex"
+          fz="inherit"
+          disabled={!onBack}
+          style={{ alignItems: "center" }}
+          onClick={onBack ?? undefined}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.stopPropagation();
+            }
+          }}
+        >
+          {onBack && <Icon name="chevronleft" size={18} />}
+          <Box component="span" ml="sm">
+            {selectedDatabase && tc(selectedDatabase.name)}
+          </Box>
+        </UnstyledButton>
+      ),
+      type: "back",
       items: schemas.map((schema) => ({
-        name: schema.displayName(),
+        name: tc(getSchemaDisplayName(schema.name)),
         schema: schema,
       })),
     },
@@ -43,18 +76,14 @@ const DataSelectorSchemaPicker = ({
         className={CS.textBrand}
         hasInitialFocus={hasInitialFocus}
         sections={sections}
-        searchable={hasFiltering}
         onChange={({ schema }: any) => onChangeSchema(schema)}
-        itemIsSelected={(item: { schema: Schema }) =>
+        itemIsSelected={(item: { schema: DataSelectorSchema }) =>
           item?.schema.id === selectedSchemaId
         }
-        renderItemIcon={() => <Icon name="folder" size={16} />}
+        renderItemIcon={() => <Icon name="folder_database" size={16} />}
         showItemArrows={hasNextStep}
         maxHeight={Infinity}
       />
     </Box>
   );
 };
-
-// eslint-disable-next-line import/no-default-export -- deprecated usage
-export default DataSelectorSchemaPicker;

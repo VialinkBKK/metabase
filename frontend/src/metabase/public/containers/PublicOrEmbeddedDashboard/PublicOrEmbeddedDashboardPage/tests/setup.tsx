@@ -1,13 +1,15 @@
 import fetchMock from "fetch-mock";
-import { Route } from "react-router";
 import _ from "underscore";
 
-import { setupEnterprisePlugins } from "__support__/enterprise";
+import { setupEnterpriseOnlyPlugin } from "__support__/enterprise";
 import { setupDatabasesEndpoints } from "__support__/server-mocks";
 import { setupEmbedDashboardEndpoints } from "__support__/server-mocks/embed";
 import { mockSettings } from "__support__/settings";
+import { createMockState } from "__support__/state";
 import { renderWithProviders, screen } from "__support__/ui";
+import { Route } from "metabase/router";
 import { registerStaticVisualizations } from "metabase/static-viz/register";
+import { defer } from "metabase/utils/promise";
 import type {
   DashboardCard,
   DashboardTab,
@@ -21,7 +23,6 @@ import {
   createMockDatabase,
   createMockTokenFeatures,
 } from "metabase-types/api/mocks";
-import { createMockState } from "metabase-types/store/mocks";
 
 import { PublicOrEmbeddedDashboardPage } from "../PublicOrEmbeddedDashboardPage";
 
@@ -35,8 +36,10 @@ export type SetupOpts = {
   queryString?: string;
   numberOfTabs?: number;
   tokenFeatures?: TokenFeatures;
-  hasEnterprisePlugins?: boolean;
   dashboardTitle: string;
+  enterprisePlugins?: Parameters<typeof setupEnterpriseOnlyPlugin>[0][];
+  /** Holds the dashboard request until `releaseDashboardRequest` is called. */
+  holdDashboardRequest?: boolean;
 };
 
 export async function setup(
@@ -45,8 +48,9 @@ export async function setup(
     queryString = "",
     numberOfTabs = 1,
     tokenFeatures = createMockTokenFeatures(),
-    hasEnterprisePlugins = false,
     dashboardTitle,
+    enterprisePlugins,
+    holdDashboardRequest = false,
   }: SetupOpts = { dashboardTitle: "" },
 ) {
   mockSettings({
@@ -54,8 +58,8 @@ export async function setup(
   });
   setupDatabasesEndpoints([createMockDatabase()]);
 
-  if (hasEnterprisePlugins) {
-    setupEnterprisePlugins();
+  if (enterprisePlugins) {
+    enterprisePlugins.forEach(setupEnterpriseOnlyPlugin);
   }
 
   const tabs: DashboardTab[] = [];
@@ -88,19 +92,15 @@ export async function setup(
     tabs,
   });
 
-  setupEmbedDashboardEndpoints(MOCK_TOKEN, dashboard, dashcards);
-
-  if (hash.locale) {
-    fetchMock.get(`path:/app/locales/${hash.locale}.json`, {
-      headers: {
-        language: "ko",
-        "plural-forms": "nplurals=1; plural=0;",
-      },
-      translations: {
-        "": {},
-      },
-    });
+  const dashboardRequest = defer();
+  if (holdDashboardRequest) {
+    // Registered first, so it answers the dashboard request instead of the
+    // route `setupEmbedDashboardEndpoints` adds.
+    fetchMock.get(`path:/api/embed/dashboard/${MOCK_TOKEN}`, () =>
+      dashboardRequest.promise.then(() => dashboard),
+    );
   }
+  setupEmbedDashboardEndpoints(MOCK_TOKEN, dashboard, dashcards);
 
   const pathname = `/embed/dashboard/${MOCK_TOKEN}`;
   const hashString = _.isEmpty(hash) ? "" : `#${new URLSearchParams(hash)}`;
@@ -113,7 +113,7 @@ export async function setup(
   const view = renderWithProviders(
     <Route
       path="embed/dashboard/:token"
-      component={PublicOrEmbeddedDashboardPage}
+      element={<PublicOrEmbeddedDashboardPage />}
     />,
     {
       storeInitialState: createMockState(),
@@ -122,9 +122,12 @@ export async function setup(
     },
   );
 
-  if (numberOfTabs > 0) {
+  if (numberOfTabs > 0 && !holdDashboardRequest) {
     expect(await screen.findByTestId("dashboard-grid")).toBeInTheDocument();
   }
 
-  return view;
+  return {
+    ...view,
+    releaseDashboardRequest: () => dashboardRequest.resolve(),
+  };
 }

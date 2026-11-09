@@ -1,128 +1,69 @@
-import { PERSONAL_COLLECTIONS } from "metabase/entities/collections/constants";
-import { isNullOrUndefined } from "metabase/lib/types";
-import type {
-  CollectionId,
-  CollectionItemModel,
-  ListCollectionItemsRequest,
-} from "metabase-types/api";
+import _ from "underscore";
 
-import type { PickerState } from "../EntityPicker";
+import { PLUGIN_LIBRARY } from "metabase/plugins";
+import type { CollectionId, CollectionItemModel } from "metabase-types/api";
 
-import type {
-  CollectionPickerItem,
-  CollectionPickerStatePath,
-} from "./CollectionPicker";
+import type { OmniPickerCollectionItem, OmniPickerItem } from "./EntityPicker";
 
-export const getCollectionIdPath = (
-  collection: Pick<
-    CollectionPickerItem,
-    "id" | "location" | "is_personal" | "effective_location" | "model"
+/**
+ * Returns true if the item is the collection itself or a descendant of it.
+ * Used to prevent circular references when moving or editing collections.
+ */
+export function isItemInCollectionOrItsDescendants(
+  item: Pick<
+    OmniPickerCollectionItem,
+    "id" | "effective_location" | "location"
   >,
-  userPersonalCollectionId?: CollectionId,
-): CollectionId[] => {
-  if (collection.id === null || collection.id === "root") {
-    return ["root"];
+  collectionId: CollectionId | undefined,
+): boolean {
+  if (collectionId === undefined) {
+    return false;
   }
 
-  if (collection.id === PERSONAL_COLLECTIONS.id) {
-    return ["personal"];
-  }
+  const location = item.effective_location ?? item.location;
+  return (
+    item.id === collectionId ||
+    location?.split("/").includes(String(collectionId)) === true
+  );
+}
 
-  if (typeof collection.id === "string") {
-    console.error("Invalid collection id", collection.id);
-    return [];
-  }
+export const validCollectionModels = new Set<CollectionItemModel>([
+  "collection",
+  "dashboard",
+  "document",
+  "card",
+  "dataset",
+  "metric",
+  "table",
+  "snippet",
+  "transform",
+  "measure",
+  "action",
+]);
 
-  const location = collection?.effective_location ?? collection?.location;
-  const pathFromRoot: CollectionId[] =
-    location?.split("/").filter(Boolean).map(Number) ?? [];
+export const allCollectionModels = Array.from(validCollectionModels);
 
-  const isInUserPersonalCollection =
-    userPersonalCollectionId &&
-    (collection.id === userPersonalCollectionId ||
-      pathFromRoot.includes(userPersonalCollectionId));
+const isValidCollectionItemModel = (
+  model: OmniPickerItem["model"],
+): model is CollectionItemModel =>
+  // CollectionItemModel is a closed string union; Set.has needs the narrowed type.
+  validCollectionModels.has(model as CollectionItemModel);
 
-  const id = collection.model === "collection" ? collection.id : -collection.id;
+export const getValidCollectionItemModels = (
+  models: OmniPickerItem["model"][],
+): CollectionItemModel[] =>
+  _.uniq(models.filter(isValidCollectionItemModel).concat(["collection"]));
 
-  if (isInUserPersonalCollection) {
-    return [...pathFromRoot, id];
-  } else if (collection.is_personal) {
-    return ["personal", ...pathFromRoot, id];
-  } else {
-    return ["root", ...pathFromRoot, id];
-  }
-};
-
-export const getStateFromIdPath = ({
-  idPath,
-  namespace,
+/** Shared options for collection item requests across EntityPicker and MiniPicker. */
+export const getCollectionItemsOptions = ({
   models,
 }: {
-  idPath: CollectionId[];
-  namespace?: "snippets";
-  models: CollectionItemModel[];
-}): CollectionPickerStatePath => {
-  const statePath: PickerState<
-    CollectionPickerItem,
-    ListCollectionItemsRequest
-  > = [
-    {
-      selectedItem: {
-        name: "",
-        model: "collection",
-        id: idPath[0],
-        here: ["collection"],
-        below: ["collection"],
-      },
-    },
-  ];
-
-  idPath.forEach((id, index) => {
-    const { entityId: nextLevelId, model: nextLevelModel } = resolveEntityId(
-      idPath[index + 1],
-    );
-
-    const { entityId, model: entityModel } = resolveEntityId(id);
-
-    statePath.push({
-      query: {
-        id: entityId,
-        models: ["collection", ...models],
-        namespace,
-      },
-      entity: entityModel,
-      selectedItem: nextLevelId
-        ? {
-            name: "",
-            model: nextLevelModel,
-            id: nextLevelId,
-            here: ["collection"],
-            below: ["collection"],
-          }
-        : null,
-    });
-  });
-
-  return statePath;
-};
-
-const resolveEntityId = (
-  id: CollectionId,
-): {
-  model: "collection" | "dashboard";
-  entityId: CollectionId;
-} => {
-  if (typeof id === "string" || isNullOrUndefined(id)) {
-    return {
-      entityId: id,
-      model: "collection",
-    };
-  } else {
-    const isDashboard = id < 0;
-
-    return {
-      entityId: Math.abs(id),
-      model: isDashboard ? "dashboard" : "collection",
-    };
-  }
+  models: OmniPickerItem["model"][];
+}) => {
+  return {
+    models: getValidCollectionItemModels(models),
+    // After a downgrade from EE to OSS, isEnabled is false, and we want to show
+    // the Library (if it exists) within Our Analytics.
+    "include-library": !PLUGIN_LIBRARY.isEnabled,
+  };
 };

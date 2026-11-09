@@ -22,7 +22,7 @@
         expiration (t/instant (t/plus timestamp (t/seconds 300)))
         nonce      (random-uuid)
         payload    (str (.getEpochSecond timestamp) "." (.getEpochSecond expiration) "." nonce)
-        encrypted  (encryption/encrypt (hashed-key) payload)]
+        encrypted  (encryption/encrypt payload {:secret-key (hashed-key)})]
     (URLEncoder/encode encrypted "UTF-8")))
 
 (defn validate-token
@@ -33,26 +33,8 @@
         (not-empty token)
         (try
           (let [decoded-token     (URLDecoder/decode ^String token "UTF-8")
-                decrypted-payload (encryption/decrypt (hashed-key) decoded-token)
+                decrypted-payload (encryption/decrypt decoded-token {:secret-key (hashed-key)})
                 [_ expiration _]  (str/split decrypted-payload #"\." 3)]
             (t/< (t/instant) (Instant/ofEpochSecond (Long/parseLong expiration))))
           (catch Exception _
             false)))))
-
-(defn- get-token-from-header
-  "Extract the token from the request headers"
-  [request]
-  (get-in request [:headers "x-metabase-sdk-jwt-hash"] nil))
-
-(defn with-token
-  "Add a newly generated token to a response"
-  [response]
-  (assoc response :hash (generate-token)))
-
-(defn has-token
-  "Check if a request has a valid token"
-  [request]
-  (let [token (get-token-from-header request)]
-    (if token
-      (validate-token token)
-      false)))

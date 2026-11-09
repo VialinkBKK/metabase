@@ -15,7 +15,7 @@ Funnels are commonly used in e-commerce or sales to visualize how many customers
 
 ## Data shape for a funnel chart
 
-To create a funnel in Metabase, you'll need to have a table with at least two columns: one column that contains the funnel's steps, and another column contains the metric you're interested in, like the number of customers at this step.
+To create a funnel in Metabase, you'll need to have a table with at least two columns: one column that contains the funnel's steps, and another column that contains the metric you're interested in, like the number of customers at this step.
 
 Here's the data shape used to create the chart above:
 
@@ -36,7 +36,7 @@ By default, Metabase will present steps in the same order as they appear in the 
 
 To create a query with a result that has the shape required for a funnel chart, you'll probably need to summarize your data.
 
-If your (original, unaggregated) data already contains a field with the the step for every data point, you can build a simple query with a breakout by steps:
+If your (original, unaggregated) data already contains a field with the step for every data point, you can build a simple query with a breakout by steps:
 
 ![A query in the query builder used to build a funnel chart](../images/build-a-funnel-query.png)
 
@@ -63,7 +63,7 @@ Funnel charts show the value of the metric for each step, and how the metric com
 
 ![Funnel chart with a tooltip](../images/read-a-funnel.png)
 
-So for example,"76.19%, 2,972" under a step means that the value of the metric at this step is 2,972, which is 76.19% of the value of the _first_ step (equal to 3,901).
+So for example, "76.19%, 2,972" under a step means that the value of the metric at this step is 2,972, which is 76.19% of the value of the _first_ step (equal to 3,901).
 
 To see percentage comparison with the _previous_ step (instead of the first), hover over the step and read the tooltip.
 

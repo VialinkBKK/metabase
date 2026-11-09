@@ -1,13 +1,16 @@
 (ns metabase.test.data.mbql-query-impl
   "Internal implementation of [[metabase.test.data/$ids]] and [[metabase.test.data/$ids]] and related macros."
   (:require
-   #?@(:clj ([toucan2.core :as t2]))
+   ;; $ids/mbql-query resolution reuses the ambient store's provider when one is already bound
+   #?@(:clj (^{:clj-kondo/ignore [:deprecated-namespace]} [metabase.query-processor.store :as qp.store]
+             [metabase.lib-be.core :as lib-be]
+             [metabase.lib.metadata :as lib.metadata]))
    [clojure.string :as str]
-   [clojure.walk :as walk]))
+   [clojure.walk :as walk]
+   [metabase.util.malli :as mu]))
 
 #?(:clj (set! *warn-on-reflection* true))
 
-#_:clj-kondo/ignore
 #?(:clj
    (defn druid-id-fn
      "I have a strong feeling this should be handled differently! Let's discuss that during review!"
@@ -22,6 +25,7 @@
 (def ^:dynamic *id-fn-symb*              `druid-id-fn #_'metabase.test.data/id)
 (def ^:dynamic *field-name-fn-symb*      `field-name)
 (def ^:dynamic *field-base-type-fn-symb* `field-base-type)
+(def ^:dynamic ^Long *mbql-version*      4)
 
 (defn- token->sigil [token]
   (when-let [[_ sigil] (re-matches #"^([$%*!&]{1,2}).*[\w/]$" (str token))]
@@ -59,9 +63,45 @@
   {:arglists '([strategy token-type source-table-symb & tokens])}
   (fn [strategy token-type & _] [strategy token-type]))
 
+(def ^:private FieldRefOptionValue
+  "A `field-ref` option's value while a `$ids`-style form is being built: either the value itself, or a
+  not-yet-evaluated s-expression (e.g. an `[[metabase.test.data/id]]` call) that produces it."
+  [:or :int :string :keyword :boolean seq? symbol? nil?])
+
+(mu/defn- field-ref
+  [id-or-name :- [:or :int :string seq? symbol?]
+   ;; options should already be a map.
+   options    :- [:maybe [:map {:closed true}
+                          [:base-type     {:optional true} FieldRefOptionValue]
+                          [:source-field  {:optional true} FieldRefOptionValue]
+                          [:join-alias    {:optional true} FieldRefOptionValue]
+                          [:temporal-unit {:optional true} FieldRefOptionValue]]]]
+  (case (long *mbql-version*)
+    4 [:field id-or-name (not-empty options)]
+    5 [:field (or options {}) id-or-name]))
+
+(mu/defn- field-ref->opts :- [:maybe :map]
+  [[_tag x y] :- vector?]
+  (case (long *mbql-version*)
+    4 y
+    5 x))
+
+(mu/defn- field-ref->id-or-name
+  [[_tag x y] :- vector?]
+  (case (long *mbql-version*)
+    4 x
+    5 y))
+
+(mu/defn- field-ref-update-options
+  [a-ref :- vector?
+   f     :- ifn?
+   & args :- [:* [:or :keyword :metabase.lib.schema.common/non-blank-string]]]
+  (field-ref (field-ref->id-or-name a-ref)
+             (apply f (field-ref->opts a-ref) args)))
+
 (defmethod mbql-field [:id :normal]
   [_ _ source-table-symb token-str]
-  [:field (field-id-call source-table-symb token-str) nil])
+  (field-ref (field-id-call source-table-symb token-str) nil))
 
 (defmethod mbql-field [:id :->]
   [_ _ source-table-symb source-token-str dest-token-str]
@@ -69,7 +109,7 @@
   (let [[_ id-form options] (parse-token-by-sigil source-table-symb (symbol (if (token->sigil dest-token-str)
                                                                               dest-token-str
                                                                               (str \$ dest-token-str))))]
-    [:field id-form (assoc options :source-field (field-id-call source-table-symb source-token-str))]))
+    (field-ref id-form (assoc options :source-field (field-id-call source-table-symb source-token-str)))))
 
 (defmethod mbql-field [:raw :normal]
   [_ _ source-table-symb token-str]
@@ -83,20 +123,26 @@
                    :dest-token-str    dest-token-str})))
 
 #?(:clj
+   (defn- metadata-provider []
+     (if (qp.store/initialized?)
+       (qp.store/metadata-provider)
+       (lib-be/application-database-metadata-provider ((requiring-resolve 'metabase.test.data/id))))))
+
+#?(:clj
    (defn field-name [field-id]
-     (t2/select-one-fn :name :model/Field :id field-id)))
+     (:name (lib.metadata/field (metadata-provider) field-id))))
 
 #?(:clj
    (defn field-base-type [field-id]
-     (t2/select-one-fn :base_type :model/Field :id field-id)))
+     (:base-type (lib.metadata/field (metadata-provider) field-id))))
 
 (defn- field-literal [source-table-symb token-str]
   (if (str/includes? token-str "/")
     (let [[field-name field-type] (str/split token-str #"/")]
-      [:field field-name {:base-type (keyword "type" field-type)}])
-    [:field
+      (field-ref field-name {:base-type (keyword "type" field-type)}))
+    (field-ref
      (list *field-name-fn-symb* (field-id-call source-table-symb token-str))
-     {:base-type (list *field-base-type-fn-symb* (field-id-call source-table-symb token-str))}]))
+     {:base-type (list *field-base-type-fn-symb* (field-id-call source-table-symb token-str))})))
 
 (defmethod mbql-field [:literal :normal]
   [_ _ source-table-symb token-str]
@@ -133,10 +179,10 @@
 (defmethod parse-token-by-sigil "&"
   [source-table-symb token]
   (if-let [[_ alias-name token] (re-matches #"^&([^.]+)\.(.+$)" (str token))]
-    (let [[_ id-or-name opts] (parse-token-by-sigil source-table-symb (if (token->sigil token)
-                                                                        (symbol token)
-                                                                        (symbol (str \$ token))))]
-      [:field id-or-name (assoc opts :join-alias alias-name)])
+    (-> (parse-token-by-sigil source-table-symb (if (token->sigil token)
+                                                  (symbol token)
+                                                  (symbol (str \$ token))))
+        (field-ref-update-options assoc :join-alias alias-name))
     (throw (ex-info "Error parsing token starting with '&'"
                     {:token token}))))
 
@@ -147,7 +193,7 @@
     (let [[_ id-or-name opts] (parse-token-by-sigil source-table-symb (if (token->sigil token)
                                                                         (symbol token)
                                                                         (symbol (str \$ token))))]
-      [:field id-or-name (assoc opts :temporal-unit (keyword unit))])
+      (field-ref id-or-name (assoc opts :temporal-unit (keyword unit))))
     (throw (ex-info "Error parsing token starting with '!'" {:token token}))))
 
 ;; $$ = table ID.

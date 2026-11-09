@@ -8,12 +8,12 @@ If a person has the wrong level of access to the data that's returned by a quest
 
 ### Row and column permissions
 
-- [Troubleshooting data sandboxing][troubleshooting-data-sandboxing].
+- [Troubleshooting row and column security][troubleshooting-row-and-column-security].
 
 ### Native query (SQL) permissions
 
 - [A user group can't access the SQL editor][sql-access].
-- [A user group with SQL permissions isn't being restricted by their data sandbox][sql-sandboxing].
+- [A user group with SQL permissions isn't being restricted by their row and column security policy](../permissions/row-and-column-security.md).
 
 ### Table or schema permissions
 
@@ -27,7 +27,7 @@ If a person has the wrong level of access to the data that's returned by a quest
 1. Ensure scripts are loading by disabling browser extensions and refreshing the browser.
 2. Go to **Admin** > **Permissions** and select the relevant group.
 3. Find the database that you want to grant SQL access to.
-4. From the **View data** dropdown.elect **Can view**.
+4. From the **View data** dropdown, select **Can view**.
 5. From the **Create queries** dropdown, select **Query builder and native**.
 6. [Check if the access problem is fixed](#checking-someones-access-to-a-table-or-schema).
 
@@ -75,7 +75,7 @@ If you get an error message that says something like "permission denied to \<you
    ```
 2. Get the credentials that Metabase uses to connect to your database. If you're not sure what those credentials are, ask your database admin.
 3. Using a different application (like your CLI or database IDE), connect to your database using the same credentials your Metabase uses to connect to that database, and run the query from step 1.
-4. If you cannot access the table or schema in both step 1 and 3, ask your database admin to:
+4. If you cannot access the table or schema in both steps 1 and 3, ask your database admin to:
    - [Grant database privileges](../databases/users-roles-privileges.md) to the role that Metabase is using to connect, or
    - Provide a set of database credentials with the correct permissions.
 5. [Check if the access problem is fixed](#checking-someones-access-to-a-table-or-schema).
@@ -122,8 +122,5 @@ If you can’t solve your problem using the troubleshooting guides:
 [pricing]: https://www.metabase.com/pricing
 [proxies]: ./proxies.md
 [sql-access]: ./data-permissions.md#a-user-group-cant-access-the-sql-editor
-[sql-sandboxing]: ./sandboxing.md#is-the-question-written-in-sql
-[troubleshooting-data-sandboxing]: ./sandboxing.md
-[troubleshooting-permissions]: ./permissions.md
 [unrestricted]: ../permissions/data.md#can-view-data-permission
 [view-edit]: ./cant-view-or-edit.md

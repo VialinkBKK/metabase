@@ -1,4 +1,5 @@
 (ns metabase.driver.sparksql
+  (:refer-clojure :exclude [select-keys every? empty? not-empty get-in])
   (:require
    [clojure.java.jdbc :as jdbc]
    [clojure.string :as str]
@@ -10,19 +11,23 @@
    [metabase.driver.hive-like :as hive-like]
    [metabase.driver.hive-like.fixed-hive-connection :as fixed-hive-connection]
    [metabase.driver.sql-jdbc :as sql-jdbc]
+   [metabase.driver.sql-jdbc.common :as sql-jdbc.common]
    [metabase.driver.sql-jdbc.connection :as sql-jdbc.conn]
    [metabase.driver.sql-jdbc.execute :as sql-jdbc.execute]
    [metabase.driver.sql-jdbc.sync :as sql-jdbc.sync]
    [metabase.driver.sql.parameters.substitution :as sql.params.substitution]
    [metabase.driver.sql.query-processor :as sql.qp]
+   [metabase.driver.sql.query-processor.like-escape-char-built-in :as-alias sql.qp.like-built-in]
    [metabase.driver.sql.util :as sql.u]
-   [metabase.util.honey-sql-2 :as h2x])
+   [metabase.lib.core :as lib]
+   [metabase.util.honey-sql-2 :as h2x]
+   [metabase.util.performance :refer [select-keys every? empty? not-empty get-in]])
   (:import
-   (java.sql Connection ResultSet)))
+   (java.sql Connection ResultSet Types)))
 
 (set! *warn-on-reflection* true)
 
-(driver/register! :sparksql, :parent :hive-like)
+(driver/register! :sparksql, :parent #{:hive-like ::sql.qp.like-built-in/like-escape-char-built-in})
 
 ;;; ------------------------------------------ Custom HoneySQL Clause Impls ------------------------------------------
 
@@ -31,25 +36,25 @@
   "t1")
 
 (defmethod sql.qp/->honeysql [:sparksql :field]
-  [driver [_ _ {::sql.params.substitution/keys [compiling-field-filter?]} :as field-clause]]
+  [driver [_ {::sql.params.substitution/keys [compiling-field-filter?]} _ :as field-clause]]
   ;; use [[source-table-alias]] instead of the usual `schema.table` to qualify fields e.g. `t1.field` instead of the
   ;; normal `schema.table.field`
   (let [parent-method (get-method sql.qp/->honeysql [:hive-like :field])
-        field-clause  (driver-api/update-field-options
+        field-clause  (lib/update-options
                        field-clause
-                       update
-                       driver-api/qp.add.source-table
-                       (fn [source-table]
-                         (cond
-                            ;; DO NOT qualify fields from field filters with `t1`, that won't
-                            ;; work unless the user-written SQL query is doing the same
-                            ;; thing.
-                           compiling-field-filter? driver-api/qp.add.none
-                            ;; for all other fields from the source table qualify them with
-                            ;; `t1`
-                           (integer? source-table) source-table-alias
-                            ;; no changes for anyone else.
-                           :else                   source-table)))]
+                       (fn [{source-table driver-api/qp.add.source-table, :as options}]
+                         (-> options
+                             (cond-> (pos-int? source-table) (assoc :qp/allow-coercion-for-columns-without-integer-qp.add.source-table true))
+                             (assoc driver-api/qp.add.source-table (cond
+                                                                     ;; DO NOT qualify fields from field filters with `t1`, that won't
+                                                                     ;; work unless the user-written SQL query is doing the same
+                                                                     ;; thing.
+                                                                     compiling-field-filter? driver-api/qp.add.none
+                                                                     ;; for all other fields from the source table qualify them with
+                                                                     ;; `t1`
+                                                                     (pos-int? source-table) source-table-alias
+                                                                     ;; no changes for anyone else.
+                                                                     :else                   source-table)))))]
     (parent-method driver field-clause)))
 
 (defn- format-over
@@ -90,24 +95,39 @@
   (getConnection [_this]
     (fixed-hive-connection/fixed-hive-connection url properties)))
 
+(defn- connection-url
+  [{:keys [host port db jdbc-flags dbname]
+    :or   {host "localhost", port 10000, db "", jdbc-flags ""}}]
+  (let [port (cond-> port
+               (string? port) Integer/parseInt)
+        db   (or dbname db)]
+    (format "jdbc:hive2://%s:%s/%s%s" host port db jdbc-flags)))
+
 (defmethod sql-jdbc.conn/connection-details->spec :sparksql
-  [_driver {:keys [host port db jdbc-flags dbname]
-            :or   {host "localhost", port 10000, db "", jdbc-flags ""}
-            :as   opts}]
-  (let [port        (cond-> port
-                      (string? port) Integer/parseInt)
-        db          (or dbname db)
-        url         (format "jdbc:hive2://%s:%s/%s%s" host port db jdbc-flags)
-        properties  (driver-api/map->properties (dissoc opts :host :port :jdbc-flags))
-        data-source (->SparkSQLDataSource url properties)]
+  [_driver opts]
+  (let [properties  (driver-api/map->properties (dissoc opts :host :port :jdbc-flags))
+        data-source (->SparkSQLDataSource (connection-url opts) properties)]
     {:datasource data-source}))
+
+;; The connection string is built into a `DataSource` rather than left on the spec, so the generic `:sql-jdbc`
+;; implementations cannot see it and both of these read it from [[connection-url]] instead. That is also the only
+;; place the substituted `localhost` shows up when the details name no host at all.
+(defmethod driver/connection-hosts :sparksql
+  [_driver details]
+  (sql-jdbc.common/connection-string-hosts (connection-url details)))
+
+(defmethod driver/connection-parameter-hosts :sparksql
+  [driver details]
+  (sql-jdbc.common/connection-parameter-hosts (connection-url details)
+                                              nil
+                                              (driver/host-carrying-parameters driver)))
 
 (defn- dash-to-underscore [s]
   (when s
     (str/replace s #"-" "_")))
 
 ;; workaround for SPARK-9686 Spark Thrift server doesn't return correct JDBC metadata
-(defmethod driver/describe-database :sparksql
+(defmethod driver/describe-database* :sparksql
   [driver database]
   {:tables
    (sql-jdbc.execute/do-with-connection-with-options
@@ -158,7 +178,8 @@
   (let [inner-query (-> (assoc inner-query
                                :remark   (driver-api/query->remark :sparksql outer-query)
                                :query    sql
-                               :max-rows (driver-api/query->max-rows-limit outer-query))
+                               ;; driver still executes legacy outer queries; legacy limit calculation matches
+                               :max-rows #_{:clj-kondo/ignore [:deprecated-var]} (driver-api/query->max-rows-limit outer-query))
                         (dissoc :params))
         query       (assoc outer-query :native inner-query)]
     ((get-method driver/execute-reducible-query :sql-jdbc) driver query context respond)))
@@ -226,9 +247,6 @@
         (.close stmt)
         (throw e)))))
 
-;; the current HiveConnection doesn't support .createStatement
-(defmethod sql-jdbc.execute/statement-supported? :sparksql [_] false)
-
 (doseq [[feature supported?] {:basic-aggregations              true
                               :binning                         true
                               :expression-aggregations         true
@@ -242,7 +260,13 @@
                               :test/jvm-timezone-setting       false
                               ;; disabled for now, see issue #40991 to fix this.
                               :window-functions/cumulative     false
-                              :database-routing                false}]
+                              :database-routing                false
+                              :jdbc/statements                 false
+                              ;; Calling Statement.setQueryTimeout on Hive's JDBC driver closes the Thrift transport
+                              ;; on the server side; subsequent statement close() then throws "Failed to close
+                              ;; statement". Skip the call entirely.
+                              :jdbc/set-query-timeout          false
+                              :stage-ctes                      true}]
   (defmethod driver/database-supports? [:sparksql feature] [_driver _feature _db] supported?))
 
 (defmethod sql.qp/quote-style :sparksql
@@ -254,9 +278,17 @@
   (sql.qp/->integer-with-round driver value))
 
 (defmethod sql.qp/->honeysql [:sparksql ::sql.qp/cast-to-text]
-  [driver [_ expr]]
-  (sql.qp/->honeysql driver [::sql.qp/cast expr "string"]))
+  [driver [_ _opts expr]]
+  (sql.qp/->honeysql driver [::sql.qp/cast {} expr "string"]))
 
 (defmethod sql-jdbc/impl-table-known-to-not-exist? :sparksql
   [_ e]
   (= (sql-jdbc/get-sql-state e) "42P01"))
+
+(defmethod sql-jdbc.execute/read-column-thunk [:sparksql Types/ARRAY]
+  [_ ^ResultSet rs _rsmeta ^Integer i]
+  (fn []
+    (.getObject rs i)))
+
+(defmethod driver/llm-sql-dialect-resource :sparksql [_]
+  "metabot/prompts/dialects/databricks.md")

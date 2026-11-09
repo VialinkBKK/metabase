@@ -1,14 +1,10 @@
-import type * as React from "react";
+import cx from "classnames";
+import type { JSX } from "react";
 
-import {
-  CardHeaderLink,
-  CardHeaderStatic,
-  CardIcon,
-  CardMessage,
-  CardRootLink,
-  CardRootStatic,
-  CardTitle,
-} from "./HelpCard.styled";
+import { ExternalLink } from "metabase/common/components/ExternalLink";
+import { Box, Flex, Icon } from "metabase/ui";
+
+import S from "./HelpCard.module.css";
 
 export interface HelpCardProps {
   title: string;
@@ -18,32 +14,39 @@ export interface HelpCardProps {
   children: React.ReactNode;
 }
 
-const HelpCard = ({
+export const HelpCard = ({
   title,
   helpUrl,
   isFullyClickable = true,
   className,
   children,
 }: HelpCardProps): JSX.Element => {
-  const CardRoot = isFullyClickable ? CardRootLink : CardRootStatic;
-  const CardHeader = isFullyClickable ? CardHeaderStatic : CardHeaderLink;
-
   return (
-    <CardRoot
-      className={className}
+    <Box
+      component={isFullyClickable ? ExternalLink : undefined}
       href={isFullyClickable ? helpUrl : undefined}
+      className={cx(S.root, { [S.clickable]: isFullyClickable }, className)}
     >
-      <CardHeader href={isFullyClickable ? undefined : helpUrl}>
-        <CardIcon name="info" />
-        <CardTitle>{title}</CardTitle>
-        <CardIcon name="external" />
-      </CardHeader>
-      <CardMessage>{children}</CardMessage>
-    </CardRoot>
+      <Flex
+        component={isFullyClickable ? undefined : ExternalLink}
+        href={isFullyClickable ? undefined : helpUrl}
+        align="center"
+        mb="lg"
+      >
+        <Icon name="info" flex="0 0 auto" c="core-brand" />
+        <Box
+          component="span"
+          display="block"
+          flex="1 1 auto"
+          mx="sm"
+          c="core-brand"
+          fw="bold"
+        >
+          {title}
+        </Box>
+        <Icon name="external" flex="0 0 auto" c="core-brand" />
+      </Flex>
+      <Box className={S.message}>{children}</Box>
+    </Box>
   );
 };
-
-// eslint-disable-next-line import/no-default-export -- deprecated usage
-export default Object.assign(HelpCard, {
-  Section: CardMessage,
-});

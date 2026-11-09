@@ -1,4 +1,5 @@
 import type { GithubProps, Tag } from "./types";
+import { isLtsVersion } from "./version-info";
 
 // https://regexr.com/7l1ip
 export const isValidVersionString = (versionString: string) => {
@@ -106,70 +107,25 @@ export const getVersionFromReleaseBranch = (branch: string) => {
   return `v0.${majorVersion}.0`;
 };
 
-const SDK_TAG_REGEXP = /embedding-sdk-(0\.\d+\.\d+(-\w+)?)$/;
+// rolling tags like v0.56.x or v0.51.2.x aren't valid version strings,
+// but we can still read a major version off of them
+const isDotXTag = (tagName: string) =>
+  /^(v0|v1)\.\d+(\.\d+)*\.x$/.test(tagName);
 
-export const getSdkVersionFromReleaseTagName = (tagName: string) => {
-  const match = SDK_TAG_REGEXP.exec(tagName);
-
-  if (!match) {
-    throw new Error(`Invalid sdk release tag: ${tagName}`);
+export const getMajorVersionFromRef = (ref: string) => {
+  if (ref.startsWith("refs/tags/")) {
+    const tagName = ref.replace("refs/tags/", "");
+    if (!isValidVersionString(tagName) && !isDotXTag(tagName)) return "";
+    return getMajorVersion(tagName);
   }
 
-  return match[1];
+  return getMajorVersionNumberFromReleaseBranch(ref.replace("refs/heads/", ""));
 };
 
-export const getSdkVersionFromReleaseBranchName = async ({
-  github,
-  owner,
-  repo,
-  branchName,
-}: GithubProps & { branchName: string }) => {
-  const majorVersion = getMajorVersionNumberFromReleaseBranch(branchName);
-
-  let sdkVersion: string;
-
-  console.log(
-    `Resolved latest major release version - ${Number(majorVersion)}`,
-  );
-
-  console.log(
-    `Looking for git tag - "embedding-sdk-0.${Number(majorVersion)}.*"`,
-  );
-
-  const latestSdkTagForMajorRelease = await getLastEmbeddingSdkReleaseTag({
-    github,
-    owner,
-    repo,
-    majorVersion,
-  });
-
-  console.log(
-    `Resolved SDK latest release tag for v${majorVersion} - ${latestSdkTagForMajorRelease}`,
-  );
-
-  if (latestSdkTagForMajorRelease) {
-    sdkVersion = getSdkVersionFromReleaseTagName(latestSdkTagForMajorRelease);
-
-    console.log(
-      `Resolved SDK latest release version for v${majorVersion} - ${sdkVersion}`,
-    );
-
-    return sdkVersion;
-  }
-
-  const latestSdkTag = await getLastEmbeddingSdkReleaseTag({
-    github,
-    owner,
-    repo,
-  });
-
-  sdkVersion = getSdkVersionFromReleaseTagName(latestSdkTag);
-
-  console.warn(
-    `Failed to resolve latest SDK package version! Using latest SDK version available - ${sdkVersion}`,
-  );
-
-  return sdkVersion;
+// creates tag in format: `v<oss|ee>.<major>-lts`, for example: v0.58-lts
+const getLtsTag = (version: string) => {
+  const pieces = version.replace(/-.+/, "").split("."); // ignore any -suffixes
+  return pieces.slice(0, 2).join(".") + "-lts";
 };
 
 export const getDotXs = (version: string, number: number) => {
@@ -187,60 +143,55 @@ export const getDotXVersion = (version: string) => {
   return getDotXs(version, 2);
 };
 
-export const getExtraTagsForVersion = ({ version }: { version: string }) => {
-  const ossVerion = getOSSVersion(version);
-  const eeVersion = getEnterpriseVersion(version);
-  const versionType = getVersionType(version);
-
-  // eg. v0.23.x / v1.23.x
-  const tags = [getDotXs(ossVerion, 1), getDotXs(eeVersion, 1)];
-
-  if (versionType === "major") {
-    return tags;
-  }
-
-  // eg. v0.23.4.x / v1.23.4.x
-  return [...tags, getDotXs(ossVerion, 2), getDotXs(eeVersion, 2)];
+const shouldAddLatestTag = ({
+  version,
+  latestMajorVersion,
+}: {
+  version: string;
+  latestMajorVersion?: string;
+}) => {
+  const majorVersion = getMajorVersion(version);
+  return majorVersion === latestMajorVersion;
 };
 
-/**
- * queries the github api to get all embedding sdk version tags
- */
-export async function getLastEmbeddingSdkReleaseTag({
-  github,
-  owner,
-  repo,
-  majorVersion = "",
-}: GithubProps & {
-  majorVersion?: string;
-}) {
-  const tags = await github.paginate(github.rest.git.listMatchingRefs, {
-    owner,
-    repo,
-    ref: `tags/embedding-sdk-0.${majorVersion}`,
-  });
+export const getRollingTagsForVersion = ({
+  version,
+  isLatest,
+  isLts,
+}: {
+  version: string;
+  isLatest: boolean;
+  isLts: boolean;
+}) => [
+  ...(isLatest ? ["latest"] : []),
+  ...(isLts ? [getLtsTag(version)] : []),
+  getDotXs(version, 1),
+  ...(getVersionType(version) !== "major" ? [getDotXs(version, 2)] : []),
+];
 
-  const lastRelease = getLastReleaseFromTags({
-    tags: tags.filter(filterOutNonSupportedPrereleaseIdentifier),
-  });
+export const getExtraTagsForVersion = async ({
+  version,
+  latestMajorVersion,
+}: {
+  version: string;
+  latestMajorVersion?: string;
+}) => {
+  const isLatest = shouldAddLatestTag({ version, latestMajorVersion });
+  const isLts = await isLtsVersion({ version });
 
-  return lastRelease;
-}
-
-const ALLOWED_SDK_PRERELEASE_IDENTIFIERS = ["nightly"];
-/**
- *
- * @param tag a GitHub tag object
- */
-export function filterOutNonSupportedPrereleaseIdentifier(tag: Tag) {
-  const prereleaseIdentifier = /\d+\.\d+\.\d+-(?<prerelease>\w+)$/.exec(tag.ref)
-    ?.groups?.prerelease;
-
-  return (
-    !prereleaseIdentifier ||
-    ALLOWED_SDK_PRERELEASE_IDENTIFIERS.includes(prereleaseIdentifier)
-  );
-}
+  return [
+    ...getRollingTagsForVersion({
+      version: getOSSVersion(version),
+      isLatest,
+      isLts,
+    }),
+    ...getRollingTagsForVersion({
+      version: getEnterpriseVersion(version),
+      isLatest: false,
+      isLts,
+    }),
+  ];
+};
 
 export const getMajorVersionNumberFromReleaseBranch = (branch: string) => {
   const match = /release-x\.(\d+)\.x$/.exec(branch);
@@ -269,6 +220,16 @@ export const versionRequirements: Record<
   53: { java: 21, node: 22, platforms: "linux/amd64,linux/arm64" },
   54: { java: 21, node: 22, platforms: "linux/amd64,linux/arm64" },
   55: { java: 21, node: 22, platforms: "linux/amd64,linux/arm64" },
+  56: { java: 21, node: 22, platforms: "linux/amd64,linux/arm64" },
+  57: { java: 21, node: 22, platforms: "linux/amd64,linux/arm64" },
+  58: { java: 21, node: 22, platforms: "linux/amd64,linux/arm64" },
+  59: { java: 21, node: 22, platforms: "linux/amd64,linux/arm64" },
+  60: { java: 25, node: 22, platforms: "linux/amd64,linux/arm64" },
+  61: { java: 25, node: 22, platforms: "linux/amd64,linux/arm64" },
+  62: { java: 25, node: 22, platforms: "linux/amd64,linux/arm64" },
+  63: { java: 25, node: 22, platforms: "linux/amd64,linux/arm64" },
+  64: { java: 25, node: 22, platforms: "linux/amd64,linux/arm64" },
+  65: { java: 25, node: 22, platforms: "linux/amd64,linux/arm64" },
 };
 
 export const getBuildRequirements = (version: string) => {
@@ -344,7 +305,7 @@ export function isPatchVersion(version: string) {
 }
 
 const normalizeVersionForSorting = (version: string) =>
-  version.replace(/^(v?)(0|1)\./, "");
+  version.replace(/^(v?)(0|1)\./, "").split("-")[0];
 
 export function versionSort(a: string, b: string) {
   const [aMajor, aMinor, aPatch] = normalizeVersionForSorting(a)
@@ -380,6 +341,7 @@ export function getLastReleaseFromTags({
 }) {
   return tags
     .map((tag) => tag.ref.replace("refs/tags/", ""))
+    .filter((tag) => !tag.endsWith("lts"))
     .filter((tag) => !tag.includes(".x"))
     .filter(ignorePreReleases ? (tag) => !isPreReleaseVersion(tag) : () => true)
     .filter(ignorePatches ? (v) => !isPatchVersion(v) : () => true)
@@ -450,7 +412,64 @@ export const getNextPatchVersion = async ({
     ignorePreReleases: false,
   });
 
-  const nextPatch = findNextPatchVersion(lastRelease);
+  if (!lastRelease) {
+    return undefined;
+  }
 
-  return nextPatch;
+  return findNextPatchVersion(lastRelease);
+};
+
+export const findNextMinorVersion = (version: string) => {
+  if (!isValidVersionString(version)) {
+    throw new Error(`Invalid version string: ${version}`);
+  }
+
+  if (isPreReleaseVersion(version)) {
+    throw new Error(
+      `Auto-minor releases are not supported for pre-release versions: ${version}`,
+    );
+  }
+
+  const [major, minor] = version
+    .replace(/(v1|v0)\./, "")
+    .split(".")
+    .map(Number);
+
+  return `v0.${major}.${(minor || 0) + 1}`;
+};
+
+export const getNextMinorVersion = async ({
+  github,
+  owner,
+  repo,
+  majorVersion,
+}: GithubProps & { majorVersion: number }) => {
+  const lastRelease = await getLastReleaseTag({
+    github,
+    owner,
+    repo,
+    version: `v0.${majorVersion.toString()}.0`,
+    ignorePatches: true,
+    ignorePreReleases: true,
+  });
+
+  // No stable release yet for this major (e.g. only vX.NN.0-beta has shipped).
+  // The gold release is cut manually — skip rather than crash the cron.
+  if (!lastRelease) {
+    return undefined;
+  }
+
+  return findNextMinorVersion(lastRelease);
+};
+
+export const getNextVersion = async ({
+  github,
+  owner,
+  repo,
+  majorVersion,
+  kind,
+}: GithubProps & { majorVersion: number; kind: "patch" | "minor" }) => {
+  return kind === "patch"
+    ? getNextPatchVersion({ github, owner, repo, majorVersion })
+    : getNextMinorVersion({ github, owner, repo, majorVersion });
 };

@@ -1,7 +1,6 @@
-import { push } from "react-router-redux";
-
 import { DatabaseEngineList } from "metabase/databases/components/DatabaseEngineList";
-import { useDispatch } from "metabase/lib/redux";
+import { RETURN_TO_SETUP_GUIDE_PARAM } from "metabase/embedding/constants";
+import { useNavigate } from "metabase/router";
 
 import { trackDatabaseSelect } from "../analytics";
 
@@ -9,14 +8,21 @@ import { DatabasePanelEmptyState } from "./AddDataModalEmptyStates";
 
 export const DatabasesPanel = ({
   canSeeContent,
+  returnToSetupGuide,
 }: {
   canSeeContent: boolean;
+  /** Path of the setup guide that opened this, so the flow can return there. */
+  returnToSetupGuide?: string;
 }) => {
-  const dispatch = useDispatch();
+  const navigate = useNavigate();
 
   const handleDatabaseSelect = (key: string) => {
     trackDatabaseSelect(key);
-    dispatch(push(`/admin/databases/create?engine=${key}`));
+    const params = new URLSearchParams({ engine: key });
+    if (returnToSetupGuide) {
+      params.set(RETURN_TO_SETUP_GUIDE_PARAM, returnToSetupGuide);
+    }
+    navigate(`/admin/databases/create?${params.toString()}`);
   };
 
   return canSeeContent ? (

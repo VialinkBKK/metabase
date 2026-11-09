@@ -1,25 +1,25 @@
 import { useDisclosure } from "@mantine/hooks";
-import cx from "classnames";
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { t } from "ttag";
 
+import { QuestionDownloadWidget } from "metabase/common/components/QuestionDownloadWidget";
+import { useDownloadData } from "metabase/common/components/QuestionDownloadWidget/use-download-data";
 import { useDashboardContext } from "metabase/dashboard/context";
 import { getParameterValuesBySlugMap } from "metabase/dashboard/selectors";
-import { useSelector, useStore } from "metabase/lib/redux";
-import { checkNotNull } from "metabase/lib/types";
-import { QuestionDownloadWidget } from "metabase/query_builder/components/QuestionDownloadWidget";
-import { useDownloadData } from "metabase/query_builder/components/QuestionDownloadWidget/use-download-data";
-import { getMetadata } from "metabase/selectors/metadata";
-import { ActionIcon, Icon, Menu } from "metabase/ui";
-import { SAVING_DOM_IMAGE_HIDDEN_CLASS } from "metabase/visualizations/lib/save-chart-image";
-import Question from "metabase-lib/v1/Question";
-import type { DashboardCard, Dataset } from "metabase-types/api";
+import { useQuestionFromCard } from "metabase/metadata-store";
+import { useStore } from "metabase/redux";
+import { Icon, Menu } from "metabase/ui";
+import { checkNotNull } from "metabase/utils/types";
+import type { Dataset, QuestionDashboardCard } from "metabase-types/api";
 
+import { DashCardMenuButton } from "./DashCardMenu/DashCardMenuButton";
 import { getDashcardTokenId, getDashcardUuid } from "./dashcard-ids";
 
 type PublicOrEmbeddedDashCardMenuProps = {
   result: Dataset;
-  dashcard: DashboardCard;
+  // Every caller gates on `isQuestionDashCard(dashcard)`, so a virtual
+  // dashcard never reaches this menu.
+  dashcard: QuestionDashboardCard;
 };
 
 export const PublicOrEmbeddedDashCardMenu = ({
@@ -29,7 +29,7 @@ export const PublicOrEmbeddedDashCardMenu = ({
   const store = useStore();
   const token = getDashcardTokenId(dashcard);
   const uuid = getDashcardUuid(dashcard);
-  const { dashboardId } = useDashboardContext();
+  const { dashboard, dashboardId } = useDashboardContext();
 
   const [menuView, setMenuView] = useState<string | null>(null);
   const [isOpen, { close, toggle }] = useDisclosure(false, {
@@ -38,17 +38,14 @@ export const PublicOrEmbeddedDashCardMenu = ({
     },
   });
 
-  const metadata = useSelector(getMetadata);
-  const question = useMemo(
-    () => new Question(dashcard.card, metadata),
-    [dashcard.card, metadata],
-  );
+  const question = useQuestionFromCard(dashcard.card);
 
   // by the time we reach this code,  dashboardId really should not be null.
   const [{ loading: isDownloadingData }, handleDownload] = useDownloadData({
     question: question,
     result,
-    dashboardId: checkNotNull(dashboardId),
+    // dashboardId can be an entityId and the download endpoint expects a numeric id
+    dashboardId: checkNotNull(dashboard?.id ?? dashboardId),
     dashcardId: dashcard.id,
     uuid,
     token,
@@ -56,18 +53,19 @@ export const PublicOrEmbeddedDashCardMenu = ({
   });
 
   return (
-    <Menu offset={4} position="bottom-end" opened={isOpen} onClose={close}>
+    <Menu
+      closeOnEscape
+      offset={4}
+      onClose={close}
+      opened={isOpen}
+      position="bottom-end"
+      trapFocus
+    >
       <Menu.Target>
-        <ActionIcon
-          size="xs"
-          className={cx({
-            [SAVING_DOM_IMAGE_HIDDEN_CLASS]: true,
-          })}
+        <DashCardMenuButton
           onClick={toggle}
           data-testid="public-or-embedded-dashcard-menu"
-        >
-          <Icon name="ellipsis" />
-        </ActionIcon>
+        />
       </Menu.Target>
 
       <Menu.Dropdown>
@@ -75,9 +73,10 @@ export const PublicOrEmbeddedDashCardMenu = ({
           <QuestionDownloadWidget
             question={question}
             result={result}
-            onDownload={(opts) => {
+            onDownload={async (opts) => {
               close();
-              handleDownload(opts);
+
+              await handleDownload(opts);
             }}
           />
         ) : (

@@ -5,6 +5,8 @@ import type {
   FieldId,
   FieldValue,
   GetFieldRequest,
+  GetFieldTableIdsRequest,
+  GetFieldTableIdsResponse,
   GetFieldValuesResponse,
   GetRemappedFieldValueRequest,
   SearchFieldValuesRequest,
@@ -13,6 +15,7 @@ import type {
 } from "metabase-types/api";
 
 import { Api } from "./api";
+import { patchCachedTableMetadata, selectCachedTableMetadata } from "./table";
 import {
   idTag,
   invalidateTags,
@@ -22,6 +25,7 @@ import {
   provideRemappedFieldValuesTags,
   tag,
 } from "./tags";
+import { rollbackOnError } from "./utils/rollback-on-error";
 
 export const fieldApi = Api.injectEndpoints({
   endpoints: (builder) => ({
@@ -32,6 +36,17 @@ export const fieldApi = Api.injectEndpoints({
         params,
       }),
       providesTags: (field) => (field ? provideFieldTags(field) : []),
+    }),
+    getFieldTableIds: builder.query<
+      GetFieldTableIdsResponse,
+      GetFieldTableIdsRequest
+    >({
+      query: (body) => ({
+        method: "POST",
+        url: "/api/field/table-ids",
+        body,
+      }),
+      providesTags: [listTag("field")],
     }),
     getFieldValues: builder.query<GetFieldValuesResponse, FieldId>({
       query: (fieldId) => ({
@@ -74,7 +89,30 @@ export const fieldApi = Api.injectEndpoints({
           idTag("field-values", id),
           tag("parameter-values"),
           tag("card"),
+          tag("dataset"),
         ]),
+      onQueryStarted: async (
+        { id, ...body },
+        { dispatch, getState, queryFulfilled },
+      ) => {
+        const patches = selectCachedTableMetadata(getState(), [
+          idTag("field", id),
+        ]).map(({ originalArgs }) =>
+          dispatch(
+            patchCachedTableMetadata(originalArgs, (table) => {
+              const field = table.fields?.find(
+                ({ id: fieldId }) => fieldId === id,
+              );
+
+              if (field) {
+                Object.assign(field, body);
+              }
+            }),
+          ),
+        );
+
+        await rollbackOnError(queryFulfilled, patches);
+      },
     }),
     updateFieldValues: builder.mutation<void, UpdateFieldValuesRequest>({
       query: ({ id, ...body }) => ({
@@ -102,6 +140,7 @@ export const fieldApi = Api.injectEndpoints({
           idTag("field", id),
           idTag("field-values", id),
           tag("parameter-values"),
+          tag("dataset"),
         ]),
     }),
     deleteFieldDimension: builder.mutation<void, FieldId>({
@@ -114,6 +153,7 @@ export const fieldApi = Api.injectEndpoints({
           idTag("field", id),
           idTag("field-values", id),
           tag("parameter-values"),
+          tag("dataset"),
         ]),
     }),
     rescanFieldValues: builder.mutation<void, FieldId>({
@@ -143,6 +183,8 @@ export const fieldApi = Api.injectEndpoints({
 
 export const {
   useGetFieldQuery,
+  useLazyGetFieldQuery,
+  useGetFieldTableIdsQuery,
   useGetFieldValuesQuery,
   useGetRemappedFieldValueQuery,
   useSearchFieldValuesQuery,

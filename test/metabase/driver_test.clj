@@ -1,4 +1,5 @@
 (ns ^:mb/driver-tests metabase.driver-test
+  {:clj-kondo/config '{:linters {:deprecated-var {:exclude {metabase.test.data/mbql-query {:namespaces [metabase.driver-test]}}}}}}
   (:require
    [clojure.set :as set]
    [clojure.string :as str]
@@ -8,14 +9,17 @@
    [metabase.driver.ddl.interface :as ddl.i]
    [metabase.driver.impl :as driver.impl]
    [metabase.driver.settings :as driver.settings]
-   [metabase.query-processor :as qp]
+   [metabase.driver.util :as driver.u]
+   [metabase.lib.metadata :as lib.metadata]
    [metabase.query-processor.compile :as qp.compile]
+   [metabase.query-processor.test :as qp]
    [metabase.sync.task.sync-databases :as task.sync-databases]
    [metabase.test :as mt]
    [metabase.test.data.env :as tx.env]
    [metabase.test.data.interface :as tx]
    [metabase.util :as u]
    [metabase.util.json :as json]
+   [metabase.util.quick-task :as quick-task]
    [toucan2.core :as t2]))
 
 (set! *warn-on-reflection* true)
@@ -42,8 +46,8 @@
     (is (= @classloader/shared-context-classloader
            (.getContextClassLoader (Thread/currentThread))))))
 
-(deftest available?-test
-  (with-redefs [driver.impl/concrete? (constantly true)]
+(deftest ^:parallel available?-test
+  (mt/with-dynamic-fn-redefs [driver.impl/concrete? (constantly true)]
     (is (driver/available? ::test-driver))
     (is (driver/available? "metabase.driver-test/test-driver")
         "`driver/available?` should work for if `driver` is a string -- see #10135")))
@@ -55,27 +59,43 @@
 
   ;; so instead, just iterate through all drivers currently set to test by the environment, and check their
   ;; connection-properties; between all the different CI driver runs, this should cover everything
-  (doseq [d (tx.env/test-drivers)]
-    (testing (str d " has entirely unique connection property names")
-      (let [props         (driver/connection-properties d)
-            props-by-name (group-by :name props)]
-        (is (= (count props) (count props-by-name))
-            (format "Property(s) with duplicate name: %s" (-> (filter (fn [[_ props]]
-                                                                        (> (count props) 1))
-                                                                      props-by-name)
-                                                              vec
-                                                              pr-str)))))))
+  (letfn [(count-named-props [props]
+            ;; Recursively count all properties with :name, including within groups
+            (reduce (fn [acc prop]
+                      (cond
+                        (= :group (:type prop))
+                        (+ acc (count-named-props (:fields prop)))
 
-(deftest supports-schemas-matches-describe-database-test
+                        (:name prop)
+                        (inc acc)
+
+                        :else
+                        acc))
+                    0
+                    props))]
+    (doseq [d (tx.env/test-drivers)]
+      (testing (str d " has entirely unique connection property names")
+        (let [props           (driver/connection-properties d)
+              props-by-name   (driver.u/collect-all-props-by-name props)
+              total-props     (count-named-props props)]
+          ;; If there are duplicate names, some will be overwritten in the map
+          ;; so the map size will be less than the total count of named properties
+          (is (= total-props (count props-by-name))
+              (format "Property(s) with duplicate name: %d total properties but only %d unique names in %s"
+                      total-props (count props-by-name) d)))))))
+
+(deftest ^:parallel supports-schemas-matches-describe-database-test
   (mt/test-drivers (mt/normal-drivers)
     (if (driver/database-supports? driver/*driver* :schemas (mt/db))
       (testing "`describe-database` should return schemas with tables if the database supports schemas"
-        (is (some? (->> (driver/describe-database driver/*driver* (mt/db))
+        (is (some? (->> (driver/describe-database driver/*driver* (lib.metadata/database (mt/metadata-provider)))
                         :tables
+                        (into [])
                         (some :schema)))))
       (testing "`describe-database` should not return schemas with tables if the database doesn't support schemas"
-        (is (nil? (->> (driver/describe-database driver/*driver* (mt/db))
+        (is (nil? (->> (driver/describe-database driver/*driver* (lib.metadata/database (mt/metadata-provider)))
                        :tables
+                       (into [])
                        (some :schema))))))))
 
 (defn- basic-db-definition [database-name]
@@ -103,7 +123,7 @@
               (is (true? (binding [driver.settings/*allow-testing-h2-connections* true]
                            (driver/can-connect? driver/*driver* details)))))
             ;; release db resources like connection pools so we don't have to wait to finish syncing before destroying the db
-            (driver/notify-database-updated driver/*driver* db)
+            (driver/notify-database-updated driver/*driver* (driver.u/lib-database (:id db)))
             (testing "after deleting a database, can-connect? should return false or throw an exception"
               (let [;; in the case of some cloud databases, the test database is never created, and can't or shouldn't be destroyed.
                     ;; so fake it by changing the database details
@@ -119,7 +139,7 @@
                               (catch Exception _
                                 false))))))
             ;; clean up the database
-            (t2/delete! :model/Database (u/the-id db))))))))
+            (t2/delete! :model/Database :id (u/the-id db))))))))
 
 (deftest check-can-connect-before-sync-test
   (testing "Database sync should short-circuit and fail if the database at the connection has been deleted (metabase#7526)"
@@ -134,26 +154,28 @@
                                       (#'task.sync-databases/sync-and-analyze-database*! (u/the-id db))
                                       (some?
                                        (some
-                                        (fn [{:keys [level e message]}]
+                                        (fn [{:keys [level message]}]
                                           (and (= level :warn)
-                                               (instance? clojure.lang.ExceptionInfo e)
                                                (re-matches #"^Cannot sync Database ([\s\S]+): ([\s\S]+)" message)))
                                         (messages)))))]
             (testing "sense checks before deleting the database"
               (testing "sense check 1: sync-and-analyze-database! should not log a warning"
                 (is (false? (cant-sync-logged?))))
               (testing "sense check 2: triggering the sync via the POST /api/database/:id/sync_schema endpoint should succeed"
-                (is (= {:status "ok"}
-                       (mt/user-http-request :crowberto :post 200 (str "/database/" (u/the-id db) "/sync_schema"))))))
+                ;; run the endpoint's sync synchronously: if it is still running in the background, its connection
+                ;; can hold the database and make the destroy below fail
+                (mt/with-dynamic-fn-redefs [quick-task/submit-task! (fn [f] (f))]
+                  (is (= {:status "ok"}
+                         (mt/user-http-request :crowberto :post 200 (str "/database/" (u/the-id db) "/sync_schema")))))))
             ;; release db resources like connection pools so we don't have to wait to finish syncing before destroying the db
-            (driver/notify-database-updated driver/*driver* db)
+            (driver/notify-database-updated driver/*driver* (driver.u/lib-database (:id db)))
             ;; destroy the db
             (if (driver/database-supports? driver/*driver* :test/cannot-destroy-db (mt/db))
               ;; in the case of some cloud databases, the test database is never created, and can't or shouldn't be destroyed.
               ;; so fake it by changing the database details
               (let [details     (:details (mt/db))
                     new-details (merge details (tx/bad-connection-details driver/*driver*))]
-                (t2/update! :model/Database (u/the-id db) {:details new-details}))
+                (t2/update! :model/Database :id (u/the-id db) {:details new-details}))
               ;; otherwise destroy the db and use the original details
               (tx/destroy-db! driver/*driver* dbdef))
             (testing "after deleting a database, sync should fail"
@@ -162,11 +184,11 @@
               (testing "2: triggering the sync via the POST /api/database/:id/sync_schema endpoint should fail"
                 (mt/user-http-request :crowberto :post 422 (str "/database/" (u/the-id db) "/sync_schema"))))
             ;; clean up the database
-            (t2/delete! :model/Database (u/the-id db))))))))
+            (t2/delete! :model/Database :id (u/the-id db))))))))
 
-(deftest supports-table-privileges-matches-implementations-test
+(deftest ^:parallel supports-table-privileges-matches-implementations-test
   (mt/test-drivers (mt/normal-drivers-with-feature :table-privileges)
-    (is (some? (driver/current-user-table-privileges driver/*driver* (mt/db))))))
+    (is (some? (driver/current-user-table-privileges driver/*driver* (lib.metadata/database (mt/metadata-provider)))))))
 
 (deftest ^:parallel mongo-prettify-native-form-test
   (mt/test-driver :mongo
@@ -182,7 +204,6 @@
                               "created_at" "$_id.created_at"
                               "sum"        true}}]
           formatted-query (driver/prettify-native-form :mongo query)]
-
       (testing "Formatting a mongo query returns a JSON-like string"
         (is (= (str/join "\n"
                          ["["
@@ -229,19 +250,17 @@
                           "  }"
                           "]"])
                formatted-query)))
-
       (testing "The formatted JSON-like string is equivalent to the query"
         (is (= query (json/decode formatted-query))))
-
-        ;; TODO(qnkhuat): do we really need to handle case where wrong driver is passed?
+      ;; TODO(qnkhuat): do we really need to handle case where wrong driver is passed?
       (let [;; This is a mongodb query, but if you pass in the wrong driver it will attempt the format
-              ;; This is a corner case since the system should always be using the right driver
+            ;; This is a corner case since the system should always be using the right driver
             weird-formatted-query (driver/prettify-native-form :postgres (json/encode query))]
         (testing "The wrong formatter will change the format..."
           (is (not= query weird-formatted-query)))
         (testing "...but the resulting data is still the same"
-            ;; Bottom line - Use the right driver, but if you use the wrong
-            ;; one it should be harmless but annoying
+          ;; Bottom line - Use the right driver, but if you use the wrong
+          ;; one it should be harmless but annoying
           (is (= query
                  (json/decode weird-formatted-query))))))))
 
@@ -254,6 +273,16 @@
                                :native   (-> (qp.compile/compile (mt/mbql-query orders {:limit 1}))
                                              (update :query (partial driver/prettify-native-form driver/*driver*)))})))))
 
+(deftest ^:parallel table-exists-test
+  (testing "Make sure checking for table existence works"
+    (mt/test-drivers (mt/normal-drivers-with-feature :metadata/table-existence-check)
+      (let [venues-table (t2/select-one :model/Table :id (mt/id :venues))
+            fake-table {:name "fake_table_xyz123" :schema (:schema venues-table)}]
+        (is (driver/table-exists? driver/*driver* (lib.metadata/database (mt/metadata-provider)) venues-table)
+            (str "Driver " driver/*driver* " should detect that venues table exists"))
+        (is (not (driver/table-exists? driver/*driver* (lib.metadata/database (mt/metadata-provider)) fake-table))
+            (str "Driver " driver/*driver* " should detect that fake table doesn't exist"))))))
+
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Begin tests for `describe-*` methods used in sync
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -262,10 +291,10 @@
   (sort-by :database-position
            (if (driver/database-supports? driver/*driver* :describe-fields db)
              (mapv #(dissoc % :table-name :table-schema)
-                   (driver/describe-fields driver/*driver* db
+                   (driver/describe-fields driver/*driver* (driver.u/ensure-lib-database db)
                                            :schema-names [(:schema table)]
                                            :table-names [(:name table)]))
-             (:fields (driver/describe-table driver/*driver* db table)))))
+             (:fields (driver/describe-table driver/*driver* (driver.u/ensure-lib-database db) table)))))
 
 (deftest ^:parallel describe-fields-or-table-test
   (testing "test `describe-fields` or `describe-table` returns some basic metadata"
@@ -287,34 +316,92 @@
                     :base-type         #(isa? % :type/Number)}]
                   (describe-fields-for-table (mt/db) table))))))))
 
+(deftest ^:parallel describe-fields-returns-nullability-test
+  (mt/test-drivers (mt/normal-drivers-with-feature :test/dynamic-dataset-loading :test/create-table-without-data)
+    (mt/dataset nullable-db
+      (let [table   (t2/select-one :model/Table :id (mt/id :nullable))
+            fields  (describe-fields-for-table (mt/db) table)
+            [a b c] (->> ["a" "b" "c"]
+                         (map #(ddl.i/format-name driver/*driver* %))
+                         (map (u/index-by :name fields)))]
+        ;; this test only properties of the field-meta returned by the driver, not whether it syncs, for that see sync_metadata/fields_test.clj
+        (if (driver/database-supports? driver/*driver* :describe-is-nullable (mt/db))
+          (testing ":database-is-nullable should be provided"
+            (is (= [false true false] (mapv :database-is-nullable [a b c]))))
+          (testing ":database-is-nullable should remain unspecified"
+            (is (= [nil nil nil] (mapv :database-is-nullable [a b c])))))))))
+
+(deftest ^:parallel describe-fields-returns-default-expr-test
+  (mt/test-drivers (mt/normal-drivers-with-feature :test/dynamic-dataset-loading :test/create-table-without-data)
+    (mt/dataset default-expr-db
+      (let [table (t2/select-one :model/Table :id (mt/id :default_expr))
+            fields (describe-fields-for-table (mt/db) table)
+            [a b c] (->> ["a" "b" "c"]
+                         (map #(ddl.i/format-name driver/*driver* %))
+                         (map (u/index-by :name fields)))]
+        ;; this test only properties of the field-meta returned by the driver, not whether it syncs, for that see sync_metadata/fields_test.clj
+        (if (driver/database-supports? driver/*driver* :describe-default-expr (mt/db))
+          (testing ":database-default should be provided"
+            ;; SQL Server likes to add some parens
+            (is (=? [nil #"\(*42\)*" nil] (mapv :database-default [a b c]))))
+          (testing ":database-default should remain unspecified"
+            (is (= [nil nil nil] (mapv :database-default [a b c])))))))))
+
+(deftest ^:parallel describe-fields-returns-is-generated-test
+  (mt/test-drivers (mt/normal-drivers-with-feature :test/dynamic-dataset-loading :test/create-table-without-data)
+    (mt/dataset generated-column-db
+      (let [table (t2/select-one :model/Table :id (mt/id :generated_column))
+            fields (describe-fields-for-table (mt/db) table)
+            [a b c] (->> ["a" "b" "c"]
+                         (map #(ddl.i/format-name driver/*driver* %))
+                         (map (u/index-by :name fields)))]
+        ;; this test only properties of the field-meta returned by the driver, not whether it syncs, for that see
+        ;; sync_metadata/fields_test.clj
+        (if (driver/database-supports? driver/*driver* :describe-is-generated (mt/db))
+          (testing ":database-is-generated should be provided"
+            (is (= [false true false] (mapv :database-is-generated [a b c]))))
+          (testing ":database-is-generated should remain unspecified"
+            (is (= [nil nil nil] (mapv :database-is-generated [a b c])))))))))
+
 (deftest ^:parallel describe-table-fks-test
-  (testing "`describe-table-fks` should work for drivers that do not support `describe-fks`"
-    (mt/test-drivers (set/difference (mt/normal-drivers-with-feature :metadata/key-constraints)
-                                     (mt/normal-drivers-with-feature :describe-fks))
-      (let [orders   (t2/select-one :model/Table (mt/id :orders))
-            products (t2/select-one :model/Table (mt/id :products))
-            people   (t2/select-one :model/Table (mt/id :people))
+  (testing "`describe-fks` should be usable in the way we used to use the old `describe-table-fks` method"
+    (mt/test-drivers (mt/normal-drivers-with-feature :metadata/key-constraints)
+      (let [orders   (t2/select-one [:model/Table :name :schema] :id (mt/id :orders))
+            products (t2/select-one [:model/Table :name :schema] :id (mt/id :products))
+            people   (t2/select-one [:model/Table :name :schema] :id (mt/id :people))
             fmt      (partial ddl.i/format-name driver/*driver*)]
-        (is (= #{{:fk-column-name   (fmt "user_id")
-                  :dest-table       (select-keys people [:name :schema])
-                  :dest-column-name (fmt "id")}
-                 {:fk-column-name   (fmt "product_id")
-                  :dest-table       (select-keys products [:name :schema])
-                  :dest-column-name (fmt "id")}}
-               #_{:clj-kondo/ignore [:deprecated-var]}
-               (driver/describe-table-fks driver/*driver* (mt/db) orders)))))))
+        (is (= #{{:fk-table-schema (:schema orders)
+                  :fk-table-name   (:name orders)
+                  :fk-column-name  (fmt "user_id")
+                  :pk-table-schema (:schema people)
+                  :pk-table-name   (:name people)
+                  :pk-column-name  (fmt "id")}
+                 {:fk-table-schema (:schema orders)
+                  :fk-table-name   (:name orders)
+                  :fk-column-name  (fmt "product_id")
+                  :pk-table-schema (:schema products)
+                  :pk-table-name   (:name products)
+                  :pk-column-name  (fmt "id")}}
+               (into #{}
+                     (driver/describe-fks
+                      driver/*driver*
+                      (lib.metadata/database (mt/metadata-provider))
+                      {:schema-names (when (:schema orders)
+                                       #{(:schema orders)})
+                       :table-names #{(:name orders)}}))))))))
 
 (deftest ^:parallel describe-fks-test
-  (testing "`describe-fks` works for drivers that support `describe-fks`"
-    (mt/test-drivers (mt/normal-drivers-with-feature :metadata/key-constraints :describe-fks)
-      (let [fmt           (partial ddl.i/format-name driver/*driver*)
-            orders        (t2/select-one :model/Table (mt/id :orders))
-            products      (t2/select-one :model/Table (mt/id :products))
-            people        (t2/select-one :model/Table (mt/id :people))
-            entire-db-fks (driver/describe-fks driver/*driver* (mt/db))
-            schema-db-fks (driver/describe-fks driver/*driver* (mt/db)
+  (testing `driver/describe-fks
+    (mt/test-drivers (mt/normal-drivers-with-feature :metadata/key-constraints)
+      (let [db            (lib.metadata/database (mt/metadata-provider))
+            fmt           (partial ddl.i/format-name driver/*driver*)
+            orders        (t2/select-one :model/Table :id (mt/id :orders))
+            products      (t2/select-one :model/Table :id (mt/id :products))
+            people        (t2/select-one :model/Table :id (mt/id :people))
+            entire-db-fks (driver/describe-fks driver/*driver* (driver.u/ensure-lib-database db))
+            schema-db-fks (driver/describe-fks driver/*driver* (driver.u/ensure-lib-database db)
                                                :schema-names (when (:schema orders) [(:schema orders)]))
-            table-db-fks  (driver/describe-fks driver/*driver* (mt/db)
+            table-db-fks  (driver/describe-fks driver/*driver* (driver.u/ensure-lib-database db)
                                                :schema-names (when (:schema orders) [(:schema orders)])
                                                :table-names [(:name orders)])]
         (doseq [[description orders-fks]
@@ -351,19 +438,18 @@
 ;;; End tests for `describe-*` methods used in sync
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
-;; TODO: Uncomment when https://github.com/metabase/metabase/pull/60263 is merged
-#_(deftest data-editing-requires-describe-features-test
-    (testing "Drivers supporting :actions/data-editing must support relevant describe-X features"
-      (mt/test-drivers (mt/normal-drivers-with-feature :actions/data-editing)
-        (testing "describe-default-expr feature"
-          (is (driver/database-supports? driver/*driver* :describe-default-expr (mt/db))
-              (str driver/*driver* " must support :describe-default-expr to support :actions/data-editing")))
-        (testing "describe-is-generated feature"
-          (is (driver/database-supports? driver/*driver* :describe-is-generated (mt/db))
-              (str driver/*driver* " must support :describe-is-generated to support :actions/data-editing")))
-        (testing "describe-is-nullable feature"
-          (is (driver/database-supports? driver/*driver* :describe-is-nullable (mt/db))
-              (str driver/*driver* " must support :describe-is-nullable to support :actions/data-editing"))))))
+(deftest ^:parallel data-editing-requires-describe-features-test
+  (testing "Drivers supporting :actions/data-editing must support relevant describe-X features"
+    (mt/test-drivers (mt/normal-drivers-with-feature :actions/data-editing)
+      (testing "describe-default-expr feature"
+        (is (driver/database-supports? driver/*driver* :describe-default-expr (mt/db))
+            (str driver/*driver* " must support :describe-default-expr to support :actions/data-editing")))
+      (testing "describe-is-generated feature"
+        (is (driver/database-supports? driver/*driver* :describe-is-generated (mt/db))
+            (str driver/*driver* " must support :describe-is-generated to support :actions/data-editing")))
+      (testing "describe-is-nullable feature"
+        (is (driver/database-supports? driver/*driver* :describe-is-nullable (mt/db))
+            (str driver/*driver* " must support :describe-is-nullable to support :actions/data-editing"))))))
 
 (deftest query-driver-success-metrics-test
   (mt/test-drivers (mt/normal-drivers)
@@ -383,3 +469,69 @@
           (qp/process-query success-query)
           (is (= 3.0 (mt/metric-value system :metabase-query-processor/query {:driver driver/*driver* :status "success"})))
           (is (= 2.0 (mt/metric-value system :metabase-query-processor/query {:driver driver/*driver* :status "failure"}))))))))
+
+(deftest python-transform-drivers-multimethods-support
+  (mt/test-drivers (mt/normal-drivers-with-feature :transforms/python)
+    (let [driver driver/*driver*]
+      (is (get-method driver/create-table! driver))
+      (is (get-method driver/table-name-length-limit driver))
+      (is (get-method driver/drop-table! driver))
+      (is (let [should-be-supported-by-all #{:type/Number :type/Text :type/Date :type/DateTime :type/DateTimeWithTZ :type/Boolean}]
+            (and (get-method driver/type->database-type driver)
+                 (every? #(driver/type->database-type driver %) should-be-supported-by-all))))
+      (is (get-method driver/insert-from-source! [driver :jsonl-file])))))
+
+(driver/register! ::mock-no-deps-driver, :abstract? true)
+
+(defn- select-all-on-connection [conn table max-rows]
+  (driver/query-on-connection driver/*driver* conn [(str "SELECT * FROM " table) []] {:max-rows max-rows}))
+
+(deftest transform-testing-temp-table-lifecycle-test
+  (mt/test-drivers (mt/normal-drivers-with-feature :transforms/testing)
+    (let [table (driver/temp-table-name driver/*driver*)]
+      (driver/do-with-test-connection
+       driver/*driver*
+       (lib.metadata/database (mt/metadata-provider))
+       (fn [conn]
+         (driver/execute-on-connection! driver/*driver* conn
+                                        (driver/compile-create-temp-table
+                                         driver/*driver*
+                                         {:table table
+                                          :query {:query "SELECT id FROM (SELECT 1 AS id UNION ALL SELECT 2 AS id) AS t" :params []}}))
+         (testing "the temp table is readable on the connection that created it"
+           (is (= 2 (count (:rows (select-all-on-connection conn table 10))))))
+         (testing "max-rows caps the rows returned"
+           (is (= 1 (count (:rows (select-all-on-connection conn table 1))))))
+         (testing "the answer names its columns, each with the warehouse's own type"
+           ;; Engines differ on how they fold an unquoted identifier, so compare the name case-aside.
+           (let [columns (:columns (select-all-on-connection conn table 10))]
+             (is (= ["id"] (mapv (comp u/lower-case-en :name) columns)))
+             (is (every? (comp seq :database_type) columns) (pr-str columns))))
+         (testing "the columns are reported even when no row comes back"
+           (let [{:keys [rows columns]} (driver/query-on-connection
+                                         driver/*driver* conn
+                                         [(str "SELECT * FROM " table " WHERE 1 = 0") []] {:max-rows 1})]
+             (is (= [] rows))
+             (is (= ["id"] (mapv (comp u/lower-case-en :name) columns)))))
+         (driver/execute-on-connection! driver/*driver* conn (driver/compile-drop-temp-table driver/*driver* table))
+         (testing "dropping a temp table that no longer exists succeeds"
+           (is (some? (driver/execute-on-connection! driver/*driver* conn
+                                                     (driver/compile-drop-temp-table driver/*driver* table)))))
+         (testing "the dropped temp table is gone"
+           (is (thrown? Exception (select-all-on-connection conn table 10)))))))))
+
+(deftest ^:parallel deps-ignores-invalid-drivers-test
+  (is (= #{}
+         (driver/native-query-deps ::mock-no-deps-driver nil nil))))
+
+(driver/register! ::mock-deps-driver, :abstract? true)
+
+(defmethod driver/database-supports? [::mock-deps-driver :dependencies/native]
+  [_driver _feature _database]
+  true)
+
+(deftest ^:parallel deps-flags-when-supported-driver-is-not-covered-test
+  (is (thrown-with-msg?
+       clojure.lang.ExceptionInfo
+       #"Database that supports :dependencies/native does not provide an implementation of driver/native-query-deps"
+       (driver/native-query-deps ::mock-deps-driver nil nil))))

@@ -1,13 +1,11 @@
 import { t } from "ttag";
 
-import { hasAnySsoFeature } from "metabase/common/utils/plan";
-import { useSelector } from "metabase/lib/redux";
+import { UpsellCard } from "metabase/common/components/upsells/UpsellCard";
+import { UPGRADE_URL } from "metabase/common/components/upsells/constants";
 import { PLUGIN_ADMIN_SETTINGS } from "metabase/plugins";
-import { getSetting } from "metabase/selectors/settings";
+import { useSelector } from "metabase/redux";
+import { getSetting, hasAnySsoFeature } from "metabase/settings";
 import { Box, List } from "metabase/ui";
-
-import { UpsellCard } from "./components";
-import { UPGRADE_URL } from "./constants";
 
 export const UpsellSSO = ({ location }: { location: string }) => {
   const campaign = "sso";
@@ -40,7 +38,8 @@ export const UpsellSSO = ({ location }: { location: string }) => {
         {t`Metabase Pro and Enterprise plans include:`}
         <List size="sm">
           <List.Item>{t`SSO with SAML and JWT`}</List.Item>
-          <List.Item>{t`Metabase group sync with SAML, JWT, and LDAP`}</List.Item>
+          <List.Item>{t`Metabase group sync with SAML and JWT`}</List.Item>
+          <List.Item>{t`Metabase user attribute sync with LDAP`}</List.Item>
           <List.Item>{t`User provisioning with SCIM`}</List.Item>
         </List>
       </Box>

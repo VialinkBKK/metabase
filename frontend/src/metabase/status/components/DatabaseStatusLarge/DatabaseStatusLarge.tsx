@@ -4,22 +4,22 @@ import {
   isSyncAborted,
   isSyncCompleted,
   isSyncInProgress,
-} from "metabase/lib/syncing";
-import type Database from "metabase-lib/v1/metadata/Database";
+} from "metabase/utils/syncing";
+import type { Database } from "metabase-types/api";
 
-import StatusLarge from "../StatusLarge";
+import { StatusLarge } from "../StatusLarge";
 
-export interface DatabaseStatusLargeProps {
+export type DatabaseStatusLargeProps = {
   databases: Database[];
   isActive?: boolean;
   onCollapse?: () => void;
-}
+};
 
-const DatabaseStatusLarge = ({
+export const DatabaseStatusLarge = ({
   databases,
   onCollapse,
   isActive,
-}: DatabaseStatusLargeProps): JSX.Element => {
+}: DatabaseStatusLargeProps) => {
   const status = {
     title: getTitle(databases),
     items: databases.map((database) => ({
@@ -56,13 +56,12 @@ const getDescription = (database: Database): string => {
   const isError = isSyncAborted(database);
 
   if (isError) {
-    return t`Sync failed`;
+    return database.initial_sync_error
+      ? t`Sync failed: ${database.initial_sync_error}`
+      : t`Sync failed`;
   } else if (isDone) {
     return t`Syncing completed`;
   } else {
     return t`Syncing tables…`;
   }
 };
-
-// eslint-disable-next-line import/no-default-export -- deprecated usage
-export default DatabaseStatusLarge;

@@ -9,6 +9,8 @@
    [metabase.permissions.core :as perms]
    [metabase.pulse.models.pulse-channel-test :as pulse-channel-test]
    [metabase.queries.models.parameter-card :as parameter-card]
+   [metabase.stale-test :as stale-test]
+   [metabase.staleness.core :as staleness]
    [metabase.test :as mt]
    [metabase.test.data.users :as test.users]
    [metabase.test.util :as tu]
@@ -23,26 +25,28 @@
     (tu/with-temporary-setting-values [enable-public-sharing true]
       (mt/with-temp [:model/Dashboard dashboard {:public_uuid (str (random-uuid))}]
         (is (=? u/uuid-regex
-                (:public_uuid dashboard)))))
+                (:public_uuid dashboard)))))))
 
+(deftest public-sharing-test-2
+  (testing "test that a Dashboard's :public_uuid comes back if public sharing is enabled..."
     (testing "...but if public sharing is *disabled* it should come back as `nil`"
       (tu/with-temporary-setting-values [enable-public-sharing false]
         (mt/with-temp [:model/Dashboard dashboard {:public_uuid (str (random-uuid))}]
           (is (= nil
                  (:public_uuid dashboard))))))))
 
-(def default-parameter
+(def ^:private default-parameter
   {:id   "_CATEGORY_NAME_"
-   :type "category"
+   :type :category
    :name "Category Name"
    :slug "category_name"})
 
-(deftest migrate-parameters-with-linked-filters-and-values-source-type-test
+(deftest ^:parallel migrate-parameters-with-linked-filters-and-values-source-type-test
   (testing "test that a Dashboard's :parameters filterParameters are cleared if the :values_source_type is not nil"
     (doseq [[values_source_type
-             keep-filtering-parameters?] {"card"        false
-                                          "static-list" false
-                                          nil           true}]
+             keep-filtering-parameters?] {:card        false
+                                          :static-list false
+                                          nil          true}]
       (testing (format "\nvalues_source_type=%s" values_source_type)
         (mt/with-temp [:model/Dashboard dashboard {:parameters [(merge
                                                                  default-parameter
@@ -54,7 +58,7 @@
                      (:filteringParameters parameter)))
               (is (not (contains? parameter :filteringParameters))))))))))
 
-(deftest migrate-parameters-with-linked-filters-and-values-query-type-test
+(deftest ^:parallel migrate-parameters-with-linked-filters-and-values-query-type-test
   (testing "test that a Dashboard's :parameters filterParameters are cleared if the :values_query_type is 'none'"
     (doseq [[values_query_type
              keep-filtering-parameters?] {"none" false
@@ -70,7 +74,7 @@
                      (:filteringParameters parameter)))
               (is (not (contains? parameter :filteringParameters))))))))))
 
-(deftest migrate-parameters-empty-name-test
+(deftest ^:parallel migrate-parameters-empty-name-test
   (testing "test that a Dashboard's :parameters is selected with a non-nil name and slug"
     (doseq [[name slug] [["" ""] ["" "slug"] ["name" ""]]]
       (mt/with-temp [:model/Dashboard dashboard {:parameters [(merge
@@ -81,25 +85,107 @@
                  :slug "unnamed"}
                 (first (:parameters dashboard))))))))
 
-(deftest archive-dashboard-delete-pulse-test
+(defn- do-with-dashboard-subscription!
+  "Call `f` with the ids of a Dashboard in a Collection and a subscription to it, with one enabled PulseChannel and a
+  trigger."
+  [f]
   (pulse-channel-test/with-send-pulse-setup!
-    (mt/with-temp [:model/Card          {card-id :id}     {}
-                   :model/Dashboard     {dash-id :id}     {}
-                   :model/DashboardCard {dc-id :id}       {:dashboard_id dash-id
-                                                           :card_id      card-id}
-                   :model/Pulse        {pulse-id :id}    {:dashboard_id dash-id}
-                   :model/PulseChannel _        {:pulse_id pulse-id}
-                   :model/PulseCard    _         {:pulse_id pulse-id
-                                                  :card_id  card-id
-                                                  :dashboard_card_id dc-id}]
+    (mt/with-temp [:model/Collection    {coll-id :id}  {}
+                   :model/Card          {card-id :id}  {:collection_id coll-id}
+                   :model/Dashboard     {dash-id :id}  {:collection_id coll-id}
+                   :model/DashboardCard {dc-id :id}    {:dashboard_id dash-id
+                                                        :card_id      card-id}
+                   :model/Pulse         {pulse-id :id} {:dashboard_id  dash-id
+                                                        :collection_id coll-id}
+                   :model/PulseChannel  {pc-id :id}    {:pulse_id pulse-id}
+                   :model/PulseCard     _              {:pulse_id          pulse-id
+                                                        :card_id           card-id
+                                                        :dashboard_card_id dc-id}]
       (testing "sanity check that we have a trigger"
         (is (= 1 (count (pulse-channel-test/send-pulse-triggers pulse-id)))))
-      (t2/update! :model/Dashboard dash-id {:archived true})
-      (testing "archiving a Dashboard should delete its Pulse and SendPulse triggers"
-        (is (nil? (t2/select-one :model/Pulse pulse-id)))
-        (is (= 0 (count (pulse-channel-test/send-pulse-triggers pulse-id))))))))
+      (f {:coll-id coll-id :dash-id dash-id :pulse-id pulse-id :pc-id pc-id}))))
 
-(deftest parameter-card-test
+(defn- trigger-pc-ids [pulse-id]
+  (into #{} (mapcat #(get-in % [:data "channel-ids"])) (pulse-channel-test/send-pulse-triggers pulse-id)))
+
+(deftest archive-dashboard-keeps-subscriptions-test
+  (do-with-dashboard-subscription!
+   (fn [{:keys [dash-id pulse-id pc-id]}]
+     (let [pc-ids-before (trigger-pc-ids pulse-id)]
+       (t2/update! :model/Dashboard :id dash-id {:archived true})
+       (testing "archiving a Dashboard keeps its Pulse, PulseChannel, PulseCard and SendPulse trigger"
+         (is (=? {:archived false} (t2/select-one :model/Pulse :id pulse-id)))
+         (is (=? {:enabled true} (t2/select-one :model/PulseChannel :id pc-id)))
+         (is (= 1 (t2/count :model/PulseCard :pulse_id pulse-id)))
+         (is (= pc-ids-before (trigger-pc-ids pulse-id))))
+       (t2/update! :model/Dashboard :id dash-id {:archived false})
+       (testing "restoring the Dashboard leaves the subscription as it was"
+         (is (=? {:archived false} (t2/select-one :model/Pulse :id pulse-id)))
+         (is (=? {:enabled true} (t2/select-one :model/PulseChannel :id pc-id)))
+         (is (= 1 (t2/count :model/PulseCard :pulse_id pulse-id)))
+         (is (= pc-ids-before (trigger-pc-ids pulse-id))))))))
+
+(deftest archive-dashboard-keeps-deleted-subscription-deleted-test
+  (do-with-dashboard-subscription!
+   (fn [{:keys [dash-id pulse-id]}]
+     (testing "a subscription the user deleted before the Dashboard was trashed stays deleted after restore"
+       (t2/update! :model/Pulse :id pulse-id {:archived true})
+       (t2/update! :model/Dashboard :id dash-id {:archived true})
+       (t2/update! :model/Dashboard :id dash-id {:archived false})
+       (is (=? {:archived true} (t2/select-one :model/Pulse :id pulse-id)))
+       (is (= #{} (pulse-channel-test/send-pulse-triggers pulse-id)))))))
+
+(deftest archive-collection-keeps-dashboard-subscriptions-test
+  (do-with-dashboard-subscription!
+   (fn [{:keys [coll-id dash-id pulse-id pc-id]}]
+     (let [pc-ids-before (trigger-pc-ids pulse-id)]
+       (mt/with-current-user (mt/user->id :crowberto)
+         (collection/archive-or-unarchive-collection! (t2/select-one :model/Collection :id coll-id) {:archived true})
+         (testing "archiving the parent Collection leaves the subscription and its trigger as they were"
+           ;; the trashed Dashboard is what stops the trigger from sending
+           (is (=? {:archived true} (t2/select-one :model/Dashboard :id dash-id)))
+           (is (=? {:archived false} (t2/select-one :model/Pulse :id pulse-id)))
+           (is (=? {:enabled true} (t2/select-one :model/PulseChannel :id pc-id)))
+           (is (= pc-ids-before (trigger-pc-ids pulse-id))))
+         (collection/archive-or-unarchive-collection! (t2/select-one :model/Collection :id coll-id) {:archived false})
+         (testing "restoring the Collection leaves the subscription and its trigger as they were"
+           (is (=? {:archived false} (t2/select-one :model/Pulse :id pulse-id)))
+           (is (=? {:enabled true} (t2/select-one :model/PulseChannel :id pc-id)))
+           (is (= pc-ids-before (trigger-pc-ids pulse-id)))))))))
+
+(deftest archive-collection-keeps-deleted-subscription-deleted-test
+  (do-with-dashboard-subscription!
+   (fn [{:keys [coll-id pulse-id pc-id]}]
+     (testing "a subscription the user deleted before its Collection was trashed stays deleted after restore"
+       (t2/update! :model/Pulse :id pulse-id {:archived true})
+       (mt/with-current-user (mt/user->id :crowberto)
+         (collection/archive-or-unarchive-collection! (t2/select-one :model/Collection :id coll-id) {:archived true})
+         (collection/archive-or-unarchive-collection! (t2/select-one :model/Collection :id coll-id) {:archived false}))
+       (is (=? {:archived true} (t2/select-one :model/Pulse :id pulse-id)))
+       (is (=? {:enabled false} (t2/select-one :model/PulseChannel :id pc-id)))
+       (is (= #{} (pulse-channel-test/send-pulse-triggers pulse-id)))))))
+
+(deftest delete-dashboard-deletes-subscriptions-test
+  (doseq [archived? [true false]]
+    (testing (format "hard deleting a Dashboard (archived? %s) deletes its Pulse and SendPulse triggers" archived?)
+      (do-with-dashboard-subscription!
+       (fn [{:keys [dash-id pulse-id]}]
+         (when archived?
+           (t2/update! :model/Dashboard :id dash-id {:archived true}))
+         (t2/delete! :model/Dashboard :id dash-id)
+         (is (nil? (t2/select-one :model/Pulse :id pulse-id)))
+         (is (= #{} (pulse-channel-test/send-pulse-triggers pulse-id))))))))
+
+(deftest delete-collection-deletes-trashed-dashboard-subscriptions-test
+  (testing "hard deleting a Collection holding a directly trashed Dashboard deletes its Pulse and SendPulse triggers"
+    (do-with-dashboard-subscription!
+     (fn [{:keys [coll-id dash-id pulse-id]}]
+       (t2/update! :model/Dashboard :id dash-id {:archived true})
+       (t2/delete! :model/Collection :id coll-id)
+       (is (nil? (t2/select-one :model/Pulse :id pulse-id)))
+       (is (= #{} (pulse-channel-test/send-pulse-triggers pulse-id)))))))
+
+(deftest ^:parallel parameter-card-test
   (testing "A new dashboard creates a new ParameterCard"
     (mt/with-temp [:model/Card      {card-id :id}      {}
                    :model/Dashboard {dashboard-id :id} {:parameters [(merge default-parameter
@@ -109,29 +195,31 @@
                :parameterized_object_type :dashboard
                :parameterized_object_id   dashboard-id
                :parameter_id              "_CATEGORY_NAME_"}
-              (t2/select-one 'ParameterCard :card_id card-id)))))
+              (t2/select-one :model/ParameterCard :card_id card-id))))))
 
+(deftest parameter-card-test-2
   (testing "Adding a card_id creates a new ParameterCard"
     (mt/with-temp [:model/Card      {card-id :id}      {}
                    :model/Dashboard {dashboard-id :id} {:parameters [default-parameter]}]
-      (is (nil? (t2/select-one 'ParameterCard :card_id card-id)))
-      (t2/update! :model/Dashboard dashboard-id {:parameters [(merge default-parameter
-                                                                     {:values_source_type    "card"
-                                                                      :values_source_config {:card_id card-id}})]})
+      (is (nil? (t2/select-one :model/ParameterCard :card_id card-id)))
+      (t2/update! :model/Dashboard :id dashboard-id {:parameters [(merge default-parameter
+                                                                         {:values_source_type    "card"
+                                                                          :values_source_config {:card_id card-id}})]})
       (is (=? {:card_id                   card-id
                :parameterized_object_type :dashboard
                :parameterized_object_id   dashboard-id
                :parameter_id              "_CATEGORY_NAME_"}
-              (t2/select-one 'ParameterCard :card_id card-id)))))
+              (t2/select-one :model/ParameterCard :card_id card-id))))))
 
+(deftest parameter-card-test-3
   (testing "Removing a card_id deletes old ParameterCards"
     (mt/with-temp [:model/Card      {card-id :id}      {}
                    :model/Dashboard {dashboard-id :id} {:parameters [(merge default-parameter
                                                                             {:values_source_type    "card"
                                                                              :values_source_config {:card_id card-id}})]}]
-        ;; same setup as earlier test, we know the ParameterCard exists right now
+      ;; same setup as earlier test, we know the ParameterCard exists right now
       (t2/delete! :model/Dashboard :id dashboard-id)
-      (is (nil? (t2/select-one 'ParameterCard :card_id card-id))))))
+      (is (nil? (t2/select-one :model/ParameterCard :card_id card-id))))))
 
 (deftest do-not-update-parameter-card-if-it-doesn't-change-test
   (testing "Do not update ParameterCard if updating a Dashboard doesn't change the parameters"
@@ -143,7 +231,7 @@
                                                                       :values_source_type    "card"
                                                                       :values_source_config {:card_id source-card-id}}]}]
       (mt/with-dynamic-fn-redefs [parameter-card/upsert-or-delete-from-parameters! (fn [& _] (throw (ex-info "Should not be called" {})))]
-        (t2/update! :model/Dashboard dashboard-id {:name "new name"})))))
+        (t2/update! :model/Dashboard :id dashboard-id {:name "new name"})))))
 
 ;;; +----------------------------------------------------------------------------------------------------------------+
 ;;; |                                         Collections Permissions Tests                                          |
@@ -176,15 +264,13 @@
       (binding [api/*current-user-permissions-set* (atom #{(perms/collection-read-path collection)})]
         (is (true?
              (mi/can-read? dash)))))
-
     (testing (str "Check that if a Dashboard is in a Collection, someone who would otherwise be able to see it under "
                   "the old artifact-permissions regime will *NOT* be able to see it if they don't have permissions for "
-                  "that Collection"))
-    (mt/with-full-data-perms-for-all-users!
-      (binding [api/*current-user-permissions-set* (atom #{})]
-        (is (= false
-               (mi/can-read? dash)))))
-
+                  "that Collection")
+      (mt/with-full-data-perms-for-all-users!
+        (binding [api/*current-user-permissions-set* (atom #{})]
+          (is (= false
+                 (mi/can-read? dash))))))
     (testing "Do we have *write* Permissions for a Dashboard if we have *write* Permissions for the Collection its in?"
       (binding [api/*current-user-permissions-set* (atom #{(perms/collection-readwrite-path collection)})]
         (mi/can-write? dash)))))
@@ -207,31 +293,33 @@
         (try
           (is (thrown-with-msg?
                clojure.lang.ExceptionInfo
-               #"A Dashboard can only go in Collections in the \"default\" or :analytics namespace."
+               #"A Dashboard can only go in Collections in the \"default\"(?: or :[a-z\-]+)+ namespace."
                (t2/insert! :model/Dashboard (assoc (mt/with-temp-defaults :model/Dashboard) :collection_id collection-id, :name dashboard-name))))
           (finally
             (t2/delete! :model/Dashboard :name dashboard-name)))))
-
     (testing "Shouldn't be able to move a Dashboard to a non-normal Collection"
       (mt/with-temp [:model/Dashboard {card-id :id}]
         (is (thrown-with-msg?
              clojure.lang.ExceptionInfo
-             #"A Dashboard can only go in Collections in the \"default\" or :analytics namespace."
-             (t2/update! :model/Dashboard card-id {:collection_id collection-id})))))))
+             #"A Dashboard can only go in Collections in the \"default\"(?: or :[a-z\-]+)+ namespace."
+             (t2/update! :model/Dashboard :id card-id {:collection_id collection-id})))))))
 
-(deftest validate-parameters-test
+(deftest ^:parallel validate-parameters-test
   (testing "Should validate Dashboard :parameters when"
     (testing "creating"
       (is (thrown-with-msg?
            clojure.lang.ExceptionInfo
            #":parameters must be a sequence of maps with :id and :type keys"
-           (mt/with-temp [:model/Dashboard _ {:parameters {:a :b}}]))))
+           (mt/with-temp [:model/Dashboard _ {:parameters {:a :b}}]))))))
+
+(deftest validate-parameters-test-2
+  (testing "Should validate Dashboard :parameters when"
     (testing "updating"
       (mt/with-temp [:model/Dashboard {:keys [id]} {:parameters []}]
         (is (thrown-with-msg?
              clojure.lang.ExceptionInfo
              #":parameters must be a sequence of maps with :id and :type keys"
-             (t2/update! :model/Dashboard id {:parameters [{:id 100}]})))))))
+             (t2/update! :model/Dashboard :id id {:parameters [{:id 100}]})))))))
 
 (deftest normalize-parameters-test
   (testing ":parameters should get normalized when coming out of the DB"
@@ -253,12 +341,12 @@
                    :id     "_CATEGORY_NAME_"
                    :type   :category
                    :target expected
-                   :values_query_type "list",
-                   :values_source_type "card",
+                   :values_query_type :list
+                   :values_source_type :card
                    :values_source_config {:card_id card-id, :value_field [:field 2 nil]}}]
                  (t2/select-one-fn :parameters :model/Dashboard :id dashboard-id))))))))
 
-(deftest should-add-default-values-source-test
+(deftest ^:parallel should-add-default-values-source-test
   (testing "shoudld add default if not exists"
     (mt/with-temp [:model/Dashboard {dashboard-id :id} {:parameters [{:name   "Category Name"
                                                                       :slug   "category_name"
@@ -268,8 +356,9 @@
                 :slug                 "category_name"
                 :id                   "_CATEGORY_NAME_"
                 :type                 :category}]
-              (t2/select-one-fn :parameters :model/Dashboard :id dashboard-id)))))
+              (t2/select-one-fn :parameters :model/Dashboard :id dashboard-id))))))
 
+(deftest ^:parallel should-add-default-values-source-test-2
   (testing "shoudld not override if existsed "
     (mt/with-temp [:model/Card      {card-id :id} {}
                    :model/Dashboard {dashboard-id :id} {:parameters [{:name   "Category Name"
@@ -284,21 +373,12 @@
                 :slug                 "category_name"
                 :id                   "_CATEGORY_NAME_"
                 :type                 :category
-                :values_query_type    "list",
-                :values_source_type   "card",
+                :values_query_type    :list
+                :values_source_type   :card
                 :values_source_config {:card_id card-id, :value_field [:field 2 nil]}}]
               (t2/select-one-fn :parameters :model/Dashboard :id dashboard-id))))))
 
-(deftest identity-hash-test
-  (testing "Dashboard hashes are composed of the name and parent collection's hash"
-    (let [now #t "2022-09-01T12:34:56Z"]
-      (mt/with-temp [:model/Collection c1   {:name "top level" :location "/" :created_at now}
-                     :model/Dashboard  dash {:name "my dashboard" :collection_id (:id c1) :created_at now}]
-        (is (= "8cbf93b7"
-               (serdes/raw-hash ["my dashboard" (serdes/identity-hash c1) (:created_at dash)])
-               (serdes/identity-hash dash)))))))
-
-(deftest descendants-test
+(deftest ^:parallel descendants-test
   (testing "dashboard which have parameter's source is another card"
     (mt/with-temp
       [:model/Field     field     {:name "A field"}
@@ -310,8 +390,9 @@
                                                  :values_source_config {:card_id     (:id card)
                                                                         :value_field [:field (:id field) nil]}}]}]
       (is (= {["Card" (:id card)] {"Dashboard" (:id dashboard)}}
-             (serdes/descendants "Dashboard" (:id dashboard))))))
+             (serdes/descendants "Dashboard" (:id dashboard) {}))))))
 
+(deftest descendants-test-2
   (testing "dashboard which has a dashcard with an action"
     (mt/with-actions [{:keys [action-id]} {}]
       (mt/with-temp
@@ -321,8 +402,9 @@
                                          :parameter_mappings []}]
         (is (= {["Action" action-id] {"Dashboard"     (:id dashboard)
                                       "DashboardCard" (:id dc)}}
-               (serdes/descendants "Dashboard" (:id dashboard)))))))
+               (serdes/descendants "Dashboard" (:id dashboard) {})))))))
 
+(deftest ^:parallel descendants-test-3
   (testing "dashboard in which its dashcards has parameter_mappings to a card"
     (mt/with-temp
       [:model/Card          card1     {:name "Card attached to dashcard"}
@@ -340,8 +422,9 @@
                                     "DashboardCard" (:id dc)}
               ["Card" (:id card2)] {"Dashboard"     (:id dashboard)
                                     "DashboardCard" (:id dc)}}
-             (serdes/descendants "Dashboard" (:id dashboard))))))
+             (serdes/descendants "Dashboard" (:id dashboard) {}))))))
 
+(deftest ^:parallel descendants-test-4
   (testing "dashboard in which its dashcards have series"
     (mt/with-temp
       [:model/Card                card1     {:name "Card attached to dashcard"}
@@ -358,7 +441,7 @@
                         [["Card" (:id card)] (cond-> {"Dashboard"           (:id dashboard)
                                                       "DashboardCard"       (:id dashcard)}
                                                series (assoc "DashboardCardSeries" (:id series)))]))
-             (serdes/descendants "Dashboard" (:id dashboard)))))))
+             (serdes/descendants "Dashboard" (:id dashboard) {}))))))
 
 (deftest ^:parallel hydrate-tabs-test
   (mt/with-temp
@@ -408,6 +491,32 @@
                                                            [:card [:map
                                                                    [:id [:= (:id card)]]]]]]]])}}
             (-> dash (t2/hydrate :resolved-params) :resolved-params)))))
+
+(deftest find-stale-query-test
+  (testing "the Dashboard `find-stale-query` method selects stale dashboards and applies the model's own exclusions"
+    (mt/with-temp [:model/Collection {col-id :id} {}
+                   :model/Dashboard {stale-id :id}    (stale-test/stale-dashboard {:name "stale" :collection_id col-id})
+                   :model/Dashboard {fresh-id :id}    {:name "fresh" :collection_id col-id
+                                                       :last_viewed_at (stale-test/datetime-months-ago 1)}
+                   :model/Dashboard {archived-id :id} (stale-test/stale-dashboard {:name "archived" :collection_id col-id
+                                                                                   :archived true})]
+      (let [stale-ids (fn [] (set (map :id (t2/query (staleness/find-stale-query
+                                                      :model/Dashboard
+                                                      {:collection-ids #{col-id}
+                                                       :cutoff-date    (stale-test/date-months-ago 6)})))))]
+        (testing "a stale, unarchived dashboard is returned; recent and archived dashboards are not"
+          (let [ids (stale-ids)]
+            (is (contains? ids stale-id))
+            (is (not (contains? ids fresh-id)))
+            (is (not (contains? ids archived-id)))))
+        (testing "a publicly shared dashboard is excluded only when public sharing is enabled"
+          (mt/with-temp [:model/Dashboard {public-id :id} (stale-test/stale-dashboard
+                                                           {:name "public" :collection_id col-id
+                                                            :public_uuid (str (random-uuid))})]
+            (tu/with-temporary-setting-values [enable-public-sharing false]
+              (is (contains? (stale-ids) public-id)))
+            (tu/with-temporary-setting-values [enable-public-sharing true]
+              (is (not (contains? (stale-ids) public-id))))))))))
 
 (deftest ^:parallel hydrate-resolved-params-model-test
   (mt/with-temp

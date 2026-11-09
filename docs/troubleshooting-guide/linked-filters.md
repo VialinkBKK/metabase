@@ -10,11 +10,11 @@ You have created a [linked filter][linked-filter-gloss] so that (for example) if
 - your linked filter seems to have no effect, or
 - your linked filter widget does not display a dropdown of filtered values.
 
-If you are having problems with a regular [filter widget][filter-widget-gloss], please see [this guide](./filters.md). In order to fix problems with linked filters, you need a clear understanding of how they work:
+If you are having problems with a regular [filter widget][filter-widget-gloss], please see [this guide](./filters.md). To fix problems with linked filters, you need a clear understanding of how they work:
 
 ## Does a connected dashboard card use a SQL variable?
 
-**Root cause**: Native/SQL questions must have a [field filter](../questions/native-editor/field-filters.md) variable in order to be linked. Regular SQL variables won't work.
+**Root cause**: Native/SQL questions must have a [field filter](../questions/native-editor/field-filters.md) variable to be linked. Regular SQL variables won't work.
 
 **Steps to take**:
 
@@ -24,7 +24,7 @@ See [Limitations of linking filters](../dashboards/linked-filters.md#limitations
 
 ## Do you understand the directionality of linked filters?
 
-**Root cause:** Linked filters are one of the more complex features of Metabase, and many problems stems from misunderstanding their operation.
+**Root cause:** Linked filters are one of the more complex features of Metabase, and many problems stem from misunderstanding their operation.
 
 **Steps to take:** Check that you understand the points below, and that your linked filter is set up with them in mind.
 
@@ -42,7 +42,7 @@ See [Limitations of linking filters](../dashboards/linked-filters.md#limitations
 
 1. Remove the existing linkage and create a new one in the opposite direction.
 
-## Do some rows actually satisfy the full filter condition?
+## Do some rows satisfy the full filter condition?
 
 **Root cause:** There aren't any rows that satisfy all the conditions in a linked filter. Continuing with the city and state example, if you manually enter the name of a city that isn't in the selected state, no record will satisfy both conditions.
 
@@ -70,5 +70,5 @@ See [Limitations of linking filters](../dashboards/linked-filters.md#limitations
 [filter-widget-gloss]: https://www.metabase.com/glossary/filter-widget
 [foreign-key-gloss]: https://www.metabase.com/glossary/foreign-key
 [join-types]: https://www.metabase.com/learn/sql/working-with-sql/sql-join-types
-[learn-linking]: https://www.metabase.com/learn/metabase-basics/querying-and-dashboards/dashboards/linking-filters.html
+[learn-linking]: https://www.metabase.com/learn/metabase-basics/querying-and-dashboards/dashboards/linking-filters
 [linked-filter-gloss]: https://www.metabase.com/glossary/linked-filter

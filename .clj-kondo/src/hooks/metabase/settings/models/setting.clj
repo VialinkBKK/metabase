@@ -4,9 +4,9 @@
    [hooks.common :as common]))
 
 (defn lint-defsetting-namespace [node context]
-  (when-not (re-matches #"^metabase(?:-enterprise)?\.[^\.]+\.settings$" (name (:ns context)))
+  (when-not (re-matches #"^metabase(?:-enterprise)?\.([^\.]+\.)+settings$" (name (:ns context)))
     (hooks/reg-finding! (assoc (meta node)
-                               :message "All defsettings should live in metabase[-enterprise].<module>.settings namespaces"
+                               :message "All defsettings should live in a namespace ending in .settings under metabase[-enterprise]"
                                :type :metabase/defsetting-namespace))))
 
 ;;; TODO -- move this into a Kondo config file in `.clj-kondo/config/`
@@ -55,7 +55,6 @@
      help-link-custom-destination
      instance-creation
      is-hosted?
-     is-metabot-enabled
      jdbc-data-warehouse-max-connection-pool-size
      jdbc-data-warehouse-unreturned-connection-timeout-seconds
      jwt-attribute-email
@@ -96,8 +95,9 @@
      metabot-feedback-url
      metabot-get-prompt-templates-url
      metabot-prompt-generator-token-limit
+     metaplow-tracking-enabled
+     metaplow-url
      multi-setting-read-only
-     notebook-native-preview-shown
      notebook-native-preview-sidebar-width
      notification-link-base-url
      num-metabot-choices
@@ -119,10 +119,10 @@
      reset-token-ttl-hours
      retired-setting
      retry-initial-interval
-     retry-max-attempts
+     retry-max-retries
      retry-max-interval-millis
      retry-multiplier
-     retry-randomization-factor
+     retry-jitter-factor
      saml-application-name
      saml-attribute-email
      saml-attribute-firstname
@@ -204,8 +204,7 @@
                          (hooks/string-node "Docstring.")
                          (hooks/vector-node [(hooks/token-node '_value-or-nil)]))
                         hooks/list-node
-                        (with-meta (meta node))
-                        common/add-lsp-ignore-unused-public-var-metadata)]
+                        (with-meta (meta node)))]
     (-> (hooks/list-node
          (list
           (hooks/token-node 'let)
@@ -286,6 +285,7 @@
     (update context :node update-node)))
 
 (comment
+  (require '[clojure.pprint])
   (defn- defsetting* [form]
     (hooks/sexpr
      (:node
@@ -293,7 +293,6 @@
         {:node
          (hooks/parse-string
           (with-out-str
-            #_{:clj-kondo/ignore [:unresolved-namespace]}
             (clojure.pprint/pprint
              form)))}))))
 

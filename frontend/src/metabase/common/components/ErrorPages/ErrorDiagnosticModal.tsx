@@ -2,17 +2,19 @@ import { useEffect, useState } from "react";
 import { c, t } from "ttag";
 import _ from "underscore";
 
-import ErrorBoundary from "metabase/ErrorBoundary";
 import { useSendBugReportMutation } from "metabase/api/bug-report";
-import { useSetting } from "metabase/common/hooks";
+import ErrorBoundary from "metabase/common/components/ErrorBoundary";
+import { MetabotLogo } from "metabase/common/components/MetabotLogo";
 import { useToggle } from "metabase/common/hooks/use-toggle";
-import { useDispatch, useSelector } from "metabase/lib/redux";
+import { useDispatch, useSelector } from "metabase/redux";
 import { closeDiagnostics } from "metabase/redux/app";
 import { addUndo } from "metabase/redux/undo";
 import { getIsErrorDiagnosticModalOpen } from "metabase/selectors/app";
-import { getIsEmbeddingIframe } from "metabase/selectors/embed";
 import { getApplicationName } from "metabase/selectors/whitelabel";
-import { Button, Flex, Icon, Loader, Modal, Stack, Text } from "metabase/ui";
+import { useSetting } from "metabase/settings";
+import { Button, Icon, Loader, Modal, Stack, Text } from "metabase/ui";
+import { downloadObjectAsJson } from "metabase/utils/download";
+import { isWithinIframe } from "metabase/utils/iframe";
 
 import { BugReportModal } from "./BugReportModal";
 import { DownloadDiagnosticModal } from "./DownloadDiagnosticModal";
@@ -22,7 +24,7 @@ import {
 } from "./analytics";
 import type { ErrorPayload } from "./types";
 import { useErrorInfo } from "./use-error-info";
-import { downloadObjectAsJson, hasQueryData } from "./utils";
+import { hasQueryData } from "./utils";
 
 interface ErrorDiagnosticModalProps {
   errorInfo?: ErrorPayload | null;
@@ -45,8 +47,8 @@ export const ErrorDiagnosticModal = ({
   if (loading || !errorInfo) {
     return (
       <Modal opened onClose={onClose}>
-        <Stack align="center" justify="center" mb="lg">
-          <Text w="bold" color="text-medium" mb="sm">
+        <Stack align="center" justify="center" mb="xl">
+          <Text fw="bold" color="text-secondary" mb="sm">
             {c(
               "loading message indicating that we are gathering debugging information to aid in providing technical support",
             ).t`Gathering diagnostic information...`}
@@ -86,7 +88,8 @@ export const ErrorDiagnosticModal = ({
 
   const handleSlackSubmit = async (values: Record<string, any>) => {
     setIsSlackSending(true);
-    const { description, ...diagnosticSelections } = values;
+    // attribution is the backend's job; the form only says whether the report should name the reporter
+    const { description, reporter, ...diagnosticSelections } = values;
 
     const selectedKeys = Object.keys(diagnosticSelections).filter(
       (key) => diagnosticSelections[key],
@@ -94,6 +97,7 @@ export const ErrorDiagnosticModal = ({
     const selectedInfo = {
       ..._.pick(errorInfo, ...selectedKeys),
       description,
+      reporter: Boolean(reporter),
     };
 
     try {
@@ -108,8 +112,7 @@ export const ErrorDiagnosticModal = ({
         dispatch(
           addUndo({
             message: t`Failed to send diagnostic information to Slack`,
-            icon: "warning",
-            variant: "error",
+            variant: "negative",
           }),
         );
       }
@@ -118,8 +121,7 @@ export const ErrorDiagnosticModal = ({
       dispatch(
         addUndo({
           message: t`Error sending diagnostic information to Slack`,
-          icon: "warning",
-          variant: "error",
+          variant: "negative",
         }),
       );
     } finally {
@@ -129,23 +131,28 @@ export const ErrorDiagnosticModal = ({
 
   if (isSubmissionComplete) {
     return (
-      <Modal opened onClose={onClose} size={550}>
-        <Stack gap="sm" align="center" py="xl">
-          <img
-            src="app/assets/img/metabot-bug-report.svg"
+      <Modal
+        opened
+        onClose={onClose}
+        size={550}
+        layout="centered"
+        illustration={
+          <MetabotLogo
+            variant="bug"
             alt={c(
               "Alt text for image shown on successful bug report submission",
             ).t`Bug report submitted`}
-            style={{ width: 100, height: 100 }}
+            style={{ height: "100px", width: "100px" }}
           />
-          <Text ta="center" size="lg" fw="bold">
-            {t`Thank you for your feedback!`}
-          </Text>
-          <Text ta="center" color="text-medium">
-            {t`Bug report submitted successfully.`}
-          </Text>
-          <Button mt="xl" onClick={onClose}>{t`Close`}</Button>
-        </Stack>
+        }
+        title={t`Thank you for your feedback!`}
+      >
+        <Text c="text-secondary">{t`Bug report submitted successfully.`}</Text>
+        <Modal.Footer>
+          <Button variant="filled" onClick={onClose}>
+            {t`Close`}
+          </Button>
+        </Modal.Footer>
       </Modal>
     );
   }
@@ -176,13 +183,13 @@ export const ErrorDiagnosticModal = ({
 export const ErrorDiagnosticModalTrigger = () => {
   const [isModalOpen, setModalOpen] = useState(false);
 
-  if (getIsEmbeddingIframe()) {
+  if (isWithinIframe()) {
     return null;
   }
 
   return (
     <ErrorBoundary>
-      <Stack justify="center" my="lg">
+      <Stack justify="center" my="xl">
         <Button
           leftSection={<Icon name="download" />}
           onClick={() => setModalOpen(true)}
@@ -265,17 +272,19 @@ export const ErrorExplanationModal = ({
       opened={isModalOpen}
       onClose={onClose}
     >
-      <Text my="md">
-        {t`We’ve run into an error, try to refresh the page or go back.`}
-      </Text>
-      <Text my="md">
-        {t`If the error persists, you can download diagnostic information`}
-      </Text>
-      <Flex justify="flex-end">
+      <Stack gap="lg">
+        <Text>
+          {t`We’ve run into an error, try to refresh the page or go back.`}
+        </Text>
+        <Text>
+          {t`If the error persists, you can download diagnostic information`}
+        </Text>
+      </Stack>
+      <Modal.Footer>
         <Button variant="filled" onClick={openDiagnosticModal}>
           {t`Download diagnostic info`}
         </Button>
-      </Flex>
+      </Modal.Footer>
     </Modal>
   );
 };

@@ -1,10 +1,19 @@
-import { setupEnterprisePlugins } from "__support__/enterprise";
+import { setupEnterpriseOnlyPlugin } from "__support__/enterprise";
+import { setupEnginesEndpoint } from "__support__/server-mocks";
 import { mockSettings } from "__support__/settings";
-import { renderWithProviders } from "__support__/ui";
-import type { Engine, Settings } from "metabase-types/api";
-import { createMockState } from "metabase-types/store/mocks";
+import { createMockState } from "__support__/state";
+import { renderWithProviders, screen } from "__support__/ui";
+import type { FormLocation } from "metabase/databases/types";
+import type {
+  DatabaseData,
+  Engine,
+  EngineKey,
+  Settings,
+} from "metabase-types/api";
 
 import { DatabaseForm } from "../DatabaseForm";
+
+import { postgresFormConfig } from "./postgres-form-config.mock";
 
 export const TEST_ENGINES: Record<string, Engine> = {
   h2: {
@@ -87,34 +96,56 @@ export const TEST_ENGINES: Record<string, Engine> = {
     "superseded-by": null,
     "extra-info": null,
   },
+  postgres: postgresFormConfig,
 };
 
 export interface SetupOpts {
   settings?: Settings;
-  hasEnterprisePlugins?: boolean;
+  enterprisePlugins?: Parameters<typeof setupEnterpriseOnlyPlugin>[0][];
   engines?: Record<string, Engine>;
+  initialValues?: Partial<DatabaseData> & { engine?: EngineKey };
+  isAdvanced?: boolean;
+  location?: FormLocation;
 }
 
-export const setup = ({
+export const setup = async ({
   settings,
-  hasEnterprisePlugins,
+  enterprisePlugins,
   engines = TEST_ENGINES,
+  initialValues = {},
+  isAdvanced = true,
+  location = "admin",
 }: SetupOpts = {}) => {
+  setupEnginesEndpoint(engines);
+
   const state = createMockState({
-    settings: mockSettings({ ...settings, engines }),
+    settings: mockSettings({ ...settings }),
   });
 
-  if (hasEnterprisePlugins) {
-    setupEnterprisePlugins();
+  if (enterprisePlugins) {
+    enterprisePlugins.forEach((plugin) => {
+      setupEnterpriseOnlyPlugin(plugin);
+    });
   }
 
   const onSubmit = jest.fn();
+
   renderWithProviders(
-    <DatabaseForm config={{ isAdvanced: true }} onSubmit={onSubmit} />,
+    <DatabaseForm
+      initialValues={{
+        engine: "h2",
+        ...initialValues,
+      }}
+      config={{ isAdvanced }}
+      onSubmit={onSubmit}
+      location={location}
+    />,
     {
       storeInitialState: state,
     },
   );
+
+  await screen.findByTestId("database-form");
 
   return { onSubmit };
 };

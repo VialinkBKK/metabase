@@ -16,6 +16,7 @@ export const datePickerOverrides = {
       monthsList: Styles.monthsList,
       monthsListRow: Styles.row,
       monthsListCell: Styles.cell,
+      monthsListControl: Styles.monthsListControl,
       yearsList: Styles.yearsList,
       yearsListRow: Styles.row,
       yearsListCell: Styles.cell,
@@ -24,6 +25,10 @@ export const datePickerOverrides = {
       calendarHeaderControl: Styles.calendarHeaderControl,
     },
     styles: {
+      levelsGroup: {
+        // Mantine uses spacing.md here; pin the previous 16px gap.
+        gap: "var(--mantine-spacing-lg)",
+      },
       weekdaysRow: {
         boxSizing: "border-box",
       },

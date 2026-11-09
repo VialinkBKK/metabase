@@ -1,8 +1,14 @@
 import { match } from "ts-pattern";
 
+import { openSharingMenu } from "e2e/support/helpers/e2e-sharing-helpers";
+import { JWT_SHARED_SECRET } from "e2e/support/helpers/embedding-sdk-helpers/constants";
 import type { MetabaseTheme } from "metabase/embedding-sdk/theme/MetabaseTheme";
+import type {
+  CreateApiKeyResponse,
+  CustomVizDisplayType,
+} from "metabase-types/api";
 
-import { createApiKey } from "./api";
+import { createApiKey, updateSetting } from "./api";
 import { getIframeBody } from "./e2e-embedding-helpers";
 import { enableJwtAuth } from "./e2e-jwt-helpers";
 import { restore } from "./e2e-setup-helpers";
@@ -12,22 +18,29 @@ import {
   mockAuthProviderAndJwtSignIn,
 } from "./embedding-sdk-testing";
 
+const IS_ENTERPRISE = Cypress.expose("IS_ENTERPRISE");
+
 const EMBED_JS_PATH = "http://localhost:4000/app/embed.js";
 
 /**
  * Base interface for SDK iframe embedding test page options
  */
 export interface BaseEmbedTestPageOptions {
-  // Options for the embed route
-  target?: string;
-  apiKey?: string;
-  instanceUrl?: string;
-  dashboardId?: number | string;
-  questionId?: number | string;
-  template?: "exploration";
-  theme?: MetabaseTheme;
-  locale?: string;
-  preferredAuthMethod?: "jwt" | "saml";
+  // Passed to defineMetabaseConfig
+  metabaseConfig?: {
+    isGuest?: boolean;
+    guestEmbedProviderUri?: string;
+    instanceUrl?: string;
+    apiKey?: string;
+    useExistingUserSession?: boolean;
+    fetchRequestToken?: () => Promise<{ jwt: string }>;
+    theme?: MetabaseTheme;
+    preferredAuthMethod?: "jwt" | "saml";
+    locale?: string;
+    allowedCustomVisualizations?: CustomVizDisplayType[];
+  };
+
+  elements: MetabaseElement[];
 
   // Options for the test page
   origin?: string;
@@ -37,14 +50,37 @@ export interface BaseEmbedTestPageOptions {
     afterEmbed?: string;
   };
 
-  onVisitPage?(): void;
+  onVisitPage?(win: Cypress.AUTWindow): void;
+
+  // The embed must not see the Cypress session cookie unless the test needs it
+  signOut?: boolean;
 }
 
+export interface MetabaseElement {
+  // The component to embed
+  component: "metabase-dashboard" | "metabase-question" | "metabase-browser";
+
+  // Attributes passed serialized to the element
+  attributes: {
+    dashboardId?: number | string;
+    questionId?: number | string;
+    [key: string]: any;
+  };
+}
 export const waitForSimpleEmbedIframesToLoad = (n: number = 1) => {
-  cy.get("iframe[data-metabase-embed]").should("have.length", n);
-  cy.get("iframe[data-iframe-loaded]").should("have.length", n, {
-    timeout: 10_000, // the iframe can slow to load, we need to wait to decrease flakiness
-  });
+  // we do need _all_ these timeouts to decrease flakiness
+  // see https://github.com/metabase/metabase/pull/66954#issuecomment-3661512082
+  cy.get("iframe[data-metabase-embed]", { timeout: 40_000 }).should(
+    "have.length",
+    n,
+  );
+  cy.get("iframe[data-iframe-loaded]", { timeout: 40_000 }).should(
+    "have.length",
+    n,
+    {
+      timeout: 40_000, // the iframe can slow to load, we need to wait to decrease flakiness
+    },
+  );
 };
 
 export const getSimpleEmbedIframeContent = (iframeIndex = 0) => {
@@ -60,7 +96,7 @@ export const getSimpleEmbedIframeContent = (iframeIndex = 0) => {
     "have.length.greaterThan",
     iframeIndex,
     {
-      timeout: 10_000, // the iframe can slow to load, we need to wait to decrease flakiness
+      timeout: 40_000, // the iframe can slow to load, we need to wait to decrease flakiness
     },
   );
 
@@ -77,17 +113,14 @@ export const getSimpleEmbedIframeContent = (iframeIndex = 0) => {
 /**
  * Creates and loads a test fixture for SDK iframe embedding tests
  */
-export function loadSdkIframeEmbedTestPage<T extends BaseEmbedTestPageOptions>({
+export function loadSdkIframeEmbedTestPage({
   origin = "",
+  selector,
   onVisitPage,
+  signOut = true,
   ...options
-}: T) {
-  const testPageSource = getSdkIframeEmbedHtml({
-    target: "#metabase-embed-container",
-    instanceUrl: "http://localhost:4000",
-    origin,
-    ...options,
-  });
+}: BaseEmbedTestPageOptions & { selector?: string }) {
+  const testPageSource = getSdkIframeEmbedHtml(options);
 
   const testPageUrl = `${origin}/sdk-iframe-test-page`;
 
@@ -96,10 +129,14 @@ export function loadSdkIframeEmbedTestPage<T extends BaseEmbedTestPageOptions>({
     headers: { "content-type": "text/html" },
   }).as("dynamicPage");
 
+  if (signOut) {
+    cy.signOut();
+  }
+
   cy.visit(testPageUrl, { onLoad: onVisitPage });
   cy.title().should("include", "Metabase Embed Test");
 
-  return getIframeBody();
+  return getIframeBody(selector);
 }
 
 /**
@@ -107,8 +144,8 @@ export function loadSdkIframeEmbedTestPage<T extends BaseEmbedTestPageOptions>({
  */
 function getSdkIframeEmbedHtml({
   insertHtml,
-  origin,
-  ...embedConfig
+  metabaseConfig,
+  elements,
 }: BaseEmbedTestPageOptions) {
   return `
     <!DOCTYPE html>
@@ -122,35 +159,48 @@ function getSdkIframeEmbedHtml({
           margin: 0;
         }
 
-        #metabase-embed-container {
+        metabase-question, metabase-dashboard {
           height: 100vh;
         }
       </style>
     </head>
     <body>
+      ${getNewEmbedScriptTag({ loadType: "sync" })}
+      ${getNewEmbedConfigurationScript(metabaseConfig)}
+
       ${insertHtml?.beforeEmbed ?? ""}
-      <div id="metabase-embed-container"></div>
+      ${elements
+        .map(
+          ({ component, attributes }) => `
+        <${component} ${convertPropertiesToEmbedTagAttributes(attributes)} />
+      `,
+        )
+        .join("\n")}
+
       ${insertHtml?.afterEmbed ?? ""}
-
-      <script src="${EMBED_JS_PATH}"></script>
-
-      <script>
-        const { MetabaseEmbed } = window["metabase.embed"] ?? {};
-
-        try {
-          window.embed = new MetabaseEmbed({
-            ${Object.entries(embedConfig)
-              .map(([key, value]) => `${key}: ${JSON.stringify(value)}`)
-              .join(",\n          ")}
-          });
-        } catch (error) {
-          console.error(error.message)
-        }
-      </script>
     </body>
     </html>
   `;
 }
+
+const convertPropertiesToEmbedTagAttributes = (
+  attributes: MetabaseElement["attributes"],
+) => {
+  return Object.entries(attributes)
+    .map(([key, value]) => {
+      if (key === "element") {
+        return "";
+      }
+      const attributeKey = key.replace(/([A-Z])/g, "-$1").toLowerCase();
+      const attributeValue = match(typeof value)
+        .with("string", () => value)
+        .with("boolean", () => value.toString())
+        .otherwise(() => JSON.stringify(value));
+
+      return `${attributeKey}='${attributeValue}'`;
+    })
+    .join(" ");
+};
 
 /**
  * Prepares the testing environment for sdk iframe embedding tests.
@@ -159,24 +209,20 @@ function getSdkIframeEmbedHtml({
  * @param {EnabledAuthMethods[]} enabledAuthMethods - The authentication methods to enable.
  */
 export function prepareSdkIframeEmbedTest({
-  withTokenFeatures = true,
+  withToken = "bleeding-edge",
   enabledAuthMethods = ["jwt"],
-  signOut = false,
 }: {
-  withTokenFeatures?: boolean;
+  withToken?: false | "starter" | "bleeding-edge";
   enabledAuthMethods?: EnabledAuthMethods[];
-  signOut?: boolean;
 } = {}) {
   restore();
   cy.signInAsAdmin();
 
-  if (withTokenFeatures) {
-    activateToken("bleeding-edge");
-  } else {
-    activateToken("starter");
+  if (withToken) {
+    activateToken(withToken);
   }
 
-  cy.request("PUT", "/api/setting/enable-embedding-simple", {
+  cy.request("PUT", "/api/setting/enable-embedding-modular", {
     value: true,
   });
 
@@ -186,9 +232,45 @@ export function prepareSdkIframeEmbedTest({
 
   setupMockAuthProviders(enabledAuthMethods);
 
-  if (signOut) {
-    cy.signOut();
+  mockEmbedJsToDevServer();
+}
+
+/**
+ * Prepares the testing environment for sdk iframe embedding tests in guest embed mode.
+ */
+export function prepareGuestEmbedSdkIframeEmbedTest({
+  withTokenFeatures = true,
+  onPrepare,
+}: {
+  withTokenFeatures?: boolean;
+  onPrepare?: () => void;
+} = {}) {
+  restore();
+  cy.signInAsAdmin();
+
+  if (IS_ENTERPRISE) {
+    if (withTokenFeatures) {
+      activateToken("bleeding-edge");
+    } else {
+      activateToken("starter");
+    }
   }
+
+  onPrepare?.();
+
+  cy.request("PUT", "/api/setting/enable-embedding-modular", {
+    value: true,
+  });
+
+  cy.intercept("GET", "/api/embed/card/*").as("getCard");
+  cy.intercept("GET", "/api/embed/card/*/query*").as("getCardQuery");
+  cy.intercept("GET", "/api/embed/pivot/card/*/query*").as("getCardPivotQuery");
+
+  updateSetting("embedding-secret-key", JWT_SHARED_SECRET);
+
+  mockEmbedJsToDevServer();
+
+  cy.signOut();
 }
 
 type EnabledAuthMethods = "jwt" | "saml" | "api-key";
@@ -209,7 +291,7 @@ function setupMockAuthProviders(enabledAuthMethods: EnabledAuthMethods[]) {
     const ADMIN_GROUP_ID = 2;
 
     createApiKey("test iframe sdk embedding", ADMIN_GROUP_ID).then(
-      ({ body }) => {
+      ({ body }: { body: CreateApiKeyResponse }) => {
         cy.wrap(body.unmasked_key).as("apiKey");
       },
     );
@@ -239,17 +321,30 @@ export const getNewEmbedScriptTag = ({
 
 export const getNewEmbedConfigurationScript = ({
   instanceUrl = "http://localhost:4000",
+  isGuest,
+  guestEmbedProviderUri,
   theme,
-}: {
-  instanceUrl?: string;
-  theme?: MetabaseTheme;
-} = {}) => {
+  apiKey,
+  useExistingUserSession,
+  preferredAuthMethod,
+  locale,
+  allowedCustomVisualizations,
+}: BaseEmbedTestPageOptions["metabaseConfig"] = {}) => {
+  const config = {
+    instanceUrl,
+    isGuest,
+    guestEmbedProviderUri,
+    apiKey,
+    useExistingUserSession,
+    theme,
+    preferredAuthMethod,
+    locale,
+    allowedCustomVisualizations,
+  };
+
   return `
     <script>
-      defineMetabaseConfig({
-        instanceUrl: "${instanceUrl}",
-        theme: ${JSON.stringify(theme)},
-      });
+      defineMetabaseConfig(${JSON.stringify(config, null, 2)});
     </script>
   `;
 };
@@ -259,9 +354,11 @@ export const visitCustomHtmlPage = (
   {
     origin = "",
     onVisitPage,
+    signOut = true,
   }: {
     origin?: string;
     onVisitPage?: () => void;
+    signOut?: boolean;
   } = {},
 ) => {
   const testPageUrl = `${origin}/custom-html-page`;
@@ -270,7 +367,48 @@ export const visitCustomHtmlPage = (
     headers: { "content-type": "text/html" },
   }).as("dynamicPage");
 
+  if (signOut) {
+    cy.signOut();
+  }
+
   cy.visit(testPageUrl, { onLoad: onVisitPage });
 
   return cy;
 };
+
+/**
+ * Mock the embed.js file to point it to the rspack dev server when not in CI.
+ *
+ * When running E2E tests locally we can usually benefit from hot reload.
+ * When we're testing something that uses the embed.js file though that file is always referenced
+ * from the uberjar so if we change it, we'd need to build the uberjar again.
+ *
+ * This function checks if the rspack dev server is available and if so, it mocks the embed.js file
+ * to point it to the rspack dev server.
+ */
+export const mockEmbedJsToDevServer = () => {
+  if (Cypress.expose("CI")) {
+    // we don't need this logic in CI, let's skip the check to avoid slowing down the tests
+    return;
+  }
+
+  // We use `cy.exec` with curl because both `fetch` and `cy.request` have downsides:
+  // - if we use `fetch`, it will show up as failed request in the browser polluting the logs
+  // - if we use `cy.request`, it will fail the test even if `failOnStatusCode` is false
+  cy.exec("curl --silent --head --fail http://localhost:8080/app/embed.js", {
+    failOnNonZeroExit: false,
+    log: false,
+  }).then((result) => {
+    const isHotReloadAvailable = result.code === 0;
+
+    if (isHotReloadAvailable) {
+      cy.intercept("GET", EMBED_JS_PATH, (req) => {
+        req.redirect("http://localhost:8080/app/embed.js");
+      });
+    }
+  });
+};
+
+export function openEmbedJsModal() {
+  openSharingMenu("Embed");
+}

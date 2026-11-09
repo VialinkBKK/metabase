@@ -3,21 +3,20 @@ import { forwardRef } from "react";
 import { t } from "ttag";
 
 import NoResults from "assets/img/no_results.svg";
-import EmptyState from "metabase/common/components/EmptyState";
-import ErrorDetails from "metabase/common/components/ErrorDetails/ErrorDetails";
+import { EmptyState } from "metabase/common/components/EmptyState";
+import { ErrorDetails } from "metabase/common/components/ErrorDetails/ErrorDetails";
 import type { ErrorDetailsProps } from "metabase/common/components/ErrorDetails/types";
 import { useToggle } from "metabase/common/hooks/use-toggle";
 import CS from "metabase/css/core/index.css";
 import QueryBuilderS from "metabase/css/query_builder.module.css";
-import { color } from "metabase/lib/colors";
-import { getIsEmbeddingIframe } from "metabase/selectors/embed";
-import { Button, Icon, Tooltip } from "metabase/ui";
+import { Button, Flex, Icon, Tooltip } from "metabase/ui";
+import { isWithinIframe } from "metabase/utils/iframe";
 
 import {
   ErrorDiagnosticModalTrigger,
   ErrorExplanationModal,
 } from "./ErrorDiagnosticModal";
-import { ErrorPageRoot } from "./ErrorPages.styled";
+import S from "./ErrorPages.module.css";
 
 interface GenericErrorProps {
   title?: string;
@@ -34,7 +33,15 @@ export const GenericError = forwardRef<HTMLDivElement, GenericErrorProps>(
     ref,
   ) {
     return (
-      <ErrorPageRoot ref={ref}>
+      <Flex
+        ref={ref}
+        className={S.root}
+        direction="column"
+        w="100%"
+        h="100%"
+        justify="center"
+        align="center"
+      >
         <EmptyState
           title={title}
           message={message}
@@ -49,7 +56,7 @@ export const GenericError = forwardRef<HTMLDivElement, GenericErrorProps>(
         />
         <ErrorDetails className={CS.pt2} details={details} centered />
         <ErrorDiagnosticModalTrigger />
-      </ErrorPageRoot>
+      </Flex>
     );
   },
 );
@@ -61,22 +68,37 @@ export const NotFound = ({
   title?: string;
   message?: string;
 }) => (
-  <ErrorPageRoot aria-label="error page">
+  <Flex
+    aria-label="error page"
+    className={S.root}
+    direction="column"
+    w="100%"
+    h="100%"
+    justify="center"
+    align="center"
+  >
     <EmptyState
       illustrationElement={<img src={NoResults} />}
       title={title}
       message={message}
     />
-  </ErrorPageRoot>
+  </Flex>
 );
 
 export const Unauthorized = () => (
-  <ErrorPageRoot>
+  <Flex
+    className={S.root}
+    direction="column"
+    w="100%"
+    h="100%"
+    justify="center"
+    align="center"
+  >
     <EmptyState
       title={t`Sorry, you don’t have permission to see that.`}
       illustrationElement={<Icon name="key" size={100} />}
     />
-  </ErrorPageRoot>
+  </Flex>
 );
 
 export const Archived = ({
@@ -86,13 +108,20 @@ export const Archived = ({
   entityName: string;
   linkTo: string;
 }) => (
-  <ErrorPageRoot>
+  <Flex
+    className={S.root}
+    direction="column"
+    w="100%"
+    h="100%"
+    justify="center"
+    align="center"
+  >
     <EmptyState
       title={t`This ${entityName} has been archived`}
       illustrationElement={<Icon name="view_archive" size={100} />}
       link={linkTo}
     />
-  </ErrorPageRoot>
+  </Flex>
 );
 
 export const SmallGenericError = forwardRef<
@@ -101,36 +130,44 @@ export const SmallGenericError = forwardRef<
     message?: string;
     bordered?: boolean;
   }
->(function _SmallGenericError(
+>(function SmallGenericErrorInner(
   { message = t`Something’s gone wrong.`, bordered = true, ...props },
   ref,
 ) {
   const [isModalOpen, { turnOn: openModal, turnOff: closeModal }] =
     useToggle(false);
 
-  const isEmbeddingIframe = getIsEmbeddingIframe();
+  const isEmbeddingIframe = isWithinIframe();
 
   const tooltipMessage = isEmbeddingIframe
     ? message
     : message + t` Click for more information`;
 
   return (
-    <ErrorPageRoot bordered={bordered} {...props} ref={ref}>
+    <Flex
+      ref={ref}
+      className={cx(S.root, { [S.bordered]: bordered })}
+      direction="column"
+      w="100%"
+      h="100%"
+      justify="center"
+      align="center"
+      {...props}
+    >
       <Tooltip label={tooltipMessage}>
         {isEmbeddingIframe ? (
-          <Icon name="warning" size={32} color={color("text-light")} />
+          <Icon name="warning" c="text-secondary" />
         ) : (
           <Button
-            leftSection={
-              <Icon name="warning" size={32} color={color("text-light")} />
-            }
-            color="text-light"
+            variant="transparent"
+            size="compact-md"
+            color="neutral"
+            leftSection={<Icon name="warning" c="text-secondary" />}
             onClick={openModal}
-            variant="subtle"
           />
         )}
       </Tooltip>
       <ErrorExplanationModal isModalOpen={isModalOpen} onClose={closeModal} />
-    </ErrorPageRoot>
+    </Flex>
   );
 });

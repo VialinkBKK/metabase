@@ -35,7 +35,13 @@ describe("scenarios > admin > permissions > downgrade ee to oss", () => {
       cy.reload();
 
       H.assertPermissionTable([["Sample Database", "No"]]);
-      H.isPermissionDisabled(OSS_NATIVE_QUERIES_PERMISSION_INDEX, "No", false);
+
+      H.isPermissionDisabled(
+        "Sample Database",
+        OSS_NATIVE_QUERIES_PERMISSION_INDEX,
+        "No",
+        false,
+      );
 
       H.modifyPermission(
         "Sample Database",
@@ -56,6 +62,7 @@ describe("scenarios > admin > permissions > downgrade ee to oss", () => {
             "Sample Database",
             "Can view",
             "Query builder and native",
+            "No",
             "No",
             "No",
             "No",
@@ -123,7 +130,7 @@ describe("scenarios > admin > permissions > downgrade ee to oss", () => {
 
     H.modifyPermission(
       "Orders",
-      EE_DATA_ACCESS_PERMISSION_INDEX,
+      OSS_NATIVE_QUERIES_PERMISSION_INDEX,
       "Query builder only",
     );
 

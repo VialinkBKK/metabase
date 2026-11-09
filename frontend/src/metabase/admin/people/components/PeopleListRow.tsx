@@ -1,14 +1,12 @@
-import dayjs from "dayjs";
 import { Fragment, useMemo } from "react";
 import { t } from "ttag";
 
 import { ForwardRefLink } from "metabase/common/components/Link";
-import UserAvatar from "metabase/common/components/UserAvatar";
-import { useSelector } from "metabase/lib/redux";
-import * as Urls from "metabase/lib/urls";
-import { getFullName } from "metabase/lib/user";
-import { PLUGIN_ADMIN_USER_MENU_ITEMS } from "metabase/plugins";
-import { getSetting } from "metabase/selectors/settings";
+import { UserAvatar } from "metabase/common/components/UserAvatar";
+import { dayjs } from "metabase/dayjs";
+import { PLUGIN_ADMIN_USER_MENU_ITEMS, PLUGIN_TENANTS } from "metabase/plugins";
+import { useSelector } from "metabase/redux";
+import { getSetting } from "metabase/settings";
 import {
   Box,
   Flex,
@@ -18,6 +16,8 @@ import {
   Tooltip,
   UnstyledButton,
 } from "metabase/ui";
+import * as Urls from "metabase/urls";
+import { getFullName } from "metabase/utils/user";
 import type {
   GroupId,
   GroupInfo,
@@ -27,9 +27,10 @@ import type {
 } from "metabase-types/api";
 
 import { userToColor } from "../colors";
+import { getIsSsoOnlyUser } from "../selectors";
 
 import { MembershipSelect } from "./MembershipSelect";
-import S from "./PeopleListRow.module.css";
+import { ReactivateUserButton } from "./ReactivateUserButton";
 
 const enablePasswordLoginKey = "enable-password-login";
 
@@ -58,6 +59,7 @@ export const PeopleListRow = ({
   onChange,
   isConfirmModalOpen,
 }: PeopleListRowProps) => {
+  const isExternal = !!user.tenant_id;
   const membershipsByGroupId = useMemo(
     () =>
       userMemberships?.reduce((acc, membership) => {
@@ -70,10 +72,12 @@ export const PeopleListRow = ({
   const isPasswordLoginEnabled = useSelector((state) =>
     getSetting(state, enablePasswordLoginKey),
   );
+  const isSsoOnlyUser = useSelector((state) => getIsSsoOnlyUser(state, user));
+  const canResetPassword = isPasswordLoginEnabled && !isSsoOnlyUser;
 
   return (
     <tr key={user.id}>
-      <Flex component="td" align="center" gap="md" c="text-white">
+      <Flex component="td" align="center" gap="lg" c="text-primary-inverse">
         <UserAvatar bg={userToColor(user)} user={user} />
         <Text fw="700">{getFullName(user) ?? "-"}</Text>
       </Flex>
@@ -92,38 +96,44 @@ export const PeopleListRow = ({
       <td>{user.email}</td>
       {showDeactivated ? (
         <Fragment>
+          {isExternal && (
+            <td>
+              <PLUGIN_TENANTS.TenantDisplayName id={user.tenant_id} />
+            </td>
+          )}
           <td>{dayjs(user.updated_at).fromNow()}</td>
           <td>
-            <Tooltip label={t`Reactivate this account`}>
-              <ForwardRefLink
-                to={Urls.reactivateUser(user.id)}
-                className={S.refreshLink}
-              >
-                <Icon name="refresh" size={20} />
-              </ForwardRefLink>
-            </Tooltip>
+            {isExternal ? (
+              <PLUGIN_TENANTS.ReactivateExternalUserButton user={user} />
+            ) : (
+              <ReactivateUserButton user={user} />
+            )}
           </td>
         </Fragment>
       ) : (
         <Fragment>
           <td>
-            <MembershipSelect
-              groups={groups}
-              memberships={membershipsByGroupId}
-              isCurrentUser={isCurrentUser}
-              isUserAdmin={user.is_superuser}
-              onAdd={onAdd}
-              onRemove={onRemove}
-              onChange={onChange}
-              isConfirmModalOpen={isConfirmModalOpen}
-            />
+            {isExternal ? (
+              <PLUGIN_TENANTS.TenantDisplayName id={user.tenant_id} />
+            ) : (
+              <MembershipSelect
+                groups={groups}
+                memberships={membershipsByGroupId}
+                isCurrentUser={isCurrentUser}
+                isUserAdmin={user.is_superuser}
+                onAdd={onAdd}
+                onRemove={onRemove}
+                onChange={onChange}
+                isConfirmModalOpen={isConfirmModalOpen}
+              />
+            )}
           </td>
           <td>
             {user.last_login ? dayjs(user.last_login).fromNow() : t`Never`}
           </td>
           <Box component="td" ta="right">
             {isAdmin && (
-              <Menu shadow="md" position="bottom-end">
+              <Menu shadow="sm" position="bottom-end">
                 <Menu.Target>
                   <UnstyledButton>
                     <Icon name="ellipsis" />
@@ -133,15 +143,15 @@ export const PeopleListRow = ({
                 <Menu.Dropdown>
                   <Menu.Item
                     component={ForwardRefLink}
-                    to={Urls.editUser(user.id)}
+                    to={Urls.editUser(user)}
                   >
                     {t`Edit user`}
                   </Menu.Item>
 
-                  {isPasswordLoginEnabled && (
+                  {canResetPassword && (
                     <Menu.Item
                       component={ForwardRefLink}
-                      to={Urls.resetPassword(user.id)}
+                      to={Urls.resetPassword(user)}
                     >
                       {t`Reset password`}
                     </Menu.Item>
@@ -154,8 +164,8 @@ export const PeopleListRow = ({
                   {!isCurrentUser && (
                     <Menu.Item
                       component={ForwardRefLink}
-                      to={Urls.deactivateUser(user.id)}
-                      c="danger"
+                      to={Urls.deactivateUser(user)}
+                      c="feedback-negative"
                     >
                       {t`Deactivate user`}
                     </Menu.Item>

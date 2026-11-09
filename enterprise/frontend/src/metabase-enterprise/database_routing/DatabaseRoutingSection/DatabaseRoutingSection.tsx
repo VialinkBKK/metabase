@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react";
-import { Link } from "react-router";
 import { t } from "ttag";
 
 import {
@@ -10,14 +9,20 @@ import {
   DatabaseInfoSection,
   DatabaseInfoSectionDivider,
 } from "metabase/admin/databases/components/DatabaseInfoSection";
-import { hasDbRoutingEnabled } from "metabase/admin/databases/utils";
-import { skipToken, useListUserAttributesQuery } from "metabase/api";
-import { getErrorMessage } from "metabase/api/utils";
-import { useSetting } from "metabase/common/hooks";
-import { useDispatch, useSelector } from "metabase/lib/redux";
-import { addUndo } from "metabase/redux/undo";
-import { getUserIsAdmin } from "metabase/selectors/user";
 import {
+  skipToken,
+  useListEnginesQuery,
+  useListTransformsQuery,
+  useListUserAttributesQuery,
+} from "metabase/api";
+import { getErrorMessage } from "metabase/api/utils";
+import { Link } from "metabase/common/components/Link";
+import { useToast } from "metabase/common/hooks/use-toast";
+import { hasDbRoutingEnabled } from "metabase/common/utils/database";
+import { getUserIsAdmin } from "metabase/current-user";
+import { useSelector } from "metabase/redux";
+import {
+  Alert,
   Box,
   Button,
   Flex,
@@ -30,8 +35,10 @@ import {
   UnstyledButton,
 } from "metabase/ui";
 import { useUpdateRouterDatabaseMutation } from "metabase-enterprise/api";
+import { renderUserAttributesForSelect } from "metabase-enterprise/sandboxes/utils";
 import * as Urls from "metabase-enterprise/urls";
 import type { Database } from "metabase-types/api";
+import { isEngineKey } from "metabase-types/guards";
 
 import { DestinationDatabasesList } from "../DestinationDatabasesList";
 
@@ -42,17 +49,18 @@ export const DatabaseRoutingSection = ({
 }: {
   database: Database;
 }) => {
-  const dispatch = useDispatch();
+  const [sendToast] = useToast();
 
-  const engines = useSetting("engines");
+  const { data: engines = {} } = useListEnginesQuery();
 
   const isAdmin = useSelector(getUserIsAdmin);
   const userAttribute = database.router_user_attribute ?? undefined;
   const dbSupportsRouting = database.features?.includes("database-routing");
-  const engine = engines[database.engine ?? ""];
+  const engineKey = isEngineKey(database.engine) ? database.engine : undefined;
+  const engine = engineKey ? engines[engineKey] : undefined;
   const dbRoutingInfo =
     engine?.["extra-info"]?.["db-routing-info"]?.text ??
-    // eslint-disable-next-line no-literal-metabase-strings -- This string only shows for admins.
+    // eslint-disable-next-line metabase/no-literal-metabase-strings -- This string only shows for admins.
     t`When someone views a question using data from this database, Metabase will send the queries to the destination database set by the person's user attribute. Each destination database must have identical schemas.`;
   const shouldHideSection =
     database.is_attached_dwh || database.is_sample || !dbSupportsRouting;
@@ -77,7 +85,15 @@ export const DatabaseRoutingSection = ({
   const userAttributeOptions =
     userAttrsReq.data ?? (userAttribute ? [userAttribute] : []);
 
-  const disabledFeatMsg = getDisabledFeatureMessage(database);
+  const transformsQuery = useListTransformsQuery(
+    shouldHideSection ? skipToken : { "database-id": database.id },
+  );
+  const transforms = transformsQuery.data ?? [];
+  const hasTransforms = transforms.length > 0;
+
+  const disabledFeatMsg = getDisabledFeatureMessage(database, {
+    hasTransforms,
+  });
   const errMsg = getSelectErrorMessage({
     userAttribute,
     disabledFeatureMessage: disabledFeatMsg,
@@ -89,9 +105,9 @@ export const DatabaseRoutingSection = ({
     await updateRouterDatabase({ id: database.id, user_attribute: attribute });
 
     if (!hasDbRoutingEnabled(database)) {
-      dispatch(addUndo({ message: t`Database routing enabled` }));
+      sendToast({ message: t`Database routing enabled` });
     } else {
-      dispatch(addUndo({ message: t`Database routing updated` }));
+      sendToast({ message: t`Database routing updated` });
     }
   };
 
@@ -102,7 +118,7 @@ export const DatabaseRoutingSection = ({
       await updateRouterDatabase({ id: database.id, user_attribute: null });
 
       if (hasDbRoutingEnabled(database)) {
-        dispatch(addUndo({ message: t`Database routing disabled` }));
+        sendToast({ message: t`Database routing disabled` });
       }
     }
   };
@@ -123,14 +139,14 @@ export const DatabaseRoutingSection = ({
             <Text lh="lg">{t`Enable database routing`}</Text>
           </Label>
           {error ? (
-            <Error role="alert" color="error">
+            <Error role="alert" color="feedback-negative">
               {getErrorMessage(error)}
             </Error>
           ) : null}
         </Stack>
-        <Flex gap="md">
+        <Flex gap="lg">
           <Tooltip label={disabledFeatMsg} disabled={!disabledFeatMsg}>
-            <Box>
+            <Box data-testid="database-routing-toggle-wrapper">
               <Switch
                 id="database-routing-toggle"
                 checked={enabled}
@@ -139,26 +155,56 @@ export const DatabaseRoutingSection = ({
               />
             </Box>
           </Tooltip>
-          <UnstyledButton onClick={() => setIsExpanded(!isExpanded)} px="xs">
-            <Icon name={isExpanded ? "chevronup" : "chevrondown"} />
-          </UnstyledButton>
+          {disabledFeatMsg == null && (
+            <UnstyledButton onClick={() => setIsExpanded(!isExpanded)} px="xxs">
+              <Icon name={isExpanded ? "chevronup" : "chevrondown"} />
+            </UnstyledButton>
+          )}
         </Flex>
       </Flex>
+
+      {disabledFeatMsg != null && (
+        <>
+          <DatabaseInfoSectionDivider />
+          <Alert
+            size="compact"
+            variant="light"
+            icon={<Icon name="info" />}
+            mb="lg"
+          >
+            {disabledFeatMsg}
+          </Alert>
+        </>
+      )}
 
       {isExpanded && (
         <>
           <DatabaseInfoSectionDivider />
 
-          <Stack mb="xl" gap="sm">
+          {hasDbRoutingEnabled(database) && (
+            <Alert
+              size="compact"
+              variant="light"
+              icon={<Icon name="info" />}
+              mb="lg"
+            >
+              {t`In guest embeds, database queries will always be routed to the router database.`}
+            </Alert>
+          )}
+          <Stack mb="xxl" gap="sm">
             <Flex justify="space-between" align="center" gap="sm">
               <Box>
                 <Label htmlFor="db-routing-user-attribute">
                   {t`User attribute to match destination database slug`}{" "}
-                  <Text component="span" c="error">
+                  <Text component="span" c="feedback-negative">
                     *
                   </Text>
                 </Label>
-                <Text c="text-secondary" mt="xs" style={{ textWrap: "pretty" }}>
+                <Text
+                  c="text-secondary"
+                  mt="xxs"
+                  style={{ textWrap: "pretty" }}
+                >
                   {t`This attribute determines which destination database the person queries.`}
                 </Text>
               </Box>
@@ -175,6 +221,7 @@ export const DatabaseRoutingSection = ({
                   disabled={!isAdmin || !!disabledFeatMsg}
                   value={userAttribute}
                   onChange={handleUserAttributeChange}
+                  renderOption={renderUserAttributesForSelect}
                 />
               </Tooltip>
             </Flex>

@@ -2,15 +2,24 @@
   "Pivot table query processor. Determines a bunch of different subqueries to run, then runs them one by one on the data
   warehouse and concatenates the result rows together, sort of like the way [[clojure.core/lazy-cat]] works. This is
   dumb, right? It's not just me? Why don't we just generate a big ol' UNION query so we can run one single query
-  instead of running like 10 separate queries? -- Cam"
+  instead of running like 10 separate queries? -- Cam
+
+  Note that this namespace is mostly responsible for generating the series of different queries to run and doing QP
+  magic to combine the results together.
+
+  Post-processing middleware to add the `pivot-grouping` column to results and to massage result rows into a standard
+  shape lives in [[metabase.query-processor.pivot.middleware]]."
+  (:refer-clojure :exclude [every? mapv some select-keys update-keys empty? not-empty get-in])
   (:require
-   [medley.core :as m]
-   [metabase.lib-be.metadata.jvm :as lib.metadata.jvm]
+   [metabase.driver :as driver]
+   [metabase.lib-be.core :as lib-be]
    [metabase.lib.core :as lib]
    [metabase.lib.equality :as lib.equality]
+   [metabase.lib.metadata :as lib.metadata]
+   [metabase.lib.options :as lib.options]
+   [metabase.lib.pivot :as lib.pivot]
    [metabase.lib.schema :as lib.schema]
-   [metabase.lib.schema.common :as lib.schema.common]
-   [metabase.lib.schema.id :as lib.schema.id]
+   [metabase.lib.schema.expression :as lib.schema.expression]
    [metabase.lib.schema.info :as lib.schema.info]
    [metabase.lib.util :as lib.util]
    [metabase.models.visualization-settings :as mb.viz]
@@ -18,273 +27,119 @@
    [metabase.query-processor.error-type :as qp.error-type]
    [metabase.query-processor.metadata :as qp.metadata]
    [metabase.query-processor.middleware.add-remaps :as qp.add-remaps]
-   [metabase.query-processor.middleware.permissions :as qp.perms]
+   [metabase.query-processor.middleware.catch-exceptions :as qp.catch-exceptions]
+   [metabase.query-processor.middleware.drop-fields-in-summaries :as qp.drop-fields-in-summaries]
+   [metabase.query-processor.middleware.nest-for-pivot :as qp.nest-for-pivot]
+   [metabase.query-processor.middleware.normalize-query :as qp.middleware.normalize]
    [metabase.query-processor.pipeline :as qp.pipeline]
+   [metabase.query-processor.pivot.common :as pivot.common]
    [metabase.query-processor.reducible :as qp.reducible]
    [metabase.query-processor.schema :as qp.schema]
+   [metabase.query-processor.settings :as qp.settings]
    [metabase.query-processor.setup :as qp.setup]
-   [metabase.query-processor.store :as qp.store]
+   [metabase.query-processor.util :as qp.util]
    [metabase.util :as u]
    [metabase.util.i18n :refer [tru]]
    [metabase.util.json :as json]
    [metabase.util.log :as log]
    [metabase.util.malli :as mu]
    [metabase.util.malli.registry :as mr]
-   [metabase.util.performance :as perf]))
+   [metabase.util.performance :refer [empty? every? get-in mapv not-empty select-keys some update-keys]]))
 
 (set! *warn-on-reflection* true)
 
-(defn- powerset
-  "Generate a powerset while maintaining the original ordering as much as possible"
-  [xs]
-  (for [combo (reverse (range (long (Math/pow 2 (count xs)))))]
-    (for [item  (range 0 (count xs))
-          :when (not (zero? (bit-and (bit-shift-left 1 item) combo)))]
-      (nth xs item))))
-
-;;; these defs are just for readability, even tho they're all just ints > 0
-(mr/def ::bitmask       ::lib.schema.common/int-greater-than-or-equal-to-zero)
-(mr/def ::num-breakouts ::lib.schema.common/int-greater-than-or-equal-to-zero)
-(mr/def ::index         ::lib.schema.common/int-greater-than-or-equal-to-zero)
-
-(mr/def ::pivot-rows     [:sequential ::index])
-(mr/def ::pivot-cols     [:sequential ::index])
-(mr/def ::pivot-measures [:sequential ::index])
+(mr/def ::column-sort-order [:map-of [:maybe ::pivot.common/index] [:maybe :keyword]])
 
 (mr/def ::pivot-opts [:maybe
-                      [:map
-                       [:pivot-rows         {:optional true} [:maybe ::pivot-rows]]
-                       [:pivot-cols         {:optional true} [:maybe ::pivot-cols]]
-                       [:pivot-measures     {:optional true} [:maybe ::pivot-measures]]
+                      [:map {:closed true}
+                       [:pivot-rows         {:optional true} [:maybe ::pivot.common/pivot-rows]]
+                       [:pivot-cols         {:optional true} [:maybe ::pivot.common/pivot-cols]]
+                       [:pivot-measures     {:optional true} [:maybe ::pivot.common/pivot-measures]]
                        [:show-row-totals    {:optional true} [:maybe :boolean]]
-                       [:show-column-totals {:optional true} [:maybe :boolean]]]])
+                       [:show-column-totals {:optional true} [:maybe :boolean]]
+                       [:column-sort-order  {:optional true} [:maybe ::column-sort-order]]]])
 
-(mu/defn- group-bitmask :- ::bitmask
-  "Come up with a display name given a combination of breakout `indexes` e.g.
-
-  This is basically a bitmask of which breakout indexes we're excluding, but reversed. Why? This is how Postgres and
-  other DBs determine group numbers. This implements basically what PostgreSQL does for grouping -- look at the original
-  set of groups - if that column is part of *this* group, then set the appropriate bit (entry 1 sets bit 1, etc)
-
-    (group-bitmask 3 [1])   ; -> [_ 1 _] -> 101 -> 101 -> 5
-    (group-bitmask 3 [1 2]) ; -> [_ 1 2] -> 100 -> 011 -> 1"
-  [num-breakouts :- ::num-breakouts
-   indexes       :- [:sequential ::index]]
-  (transduce
-   (map (partial bit-shift-left 1))
-   (completing bit-xor)
-   (long (dec (Math/pow 2 num-breakouts)))
-   indexes))
-
-(mr/def ::breakout-combination
-  [:sequential ::index])
-
-(mr/def ::breakout-combinations
-  [:and
-   [:sequential ::breakout-combination]
-   [:fn
-    {:error/message "Distinct combinations"}
-    #(or (empty? %)
-         (apply distinct? %))]])
-
-(mu/defn- breakout-combinations :- ::breakout-combinations
-  "Return a sequence of all breakout combinations (by index) we should generate queries for.
-
-    (breakout-combinations 3 [1 2] nil) ;; -> [[0 1 2] [] [1 2] [2] [1]]"
-  [num-breakouts      :- ::num-breakouts
-   pivot-rows         :- [:maybe ::pivot-rows]
-   pivot-cols         :- [:maybe ::pivot-cols]
-   show-row-totals    :- [:maybe :boolean]
-   show-column-totals :- [:maybe :boolean]]
-  (let [row-totals (if (nil? show-row-totals)    true show-row-totals)
-        col-totals (if (nil? show-column-totals) true show-column-totals)]
-    ;; validate pivot-rows/pivot-cols
-    (doseq [[k pivots] [[:pivot-rows pivot-rows]
-                        [:pivot-cols pivot-cols]]
-            i          pivots]
-      (when (>= i num-breakouts)
-        (throw (ex-info (tru "Invalid {0}: specified breakout at index {1}, but we only have {2} breakouts"
-                             (name k) i num-breakouts)
-                        {:type          qp.error-type/invalid-query
-                         :num-breakouts num-breakouts
-                         :pivot-rows    pivot-rows
-                         :pivot-cols    pivot-cols}))))
-    (sort-by
-     (partial group-bitmask num-breakouts)
-     (m/distinct-by
-      (partial group-bitmask num-breakouts)
-      (map
-       (comp vec sort)
-       ;; this can happen for the public/embed endpoints, where we aren't given a pivot-rows / pivot-cols parameter, so
-       ;; we'll just generate everything
-       (if (empty? (concat pivot-rows pivot-cols))
-         (powerset (range 0 num-breakouts))
-         (concat
-          ;; e.g. given num-breakouts = 4; pivot-rows = [0 1 2]; pivot-cols = [3]
-          ;; primary data: return all breakouts
-          ;; => [0 1 2 3] => 0000 => Group #15
-          [(range num-breakouts)]
-          ;; subtotal rows
-          ;; _.range(1, pivotRows.length).map(i => [...pivotRow.slice(0, i), ...pivotCols])
-          ;;  => [0 _ _ 3] [0 1 _ 3] => 0110 0100 => Group #6, #4
-          (when col-totals
-            (for [i (range 1 (count pivot-rows))]
-              (concat (take i pivot-rows) pivot-cols)))
-          ;; "row totals" on the right
-          ;; pivotRows
-          ;; => [0 1 2 _] => 1000 => Group #8
-          (when row-totals
-            [pivot-rows])
-          ;; subtotal rows within "row totals"
-          ;; _.range(1, pivotRows.length).map(i => pivotRow.slice(0, i))
-          ;; => [0 _ _ _] [0 1 _ _] => 1110 1100 => Group #14, #12
-          (when (and row-totals col-totals)
-            (for [i (range 1 (count pivot-rows))]
-              (take i pivot-rows)))
-          ;; "grand totals" row
-          ;; pivotCols
-          ;; => [_ _ _ 3] => 0111 => Group #7
-          (when col-totals
-            [pivot-cols])
-          ;; bottom right corner [_ _ _ _] => 1111 => Group #15
-          (when (and row-totals col-totals)
-            [[]]))))))))
+(defmacro ^:private wrapping-pivot-generation-errors
+  "Rewrap any throw from `body` as `\"Error generating pivot queries\"` of type `:qp`, matching the
+  outer error shape every pivot path presents to the QP's error handling."
+  {:style/indent 1}
+  [query & body]
+  `(try
+     ~@body
+     (catch Throwable e#
+       (throw (ex-info (tru "Error generating pivot queries")
+                       {:type qp.error-type/qp, :query ~query}
+                       e#)))))
 
 (mu/defn- keep-breakouts-at-indexes :- ::lib.schema/query
   "Keep the breakouts at indexes, reordering them if needed. Remove all other breakouts."
   [query                    :- ::lib.schema/query
-   breakout-indexes-to-keep :- [:maybe ::breakout-combination]]
+   breakout-indexes-to-keep :- [:maybe ::pivot.common/breakout-combination]]
   (let [all-breakouts (lib/breakouts query)]
     (reduce
      (fn [query i]
        (lib/breakout query (nth all-breakouts i)))
      (-> (lib/remove-all-breakouts query)
-         (assoc :qp.pivot/breakout-combination breakout-indexes-to-keep))
+         (assoc :qp.pivot/remapped-breakout-combination breakout-indexes-to-keep))
      breakout-indexes-to-keep)))
-
-(mu/defn- add-pivot-group-breakout :- ::lib.schema/query
-  "Add the grouping field and expression to the query"
-  [query   :- ::lib.schema/query
-   bitmask :- ::bitmask]
-  (as-> query query
-    ;;TODO: replace this value with a bitmask or something to indicate the source better
-    (lib/expression query -1 "pivot-grouping" (lib/abs bitmask) {:add-to-fields? false})
-    ;; in PostgreSQL and most other databases, all the expressions must be present in the breakouts. Add a pivot
-    ;; grouping expression ref to the breakouts
-    (lib/breakout query (lib/expression-ref query "pivot-grouping"))
-    (do
-      (log/tracef "Added pivot-grouping expression to query\n%s" (u/pprint-to-str 'yellow query))
-      query)))
-
-(mu/defn- remove-non-aggregation-order-bys :- ::lib.schema/query
-  "Only keep existing aggregations in `:order-by` clauses from the query. Since we're adding our own breakouts (i.e.
-  `GROUP BY` and `ORDER BY` clauses) to do the pivot table stuff, existing `:order-by` clauses probably won't work --
-  `ORDER BY` isn't allowed for fields that don't appear in `GROUP BY`."
-  [query :- ::lib.schema/query]
-  (reduce
-   (fn [query [_tag _opts expr :as order-by]]
-     ;; keep any order bys on :aggregation references. Remove all other clauses.
-     (cond-> query
-       (not (lib.util/clause-of-type? expr :aggregation))
-       (lib/remove-clause order-by)))
-   query
-   (lib/order-bys query)))
 
 (mu/defn- generate-queries :- [:sequential ::lib.schema/query]
   "Generate the additional queries to perform a generic pivot table"
   [query :- ::lib.schema/query
    {:keys [pivot-rows pivot-cols show-row-totals show-column-totals] :as _pivot-options} :- ::pivot-opts]
-  (try
+  (wrapping-pivot-generation-errors query
     (let [all-breakouts (lib/breakouts query)
-          all-queries   (for [breakout-indexes (u/prog1 (breakout-combinations (count all-breakouts)
-                                                                               pivot-rows
-                                                                               pivot-cols
-                                                                               show-row-totals
-                                                                               show-column-totals)
-                                                 (log/tracef "Using breakout combinations: %s" (pr-str <>)))
-                              :let             [group-bitmask (group-bitmask (count all-breakouts) breakout-indexes)]]
+          all-queries   (for [breakout-indexes (u/prog1 (pivot.common/breakout-combinations (count all-breakouts)
+                                                                                            pivot-rows
+                                                                                            pivot-cols
+                                                                                            show-row-totals
+                                                                                            show-column-totals)
+                                                 (log/tracef "Using breakout combinations: %s" (pr-str <>)))]
                           (-> query
-                              remove-non-aggregation-order-bys
-                              (keep-breakouts-at-indexes breakout-indexes)
-                              (add-pivot-group-breakout group-bitmask)))]
+                              (assoc :qp.pivot/unremapped-breakout-combination breakout-indexes)
+                              qp.nest-for-pivot/remove-non-aggregation-order-bys
+                              (keep-breakouts-at-indexes breakout-indexes)))]
       (conj (rest (map #(assoc-in % [:info :pivot/result-metadata] :none) all-queries))
             (->
              (assoc-in (first all-queries) [:info :pivot/original-query] query)
-             (assoc-in [:info :pivot/result-metadata] (qp.metadata/result-metadata query)))))
-    (catch Throwable e
-      (throw (ex-info (tru "Error generating pivot queries")
-                      {:type qp.error-type/qp, :query query}
-                      e)))))
+             (assoc-in [:info :pivot/result-metadata] (qp.metadata/result-metadata query)))))))
 
-(mr/def ::column-mapping-fn
-  ;; not 100% on what the return value is supposed to be, need to figure out what exactly [[make-column-mapping-fn]]
-  ;; returns
-  [:=> [:cat ::lib.schema/query] ::pivot-column-mapping])
-
-;;; something like [nil 0 1 2] or [0 nil 1 2]
-(mr/def ::pivot-column-mapping
-  [:sequential [:maybe ::index]])
-
-;;; this schema is mostly just for documentation purposes
-(mr/def ::row
-  [:sequential :any])
-
-(mu/defn- row-mapping-fn :- [:=> [:cat ::row] ::row]
-  "This function needs to be called for each row so that it can actually shape the row according to the
-  `column-mapping-fn` we build at the beginning.
-
-  Row mapping function is a function that can reorder the row and add `nil`s for columns that aren't present in a
-  particular subquery, with the signature
-
-    (f row) => row'
-
-  e.g.
-
-    (f [1 2 3]) => [2 nil 3 nil 1]"
-  [pivot-column-mapping :- ::pivot-column-mapping]
-  ;; the first query doesn't need any special mapping, it already has all the columns
-  (if pivot-column-mapping
-    (perf/juxt* (for [mapping pivot-column-mapping]
-                  (if mapping
-                    #(nth % mapping)
-                    (constantly nil))))
-    identity))
+(defn- maybe-userland
+  "Wrap `query` as a userland query when it carries a non-empty `:info` map."
+  [query]
+  (cond-> query
+    (seq (:info query)) qp/userland-query))
 
 (mu/defn- process-query-append-results
-  "Reduce the results of a single `query` using `rf` and initial value `init`."
-  [query                :- ::lib.schema/query
-   rf                   :- ::qp.schema/rf
-   init                 :- :any
-   info                 :- [:maybe ::lib.schema.info/info]
-   pivot-column-mapping :- ::pivot-column-mapping]
+  "Reduce the results of a single (sub)`query` using `rf` and initial value `init`."
+  [query :- ::lib.schema/query
+   rf    :- ::qp.schema/rf
+   init  :- ::qp.schema/accumulator
+   info  :- [:maybe ::lib.schema.info/info]]
   (if (qp.pipeline/canceled?)
     (ensure-reduced init)
-    (let [xform (map (row-mapping-fn pivot-column-mapping))
-          rff   (fn [_metadata]
-                  (let [rf (fn rf*
-                             ([]        init)
-                             ([acc]     acc)
-                             ([acc row] (rf acc row)))]
-                    (xform rf)))]
+    (let [rff (fn rff* [_metadata]
+                (fn rf*
+                  ([]        init)
+                  ([acc]     acc)
+                  ([acc row] (rf acc row))))]
       (try
         (let [query (cond-> query
                       (seq info) (qp/userland-query info))]
           (qp/process-query query rff))
         (catch Throwable e
-          (log/error e "Error processing additional pivot table query")
+          (log/errorf "Error processing additional pivot table query: %s" (ex-message e))
           (throw e))))))
 
 (mu/defn- process-queries-append-results
   "Reduce the results of a sequence of `queries` using `rf` and initial value `init`."
-  [init
-   queries           :- [:maybe [:sequential ::lib.schema/query]]
-   rf                :- ::qp.schema/rf
-   info              :- [:maybe ::lib.schema.info/info]
-   column-mapping-fn :- ::column-mapping-fn]
+  [init    :- ::qp.schema/accumulator
+   queries :- [:maybe [:sequential ::lib.schema/query]]
+   rf      :- ::qp.schema/rf
+   info    :- [:maybe ::lib.schema.info/info]]
   (reduce
    (fn [acc query]
-     (let [pivot-column-mapping (column-mapping-fn query)]
-       (process-query-append-results query rf acc info pivot-column-mapping)))
+     (process-query-append-results query rf acc info))
    init
    queries))
 
@@ -309,10 +164,10 @@
 
 (mu/defn- append-queries-reduce-fn :- fn?
   "Build the version of [[qp.pipeline/*reduce*]] used at the top level for running pivot queries."
-  [info              :- [:maybe ::lib.schema.info/info]
-   more-queries      :- [:sequential ::lib.schema/query]
-   vrf               :- [:fn {:error/message "volatile"} volatile?]
-   column-mapping-fn :- ::column-mapping-fn]
+  [info         :- [:maybe ::lib.schema.info/info]
+   more-queries :- [:sequential ::lib.schema/query]
+   vrf          :- [:fn {:error/message "volatile"} volatile?]
+   pivot-limit  :- [:maybe nat-int?]]
   (when (seq more-queries)
     ;; execute holds open a connection from [[execute-reducible-query]] so we need to manage connections
     ;; in the reducing part reduce fn. The default run fn is what orchestrates this together and we just
@@ -321,53 +176,68 @@
       ;; signature usually has metadata in place of driver but we are hijacking
       (fn multiple-reducing [rff {::keys [driver]} query]
         (assert driver (format "Expected 'metadata' returned by %s" `append-queries-execute-fn))
-        (let [respond (fn [metadata reducible-rows]
-                        (let [rf (rff metadata)]
+        (let [master-row-count (volatile! 0)
+              respond (fn respond* [metadata reducible-rows]
+                        (let [rf (rff metadata)
+                              counting-rf (fn counting-rf*
+                                            ([] (rf))
+                                            ([acc] (rf acc))
+                                            ([acc row]
+                                             (vswap! master-row-count inc)
+                                             (rf acc row)))]
                           (assert (ifn? rf))
                           (try
-                            (transduce identity (completing rf) reducible-rows)
+                            (transduce identity (completing counting-rf) reducible-rows)
                             (catch Throwable e
-                              (throw (ex-info (tru "Error reducing result rows")
+                              (throw (ex-info (tru "Error reducing result rows: {0}" (ex-message e))
                                               {:type qp.error-type/qp}
                                               e))))))
               ;; restore the bindings for the original execute function, otherwise we'd infinitely recurse back here and
               ;; we don't want that now do we. Replace the reduce function with something simple that's not going to do
               ;; anything crazy like close our output stream prematurely; we can let the top-level reduce function worry
               ;; about that.
-              acc     (binding [qp.pipeline/*execute* orig-execute
-                                qp.pipeline/*reduce* (fn [rff metadata reducible-rows]
-                                                       (let [rf (rff metadata)]
-                                                         (transduce identity rf reducible-rows)))]
-                        (-> (qp.pipeline/*execute* driver query respond)
-                            (process-queries-append-results more-queries @vrf info column-mapping-fn)))]
+              first-result (binding [qp.pipeline/*execute* orig-execute
+                                     qp.pipeline/*reduce*  (fn [rff metadata reducible-rows]
+                                                             (let [rf (rff metadata)]
+                                                               (transduce identity rf reducible-rows)))]
+                             (qp.pipeline/*execute* driver query respond))
+              truncated?   (and pivot-limit (>= @master-row-count pivot-limit))
+              acc          (if truncated?
+                             first-result
+                             (binding [qp.pipeline/*execute* orig-execute
+                                       qp.pipeline/*reduce* (fn [rff metadata reducible-rows]
+                                                              (let [rf (rff metadata)]
+                                                                (transduce identity rf reducible-rows)))]
+                               (process-queries-append-results first-result more-queries @vrf info)))
+              result       (@vrf acc)]
           ;; completion arity can't be threaded because the value is derefed too early
-          (qp.pipeline/*result* (@vrf acc)))))))
+          (qp.pipeline/*result* (cond-> result
+                                  (and truncated? (map? result))
+                                  (assoc-in [:data :pivot_rows_truncated] @master-row-count))))))))
 
 (mu/defn- append-queries-rff-and-fns
   "RFF and QP pipeline functions to use when executing pivot queries."
-  [info              :- [:maybe ::lib.schema.info/info]
-   rff               :- ::qp.schema/rff
-   more-queries      :- [:sequential ::lib.schema/query]
-   column-mapping-fn :- ::column-mapping-fn]
+  [info         :- [:maybe ::lib.schema.info/info]
+   rff          :- ::qp.schema/rff
+   more-queries :- [:sequential ::lib.schema/query]
+   pivot-limit  :- [:maybe nat-int?]]
   (let [vrf (volatile! nil)]
     {:rff      (append-queries-rff rff vrf)
      :execute  (append-queries-execute-fn more-queries)
-     :reduce   (append-queries-reduce-fn info more-queries vrf column-mapping-fn)}))
+     :reduce   (append-queries-reduce-fn info more-queries vrf pivot-limit)}))
 
 (mu/defn- process-multiple-queries
   "Allows the query processor to handle multiple queries, stitched together to appear as one"
   [[{:keys [info], :as first-query} & more-queries] :- [:sequential ::lib.schema/query]
    rff                                              :- ::qp.schema/rff
-   column-mapping-fn                                :- ::column-mapping-fn]
+   pivot-limit                                      :- [:maybe nat-int?]]
   (if (empty? more-queries)
     ;; Single query - use normal QP pipeline to preserve userland metadata
-    (qp/process-query (cond-> first-query
-                        (seq info) qp/userland-query)
-                      rff)
+    (qp/process-query (maybe-userland first-query) rff)
     ;; Multiple queries - use custom pivot pipeline
-    (let [{:keys [rff execute reduce]} (append-queries-rff-and-fns info rff more-queries column-mapping-fn)
-          first-query                  (cond-> first-query
-                                         (seq info) qp/userland-query)]
+    ;; Only the first query, whose execution spans all the others, records its running time under the pivot's hash.
+    (let [{:keys [rff execute reduce]} (append-queries-rff-and-fns (dissoc info :pivot/query-hash) rff more-queries pivot-limit)
+          first-query                  (maybe-userland first-query)]
       (binding [qp.pipeline/*execute* (or execute qp.pipeline/*execute*)
                 qp.pipeline/*reduce*  (or reduce qp.pipeline/*reduce*)]
         (qp/process-query first-query rff)))))
@@ -375,31 +245,26 @@
 (mu/defn- column-name-pivot-options :- ::pivot-opts
   "Looks at the `pivot_table.column_split` key in the card's visualization settings and generates `pivot-rows` and
   `pivot-cols` to use for generating subqueries. Supports column name-based settings only."
-  [query        :- [:map
-                    [:database ::lib.schema.id/database]]
-   viz-settings :- [:maybe :map]]
+  [query        :- ::qp.schema/any-query
+   viz-settings :- [:maybe :metabase.lib.schema.common/visualization-settings]]
   (let [{:keys [rows columns values]} (:pivot_table.column_split viz-settings)
         show-row-totals    (get viz-settings :pivot.show_row_totals true)
         show-column-totals (get viz-settings :pivot.show_column_totals true)
         metadata-provider  (or (:lib/metadata query)
-                               (lib.metadata.jvm/application-database-metadata-provider (:database query)))
+                               (lib-be/application-database-metadata-provider (:database query)))
         query              (lib/query metadata-provider query)
-        unique-name-fn     (lib.util/unique-name-generator)
+        unique-name-fn     (lib/unique-name-generator)
         returned-columns   (->> (lib/returned-columns query)
                                 (mapv #(update % :name unique-name-fn)))
         aggregations       (filter #(= (:lib/source %) :source/aggregations)
                                    returned-columns)
         breakouts          (filter :lib/breakout? returned-columns)
-        column-alias->index (into {}
-                                  (map-indexed (fn [i column] [(:lib/desired-column-alias column) i]))
-                                  (concat breakouts aggregations))
         column-name->index (into {}
-                                 (map-indexed (fn [i column] [(:name column) i]))
+                                 (map-indexed (fn [i column] [(:lib/deduplicated-name column) i]))
                                  (concat breakouts aggregations))
         process-columns    (fn process-columns [column-names]
                              (when (seq column-names)
-                               (into [] (keep (fn [n] (or (column-alias->index n)
-                                                          (column-name->index n)))) column-names)))
+                               (into [] (keep column-name->index) column-names)))
         pivot-opts         {:pivot-rows         (process-columns rows)
                             :pivot-cols         (process-columns columns)
                             :pivot-measures     (process-columns values)
@@ -408,14 +273,13 @@
     (when (some some? (vals pivot-opts))
       pivot-opts)))
 
-(mu/defn- column-sort-order :- ::pivot-opts
+(mu/defn- column-sort-order :- [:maybe ::column-sort-order]
   "Looks at the `pivot_table.column_sort_order` key in the card's visualization settings and generates a map from the
   column's index to the setting (either ascending or descending)."
-  [query        :- [:map
-                    [:database ::lib.schema.id/database]]
-   viz-settings :- [:maybe :map]]
+  [query        :- ::qp.schema/any-query
+   viz-settings :- [:maybe :metabase.lib.schema.common/visualization-settings]]
   (let [metadata-provider  (or (:lib/metadata query)
-                               (lib.metadata.jvm/application-database-metadata-provider (:database query)))
+                               (lib-be/application-database-metadata-provider (:database query)))
         query              (lib/query metadata-provider query)
         index-in-breakouts (into {}
                                  (comp (filter (some-fn :lib/breakout? #(= (:lib/source %) :source/aggregations)))
@@ -432,15 +296,14 @@
 (mu/defn- field-ref-pivot-options :- ::pivot-opts
   "Looks at the `pivot_table.column_split` key in the card's visualization settings and generates `pivot-rows` and
   `pivot-cols` to use for generating subqueries. Supports field ref-based settings only."
-  [query        :- [:map
-                    [:database ::lib.schema.id/database]]
-   viz-settings :- [:maybe :map]]
+  [query        :- ::qp.schema/any-query
+   viz-settings :- [:maybe :metabase.lib.schema.common/visualization-settings]]
   (let [{:keys [rows columns values]} (:pivot_table.column_split viz-settings)
         show-row-totals    (get viz-settings "pivot.show_row_totals" true)
         show-column-totals (get viz-settings "pivot.show_column_totals" true)
         metadata-provider             (or (:lib/metadata query)
-                                          (lib.metadata.jvm/application-database-metadata-provider (:database query)))
-        mlv2-query                    (lib/query metadata-provider query)
+                                          (lib-be/application-database-metadata-provider (:database query)))
+        mbql5-query                    (lib/query metadata-provider query)
         breakouts                     (into []
                                             (map-indexed (fn [i col]
                                                            (cond-> col
@@ -450,17 +313,17 @@
                                                              ;; match a column that has a join-alias but whose source is a
                                                              ;; model
                                                              (contains? col :lib/card-id) (assoc :lib/source :source/card))))
-                                            (concat (lib/breakouts-metadata mlv2-query)
-                                                    (lib/aggregations-metadata mlv2-query)))
+                                            (concat (lib/breakouts-metadata mbql5-query)
+                                                    (lib/aggregations-metadata mbql5-query)))
         index-in-breakouts            (fn index-in-breakouts [legacy-ref]
                                         (try
                                           (::idx (lib.equality/find-column-for-legacy-ref
-                                                  mlv2-query
+                                                  mbql5-query
                                                   -1
                                                   legacy-ref
                                                   breakouts))
                                           (catch Throwable e
-                                            (log/errorf e "Error finding matching column for ref %s" (pr-str legacy-ref))
+                                            (log/errorf "Error finding matching column for ref %s: %s" (pr-str legacy-ref) (ex-message e))
                                             nil)))
         process-refs                  (fn process-refs [refs]
                                         (when (seq refs)
@@ -479,9 +342,8 @@
 
   Field ref-based visualization settings are considered legacy and are not used for new questions. To not break existing
   questions we need to support both old- and new-style settings until they are fully migrated."
-  [query        :- [:map
-                    [:database ::lib.schema.id/database]]
-   viz-settings :- [:maybe :map]]
+  [query        :- ::qp.schema/any-query
+   viz-settings :- [:maybe :metabase.lib.schema.common/visualization-settings]]
   (when viz-settings
     (let [{:keys [rows columns]} (:pivot_table.column_split viz-settings)]
       (merge
@@ -490,52 +352,89 @@
          (field-ref-pivot-options query viz-settings))
        {:column-sort-order (column-sort-order query viz-settings)}))))
 
-(mu/defn- column-mapping-for-subquery :- ::pivot-column-mapping
-  [num-canonical-cols            :- ::lib.schema.common/int-greater-than-or-equal-to-zero
-   num-canonical-breakouts       :- ::num-breakouts
-   subquery-breakout-combination :- ::breakout-combination]
-  ;; all pivot queries consist of *breakout columns* + *other columns*. Breakout columns are always first, and the only
-  ;; thing that can change between subqueries. The other columns will always be the same, and in the same order.
-  (let [;; one of the breakouts will always be for the pivot group breakout added by [[add-pivot-group-breakout]],
-        ;; always added last, but this is not included in the breakout combination, so add it in so we make sure it's
-        ;; mapped properly
-        subquery-breakout-combination
-        (conj subquery-breakout-combination (dec num-canonical-breakouts))
+(defn- resolve-refs-to-uuids
+  "Resolve `refs` to breakout `:lib/uuid` values from the last stage of `query`.
 
-        ;; First, let's build a map of the canonical column index to the index in the current subquery. To build the
-        ;; map, we build it in two parts:
-        canonical-index->subquery-index
-        (merge
-         ;; 1. breakouts remapping, based on the `:qp.pivot/breakout-combination`
-         (into {}
-               (map (fn [[subquery-index canonical-index]]
-                      [canonical-index subquery-index]))
-               (m/indexed subquery-breakout-combination))
-         ;; 2. other columns remapping, which just takes the other columns offset in the subquery and moves that column
-         ;;    so it matches up with the position it is in the canonical query.
-         (let [canonical-other-columns-offset num-canonical-breakouts
-               subquery-other-columns-offset  (count subquery-breakout-combination)
-               num-other-columns              (- num-canonical-cols num-canonical-breakouts)]
-           (into {}
-                 (map (fn [i]
-                        [(+ canonical-other-columns-offset i) (+ subquery-other-columns-offset i)]))
-                 (range num-other-columns))))]
-    ;; e.g.
-    ;;
-    ;;    ;; column 1 in the subquery results corresponds to 2 in the canonical results, 3 corresponds to 0
-    ;;    {1 2, 3 0}
-    ;;
-    ;; next, let's use that map to make a vector of like
-    ;;
-    ;;    [nil 2 nil 0]
-    ;;
-    ;; e.g.
-    ;;
-    ;; * canonical column 0 has no corresponding column in the subquery
-    ;; * canonical column 2 corresponds to subquery column 1
-    (mapv (fn [i]
-            (get canonical-index->subquery-index i))
-          (range num-canonical-cols))))
+  `refs` is a sequence of pivot column references, either column-name strings (modern viz-settings) or legacy
+  field-ref vectors. Refs that don't resolve (including ones that throw during resolution) are silently dropped.
+  Returns nil when `refs` is empty."
+  [query refs]
+  (when (seq refs)
+    (let [breakout-cols (filter :lib/breakout? (lib/returned-columns query))
+          resolver      (if (every? string? refs)
+                          (into {} (map (juxt :name :lib/source-uuid)) breakout-cols)
+                          (fn ref-resolver [a-ref]
+                            (try
+                              (:lib/source-uuid (lib.equality/find-column-for-legacy-ref query -1 a-ref breakout-cols))
+                              (catch Throwable _ nil))))]
+      (into [] (keep resolver) refs))))
+
+(mu/defn- build-pivot-clause :- [:maybe [:ref :metabase.lib.schema/pivot]]
+  "Build the MBQL5 `:pivot` clause that expresses the pivot intent in `viz-settings`, with row/column refs resolved
+  against the last stage's breakouts in `query`. Returns nil when there is no `:pivot_table.column_split` or when
+  neither rows nor columns resolve."
+  [query        :- :metabase.lib.schema/query
+   viz-settings :- [:maybe :metabase.lib.schema.common/visualization-settings]]
+  (when-let [{:keys [rows columns]} (:pivot_table.column_split viz-settings)]
+    (let [row-uuids (resolve-refs-to-uuids query rows)
+          col-uuids (resolve-refs-to-uuids query columns)]
+      (when (or (seq row-uuids) (seq col-uuids))
+        {:rows               (or row-uuids [])
+         :columns            (or col-uuids [])
+         :show-row-totals    (lib.pivot/read-show-flag viz-settings :pivot.show_row_totals    "pivot.show_row_totals")
+         :show-column-totals (lib.pivot/read-show-flag viz-settings :pivot.show_column_totals "pivot.show_column_totals")}))))
+
+(mu/defn apply-pivot-viz-settings :- ::lib.schema/query
+  "Attach a `:pivot` clause to the last stage of `query`, derived from `viz-settings` (see [[build-pivot-clause]]
+  for the clause shape and resolution rules).
+
+  Returns `query` unchanged when the last stage already has `:pivot`, when `viz-settings` is empty, or when no refs
+  resolve."
+  [query        :- ::lib.schema/query
+   viz-settings :- [:maybe :metabase.lib.schema.common/visualization-settings]]
+  (let [clause (when (and (not (lib.pivot/has-pivot? query))
+                          (seq viz-settings))
+                 (build-pivot-clause query viz-settings))]
+    (cond-> query
+      clause (lib.pivot/with-pivot clause))))
+
+(def ^:private legacy-pivot-keys
+  [:pivot-rows :pivot_rows
+   :pivot-cols :pivot_cols
+   :pivot-measures :pivot_measures
+   :show-row-totals :show_row_totals
+   :show-column-totals :show_column_totals])
+
+(mu/defn apply-legacy-pivot-keys :- ::lib.schema/query
+  "Translate MBQL4 top-level pivot keys on `query` into an MBQL5 `:pivot` clause on the last stage, then strip the
+  legacy keys.
+
+  Reads positional-index keys (`:pivot-rows` / `:pivot_rows`, `:pivot-cols` / `:pivot_cols`) and the
+  `show-*-totals` flags. Throws `:invalid-query` when any index falls outside the last stage's
+  breakout vector. `:pivot-measures` is presentation-only and is discarded.
+
+  If `query` already has a `:pivot` clause, only strips the legacy keys."
+  [query :- ::lib.schema/query]
+  (let [rows-idxs (or (:pivot-rows query) (:pivot_rows query))
+        cols-idxs (or (:pivot-cols query) (:pivot_cols query))
+        stripped  (reduce dissoc query legacy-pivot-keys)]
+    (if (or (lib.pivot/has-pivot? query)
+            (and (nil? rows-idxs) (nil? cols-idxs)))
+      stripped
+      (let [breakouts   (vec (:breakout (lib.util/query-stage query -1)))
+            _           (pivot.common/validate-pivot-indices! (count breakouts) rows-idxs cols-idxs)
+            index->uuid (fn [i]
+                          (when (nat-int? i)
+                            (lib.options/uuid (nth breakouts i))))
+            row-uuids   (into [] (keep index->uuid) (or rows-idxs []))
+            col-uuids   (into [] (keep index->uuid) (or cols-idxs []))]
+        (if (and (empty? row-uuids) (empty? col-uuids))
+          stripped
+          (lib.pivot/with-pivot stripped
+            {:rows               row-uuids
+             :columns            col-uuids
+             :show-row-totals    (lib.pivot/read-show-flag query :show-row-totals    :show_row_totals)
+             :show-column-totals (lib.pivot/read-show-flag query :show-column-totals :show_column_totals)}))))))
 
 (defn- remapped-field
   [breakout]
@@ -545,8 +444,8 @@
                             [::qp.add-remaps/original-field-dimension-id
                              ::qp.add-remaps/new-field-dimension-id]))))
 
-(defn- remapped-indexes
-  [breakouts]
+(mu/defn- remapped-indexes :- ::pivot.common/remapped-indexes
+  [breakouts :- [:maybe [:sequential ::lib.schema.expression/expression]]]
   (let [remap-pairs (first
                      (reduce (fn [[m i] breakout]
                                [(reduce-kv (fn [m remap-key id]
@@ -561,36 +460,7 @@
                      ::qp.add-remaps/new-field-dimension-id))
           (vals remap-pairs))))
 
-(mu/defn- splice-in-remap :- ::breakout-combination
-  "Returns the breakout combination corresponding to `breakout-combination` belonging to the base query (the one without
-  remapped fields) accounting for the field remapping specified by `remap`.
-
-  To produce the breakout combination for the real query, the target indexes have to be included whenever a source
-  index is selected, we have to shift the indexes before which a mapped index is inserted."
-  [breakout-combination :- ::breakout-combination
-   remap                :- [:map-of ::index ::index]]
-  (if (or (empty? remap)
-          (empty? breakout-combination))
-    breakout-combination
-    (let [limit (apply max breakout-combination)
-          selected (set breakout-combination)
-          inserted (set (vals remap))]
-      (loop [index 0, offset 0, combination #{}]
-        (if (> index limit)
-          (-> combination sort vec)
-          (let [offset (cond-> offset
-                         (inserted (+ index offset)) inc)
-                spliced-index (+ index offset)
-                selected? (selected index)
-                mapped-index (when selected?
-                               (remap spliced-index))]
-            (recur (inc index)
-                   offset
-                   (cond-> combination
-                     selected?    (conj spliced-index)
-                     mapped-index (into (take-while some? (iterate remap mapped-index)))))))))))
-
-(mu/defn- make-column-mapping-fn :- ::column-mapping-fn
+(mu/defn- add-canonical-col-info
   "This returns a function with the signature
 
     (f query) => column-remapping
@@ -606,36 +476,432 @@
   Some pivot subqueries exclude certain breakouts, so we need to fill in those missing columns with `nil` in the overall
   results -- "
   [query :- ::lib.schema/query]
-  (let [remapped-query          (qp.add-remaps/add-remapped-columns query)
-        remap                   (remapped-indexes (lib/breakouts remapped-query))
-        canonical-query         (add-pivot-group-breakout remapped-query 0) ; a query that returns ALL the result columns.
-        canonical-cols          (lib/returned-columns canonical-query)
-        num-canonical-cols      (count canonical-cols)
-        num-canonical-breakouts (count (filter :lib/breakout? canonical-cols))]
-    (fn column-mapping-fn* [subquery]
-      (let [breakout-combination (:qp.pivot/breakout-combination subquery)
-            full-breakout-combination (splice-in-remap breakout-combination remap)]
-        (column-mapping-for-subquery num-canonical-cols num-canonical-breakouts full-breakout-combination)))))
+  ;; `drop-fields-in-summaries` mirrors the QP preprocessing step that strips `:fields` from stages that
+  ;; also have `:aggregation`/`:breakout`. Without it, `lib/returned-columns` on such a stage would
+  ;; concat the `:fields` cols with the summary cols and overcount `:qp.pivot/num-remapped-cols` (#81203).
+  (let [remapped-query           (-> query
+                                     qp.drop-fields-in-summaries/drop-fields-in-summaries
+                                     qp.add-remaps/add-remapped-columns)
+        remap                    (remapped-indexes (lib/breakouts remapped-query))
+        remapped-cols            (lib/returned-columns remapped-query)
+        num-remapped-cols        (count remapped-cols)
+        num-unremapped-breakouts (count (lib/breakouts query))
+        num-remapped-breakouts   (count (filter :lib/breakout? remapped-cols))]
+    (assoc query
+           :qp.pivot/num-remapped-cols        num-remapped-cols
+           :qp.pivot/num-unremapped-breakouts num-unremapped-breakouts
+           :qp.pivot/num-remapped-breakouts   num-remapped-breakouts
+           :qp.pivot/remapped-indexes         remap)))
+
+(defn- pivot-query-max-rows
+  "Calculate the per-sub-query row limit for the multi-query pivot path:
+  `floor(pivot-max-result-rows / num-aggregations)`. Falls back to the raw setting value if there are no
+  aggregations (shouldn't happen for pivot queries)."
+  [query]
+  (let [cap      (qp.settings/pivot-max-result-rows)
+        num-aggs (count (lib/aggregations query))]
+    (if (pos? num-aggs)
+      (quot cap num-aggs)
+      cap)))
+
+(defn- mbql-pivot-options
+  "Translate the last stage's MBQL `:pivot` clause into the same pivot-options shape [[pivot-options]]
+  produces, resolving each row/column breakout clause to its index in the stage's breakouts. Returns
+  `nil` when the stage has no `:pivot` or every row/column reference resolves outside its own breakouts."
+  [query]
+  (when-let [pivot-clause (lib.pivot/pivot query)]
+    (let [breakout-ix (zipmap (lib/breakouts query -1) (range))
+          ->indexes   (fn [bs] (into [] (keep breakout-ix) bs))
+          rows        (->indexes (lib.pivot/pivot-rows query))
+          cols        (->indexes (lib.pivot/pivot-columns query))]
+      (when (or (seq rows) (seq cols))
+        {:pivot-rows         rows
+         :pivot-cols         cols
+         :pivot-measures     nil
+         :show-row-totals    (lib.pivot/read-show-flag pivot-clause :show-row-totals)
+         :show-column-totals (lib.pivot/read-show-flag pivot-clause :show-column-totals)
+         :column-sort-order  {}}))))
+
+(defn- pivot-opts-from-query
+  "Return `query`'s pivot-options map — as downstream export middleware and streaming writers read it from
+  `[:middleware :pivot-options]` — or `nil` when `query` carries no pivot intent."
+  [query]
+  (or
+   (pivot-options query (get query :viz-settings))
+   (pivot-options query (get-in query [:info :visualization-settings]))
+   (not-empty (select-keys query [:pivot-rows :pivot-cols :pivot-measures :show-row-totals :show-column-totals]))
+   (mbql-pivot-options query)))
+
+(mu/defn- run-multi-query-pivot
+  "Generate one subquery per breakout combination implied by `query`'s pivot intent (viz-settings or legacy keys),
+  run each, and merge the results through `rff` into a single output."
+  [query :- ::lib.schema/query
+   rff   :- [:maybe ::qp.schema/rff]]
+  (let [rff         (or rff qp.reducible/default-rff)
+        pivot-opts  (pivot-opts-from-query query)
+        pivot-limit (pivot-query-max-rows query)
+        query       (-> query
+                        ;; the sub-queries are no pivot queries
+                        (lib.util/update-query-stage -1 dissoc :pivot)
+                        (assoc-in [:middleware :pivot-options] pivot-opts)
+                        (assoc-in [:constraints :max-results] pivot-limit)
+                        (cond-> (get-in query [:constraints :max-results-bare-rows])
+                          (update-in [:constraints :max-results-bare-rows] min pivot-limit))
+                        add-canonical-col-info)
+        all-queries (generate-queries query pivot-opts)]
+    (process-multiple-queries all-queries rff pivot-limit)))
+
+(defn- query-database
+  "Return the Lib-style Database metadata for `query`, using its attached `:lib/metadata` provider or, failing that,
+  one constructed from its `:database` id."
+  [query]
+  (lib.metadata/database
+   (or (:lib/metadata query)
+       (lib-be/application-database-metadata-provider (:database query)))))
+
+(def ^:private ^:const float-compare-decimals
+  "Decimal scale used when quantising fractional numbers for cross-path pivot row comparison. 6 is well below
+  meaningful precision for pivot aggregates (SUM/AVG typically report 2–4 decimals) but well above the noise
+  produced by different summation orders on doubles (order-of `10⁻¹⁴`)."
+  6)
+
+(defn- round-numeric
+  "Normalise any numeric `x` to a `BigDecimal` at [[float-compare-decimals]] scale. Non-numbers pass through
+  unchanged."
+  [x]
+  (if (number? x)
+    (.setScale ^java.math.BigDecimal (bigdec x) (int float-compare-decimals) java.math.RoundingMode/HALF_UP)
+    x))
+
+(defn- cache-updated-at
+  "The `updated_at` timestamp stamped on a result when it was served from the QP cache, or `nil` for a fresh
+  result. Handles both the raw shape (`:cache/details` set by the cache middleware) and the userland-processed
+  shape (`:cached` set by `process-userland-query`)."
+  [result]
+  (or (:cached result)
+      (get-in result [:cache/details :updated_at])))
+
+(defn- pivot-rows-equivalent?
+  "Row-frequency equivalence for pivot results. Each cell is normalised via [[round-numeric]] to tolerate
+  float-associativity noise between multi-`SUM` per-subquery and native `SUM` over `GROUPING SETS`. Falls
+  back to `:row_count` when a caller-supplied rff didn't carry rows through, and to `true` when neither
+  side exposes rows or a row count — the caller's rff (e.g. a bare-count reducer or a streaming HTTP
+  writer) has reduced past what the parity checker can meaningfully compare."
+  [r1 r2]
+  (cond
+    (and (map? r1) (-> r1 :data :rows)
+         (map? r2) (-> r2 :data :rows))
+    (= (frequencies (mapv #(mapv round-numeric %) (-> r1 :data :rows)))
+       (frequencies (mapv #(mapv round-numeric %) (-> r2 :data :rows))))
+
+    (and (map? r1) (:row_count r1)
+         (map? r2) (:row_count r2))
+    (= (:row_count r1) (:row_count r2))
+
+    :else
+    true))
+
+(defn- ->cols-fingerprint
+  "Extract the field-shape signature the FE contract cares about — `:name`, `:field_ref`, `:source`, and
+  `:base_type` — for each column in `result`'s metadata. Ignores incidental fields (`:fingerprint`,
+  `:lib/*`, `:table_id`, `:id`, `:display_name`, etc.) that legitimately differ between pivot paths, and
+  drops the synthetic `pivot-grouping` column, which the multi-query post-processing middleware splices in
+  fresh (no `:field_ref`) but the SQL native path emits as a real `SELECT` column (with a `:field_ref`)."
+  [result]
+  (into []
+        (comp (remove #(= (:name %) lib.pivot/pivot-grouping-column-name))
+              (map (fn [col] (select-keys col [:name :field_ref :source :base_type]))))
+        (or (get-in result [:data :cols])
+            (get-in result [:data :results_metadata :columns]))))
+
+(defn pivot-cols-equivalent?
+  "Column-metadata equivalence for pivot results — compares the [[->cols-fingerprint]] projection so pivot
+  paths agree on the FE-visible shape (name/field_ref/source/base_type) even when rows legitimately differ
+  (e.g. `:limit N` under multi-query applies per subquery)."
+  [r1 r2]
+  (= (->cols-fingerprint r1) (->cols-fingerprint r2)))
+
+(def pivot-outcome-comparator
+  "Predicate `(fn [r1 r2])` the parity checker uses to decide whether two pivot-flow outcomes agree. Defaults
+  to [[pivot-rows-equivalent?]] (row-frequency compare). Tests whose paths legitimately diverge on rows but
+  should agree on column metadata can override this via
+  [[metabase.query-processor.pivot.test-util/with-metadata-only-parity]]."
+  pivot-rows-equivalent?)
+
+(defn- outcomes-data-equivalent?
+  "Delegates to [[pivot-outcome-comparator]], then logs an asymmetric-cache warning when a mismatch shows
+  the cache freshness diverged between the two sides (helps distinguish stale-cache flakes from real
+  regressions)."
+  [r1 r2]
+  (let [equivalent? (pivot-outcome-comparator r1 r2)
+        control-cached-at   (cache-updated-at r1)
+        candidate-cached-at (cache-updated-at r2)]
+    (when (and (not equivalent?)
+               (or control-cached-at candidate-cached-at))
+      (log/warnf "pivot parity mismatch with cache asymmetry — control cache updated_at=%s, candidate cache updated_at=%s"
+                 control-cached-at candidate-cached-at))
+    equivalent?))
+
+(defn- maybe-add-default-pivot-clause
+  "Attach a default `:pivot` clause to the last stage so the SQL compiler emits every subset of breakouts
+  as its own grouping set (the powerset). Returns `query` unchanged when the last stage already carries
+  `:pivot`, isn't an MBQL stage, or has no breakouts to pivot over."
+  [query]
+  (cond-> query
+    (and (= :mbql.stage/mbql (:lib/type (lib.util/query-stage query -1)))
+         (seq (:breakout (lib.util/query-stage query -1)))
+         (not (lib.pivot/has-pivot? query)))
+    (lib.pivot/with-pivot {:rows [] :columns [] :show-row-totals true :show-column-totals true})))
+
+(defn- cap-constraints-at-pivot-setting
+  "Cap `:max-results` (and `:max-results-bare-rows`, so it stays ≤ `:max-results`) at the pivot setting.
+  A caller-supplied smaller value is still honored."
+  [query]
+  (let [cap (qp.settings/pivot-max-result-rows)]
+    (cond-> (update-in query [:constraints :max-results] u/safe-min cap)
+      (get-in query [:constraints :max-results-bare-rows])
+      (update-in [:constraints :max-results-bare-rows] min cap))))
+
+(defn- run-single-query-pivot
+  "Translate `query`'s pivot intent (legacy top-level keys and/or viz-settings) into an MBQL5 `:pivot` clause
+  on the last stage and submit to the standard QP through `rff`."
+  [query rff]
+  (let [viz-settings (or (:viz-settings query)
+                         (get-in query [:info :visualization-settings]))
+        pivot-opts   (pivot-opts-from-query query)
+        prepared     (wrapping-pivot-generation-errors query
+                       (-> query
+                           apply-legacy-pivot-keys
+                           (apply-pivot-viz-settings viz-settings)
+                           maybe-add-default-pivot-clause
+                           (assoc-in [:middleware :pivot-options] pivot-opts)
+                           cap-constraints-at-pivot-setting
+                           maybe-userland))]
+    (qp/process-query prepared rff)))
+
+(defn- running-in-clojure-test?
+  "True when a `clojure.test` test is currently on the stack — the presence of `*testing-vars*` is the
+  authoritative signal that a test is running. `resolve` (not `requiring-resolve`) is enough: if
+  `clojure.test` isn't loaded, no test is running."
+  []
+  (boolean (some-> (resolve 'clojure.test/*testing-vars*) deref seq)))
+
+#_{:clj-kondo/ignore [:metabase/discourage-dynamic-vars]}
+(def ^:dynamic *check-pivot-parity?*
+  "Controls whether [[run-pivot-query]] runs both the native and multi-query pivot paths whenever both are
+  applicable and reports disagreement via [[on-parity-mismatch]]. Left at the default sentinel
+  `::default`, parity is on whenever a `clojure.test` test is currently running. Bind to `true` or
+  `false` to override; the [[without-pivot-parity-check]] helper does exactly that for tests whose
+  queries intentionally diverge between the two paths."
+  ::default)
+
+(defn- pivot-parity-enabled?
+  "Resolve [[*check-pivot-parity?*]] to a boolean. `::default` means \"on when a `clojure.test` test is
+  running\"."
+  []
+  (case *check-pivot-parity?*
+    ::default (running-in-clojure-test?)
+    (boolean *check-pivot-parity?*)))
+
+(defn- flow-comparison-pairs
+  "Ordered pairs `[a b]` where `a` precedes `b` in `flows`."
+  [flows]
+  (into []
+        (for [[a & rst] (take-while next (iterate next flows))
+              b         rst]
+          [a b])))
+
+(defn- failure-signature
+  "Comparable `[class-name message]` for a failure's deepest cause. Accepts a `Throwable` (walks
+  `ex-cause`) or a `catch-exceptions`-formatted `:status :failed` map (whose outer `:class` /
+  `:error` are already the deepest cause's)."
+  [failure]
+  (letfn [(->class-name [c]
+            (cond
+              (nil? c)            nil
+              (instance? Class c) (.getName ^Class c)
+              :else               (name c)))]
+    (cond
+      (instance? Throwable failure)
+      (let [root (loop [t failure] (if-let [c (ex-cause t)] (recur c) t))]
+        [(->class-name (class root)) (ex-message root)])
+
+      (and (map? failure) (= (:status failure) :failed))
+      [(->class-name (:class failure)) (:error failure)])))
+
+(defn- outcomes-match?
+  "True when two pivot-flow outcome maps -- `{:outcome ...}` or `{:throwable ...}` -- agree: both
+  failed with the same root-cause signature, or both succeeded on `pivot-outcome-comparator`."
+  [{a-outcome :outcome a-throwable :throwable}
+   {b-outcome :outcome b-throwable :throwable}]
+  (let [a-failure (or a-throwable (when (= (:status a-outcome) :failed) a-outcome))
+        b-failure (or b-throwable (when (= (:status b-outcome) :failed) b-outcome))]
+    (cond
+      (and a-failure b-failure) (= (failure-signature a-failure) (failure-signature b-failure))
+      (or  a-failure b-failure) false
+      :else                     (outcomes-data-equivalent? a-outcome b-outcome))))
+
+(defn- divergent-pivot-pairs
+  "Vector of `[flow-a flow-b]` pairs from `outcomes` whose outcomes disagree, ordered by
+  [[flow-comparison-pairs]] over `flows`."
+  [flows outcomes]
+  (into []
+        (filter (fn [[a b]] (not (outcomes-match? (outcomes a) (outcomes b)))))
+        (flow-comparison-pairs flows)))
+
+(defn- outcome->reportable
+  "The value inside an outcome map, whether success or failure."
+  [{:keys [outcome throwable]}]
+  (or outcome throwable))
+
+(defn- default-on-parity-mismatch!
+  "Default handler for pivot parity mismatches: emits one `clojure.test/do-report` `:fail` per divergent pair
+  when a test is on the stack (each pair's outcomes fed as `:expected` / `:actual` so the runner prints a
+  diff), and logs otherwise."
+  [{:keys [outcomes divergent-pairs]}]
+  (if (running-in-clojure-test?)
+    (doseq [[a b] divergent-pairs]
+      ((requiring-resolve 'clojure.test/do-report)
+       {:type     :fail
+        :message  (str "Pivot parity mismatch — " (name a) " and " (name b) " paths disagree")
+        :expected (outcome->reportable (get outcomes a))
+        :actual   (outcome->reportable (get outcomes b))}))
+    (log/warnf "Pivot parity mismatch — divergent pairs %s; outcomes %s"
+               (pr-str divergent-pairs)
+               (pr-str (update-vals outcomes outcome->reportable)))))
+
+(def on-parity-mismatch
+  "Called with `{:outcomes {<flow> <outcome-map> ...} :divergent-pairs [[<flow-a> <flow-b>] ...]}` when the
+  parity checker sees any divergence across the pivot flows it ran (a subset of `:native-pivot-query`,
+  `:union-all`, `:multi-query`). Each outcome is a `{:outcome ...}` on success or `{:throwable ...}` on
+  failure. `:divergent-pairs` preserves the order of [[pivot-flow-comparison-pairs]]. Defaults to
+  [[default-on-parity-mismatch!]]."
+  default-on-parity-mismatch!)
+
+(defmulti pivot-shapes
+  "Single-query pivot shapes `query` can run against `database`, in order of decreasing efficiency.
+  Each shape value doubles as a `:qp.pivot/forced-shape` stage value the driver's compiler recognises.
+  Returns an ordered collection — a seq, vector, or empty when the driver has no single-query shape
+  for this query."
+  {:added "0.66.0" :arglists '([query database])}
+  (fn [_query database] (:engine database))
+  :hierarchy #'driver/hierarchy)
+
+(defmethod pivot-shapes :default [_query _database] [])
+
+(defn- pivot-parity-flows
+  "Ordered flow list for `query` on `database`: `:multi-query` (reference) followed by whatever
+  single-query shapes [[pivot-shapes]] declares, in that method's order."
+  [query database]
+  (into [:multi-query] (pivot-shapes query database)))
+
+(defn- run-pivot-flow
+  "Run one pivot `flow` against `query`. `primary-flow` uses the caller's `rff` and lets
+  `qp.pipeline/*result*` pass through; the others use the default rff and result handler purely to
+  collect an outcome for comparison. Returns `{:outcome ...}` on success or `{:throwable ...}` on
+  failure — annotated with `:elapsed-ms` and `:flow`."
+  [flow query rff primary-flow]
+  (let [primary?     (= flow primary-flow)
+        multi?       (= flow :multi-query)
+        runner       (if multi? run-multi-query-pivot run-single-query-pivot)
+        force-shape  (when-not multi? flow)
+        scoped-query (cond-> query
+                       force-shape (lib.util/update-query-stage -1 assoc :qp.pivot/forced-shape force-shape))
+        do-run       (fn [rff]
+                       (let [timer  (u/start-timer)
+                             result (try {:outcome (runner scoped-query rff)}
+                                         (catch Throwable t {:throwable t}))]
+                         (assoc result :flow flow, :elapsed-ms (u/since-ms timer))))]
+    (if primary?
+      (do-run rff)
+      (binding [qp.pipeline/*result* qp.pipeline/default-result-handler]
+        (do-run qp.reducible/default-rff)))))
+
+(defn- run-with-parity-check
+  "Run every flow in `flows` against `query` and report any pairwise divergence via
+  [[on-parity-mismatch]]. `primary-flow` uses the caller's `rff`; the others use the default rff for
+  comparison only. Returns `primary-flow`'s success value or rethrows its exception.
+
+  Logs a per-flow timing summary at WARN so CI logs surface which flow was slow and by how much when a
+  mismatch or timeout occurs on some environment (e.g. Presto CI). Format: `pivot-parity {:driver ..
+  :primary .. :outcomes {<flow> {:elapsed-ms .. :ok? .. :cause [..]}}}`. `:cause` is the ex-message chain
+  (root cause first) — populated only for failing flows so a Presto `Socket closed` after the JDBC
+  polling budget shows up plainly instead of the QP's wrapping `Error preparing statement` text."
+  [query rff flows primary-flow]
+  (let [outcomes        (into {} (map (fn [flow] [flow (run-pivot-flow flow query rff primary-flow)])) flows)
+        divergent-pairs (divergent-pivot-pairs flows outcomes)
+        cause-chain     (fn [^Throwable t]
+                          (loop [t t, acc []]
+                            (if t (recur (.getCause t) (conj acc (.getMessage t))) acc)))]
+    (log/warnf "pivot-parity %s"
+               (pr-str {:driver  (:engine (query-database query))
+                        :primary primary-flow
+                        :flows   (update-vals outcomes
+                                              (fn [{:keys [throwable elapsed-ms]}]
+                                                (cond-> {:elapsed-ms elapsed-ms
+                                                         :ok?        (nil? throwable)}
+                                                  throwable (assoc :cause (cause-chain throwable)))))
+                        :divergent-pairs divergent-pairs}))
+    (when (seq divergent-pairs)
+      (on-parity-mismatch {:outcomes outcomes, :divergent-pairs divergent-pairs}))
+    (let [{:keys [outcome throwable]} (get outcomes primary-flow)]
+      (if throwable (throw throwable) outcome))))
+
+(mu/defn- run-pivot-query*
+  "Impl for [[run-pivot-query]]: pick the pivot implementation for `query` and run it through `rff`."
+  [query :- ::qp.schema/any-query
+   rff   :- ::qp.schema/rff]
+  (let [query             (-> query
+                              qp.middleware.normalize/normalize-preprocessing-middleware
+                              lib/prepare-after-deserialization)
+        db                (query-database query)
+        flows             (pivot-parity-flows query db)
+        single-flow       (first (remove #{:multi-query} flows))
+        use-single-query? (and single-flow (qp.settings/use-native-pivot-tables))
+        primary-flow      (if use-single-query? single-flow :multi-query)
+        primary           (if use-single-query? run-single-query-pivot run-multi-query-pivot)]
+    (binding [qp.pipeline/*pivot?* true]
+      (if (and single-flow (pivot-parity-enabled?))
+        (run-with-parity-check query rff flows primary-flow)
+        (primary query rff)))))
 
 (mu/defn run-pivot-query
-  "Run the pivot query. You are expected to wrap this call in [[metabase.query-processor.streaming/streaming-response]]
-  yourself."
-  ([query]
+  "Run the pivot `query` through `rff`.
+
+  Dispatches between two implementations:
+  * **Single-query** — the driver's own `:pivot` compiler renders one query that covers every breakout
+    combination. Chosen when [[qp.settings/use-native-pivot-tables]] is on and the driver has a
+    single-query shape available (see [[pivot-parity-flows]] for the family rules).
+  * **Multi-query** — one query per breakout combination, results concatenated. Chosen otherwise.
+
+  When [[*check-pivot-parity?*]] is on and the driver has more than the `:multi-query` flow, every flow
+  runs (primary via the caller's rff, others via the default rff for comparison) and disagreement is
+  reported via [[on-parity-mismatch]]. Parity checking is on by default in clojure.test tests.
+
+  A query with `:info` is run as a userland query, so any error is caught and returned as a formatted
+  error response rather than thrown.
+
+  Wrap this call in [[metabase.query-processor.streaming/streaming-response]] yourself."
+  ([query :- ::qp.schema/any-query]
    (run-pivot-query query nil))
 
-  ([query :- ::qp.schema/query
+  ([query :- ::qp.schema/any-query
     rff   :- [:maybe ::qp.schema/rff]]
-   (log/debugf "Running pivot query:\n%s" (u/pprint-to-str query))
-   (binding [qp.perms/*card-id* (get-in query [:info :card-id])]
-     (qp.setup/with-qp-setup [query query]
-       (let [rff               (or rff qp.reducible/default-rff)
-             query             (lib/query (qp.store/metadata-provider) query)
-             pivot-opts        (or
-                                (pivot-options query (get query :viz-settings))
-                                (pivot-options query (get-in query [:info :visualization-settings]))
-                                (not-empty (select-keys query [:pivot-rows :pivot-cols :pivot-measures :show-row-totals :show-column-totals])))
-             query             (-> query
-                                   (assoc-in [:middleware :pivot-options] pivot-opts))
-             all-queries       (generate-queries query pivot-opts)
-             column-mapping-fn (make-column-mapping-fn query)]
-         (process-multiple-queries all-queries rff column-mapping-fn))))))
+   (log/debug "Running pivot query")
+   ;; Do not bind *card-id* here. Callers that run pivot queries for saved cards
+   ;; (e.g. card.clj, dashboards) bind *card-id* themselves before calling
+   ;; run-pivot-query, so binding it here from the query's :info map would be
+   ;; redundant and could mis-set it for ad-hoc queries that carry a :card-id in :info.
+   (qp.setup/with-qp-setup [query query]
+     (let [query (cond-> query
+                   ;; Hash the query before it gets rewritten so its running time is recorded under the same hash
+                   ;; that `metabase.query-processor.card/enrich-strategy` looks up for the cache strategy.
+                   (seq (:info query)) (-> (assoc-in [:info :pivot/query-hash] (qp.util/query-hash query))
+                                           qp/userland-query))
+           rff   (or rff qp.reducible/default-rff)
+           ;; Everything between here and the first `qp/process-query`
+           ;; runs outside the QP's own middleware, so wrap it in the same exception-catching middleware
+           ;; `qp/process-query` applies to userland queries.
+           ;; No-op for non-userland queries.
+           qp    (qp.catch-exceptions/catch-exceptions run-pivot-query*)]
+       (qp query rff)))))

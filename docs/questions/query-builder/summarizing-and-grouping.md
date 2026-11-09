@@ -1,8 +1,11 @@
 ---
 title: Summarizing and grouping
+summary: Learn how to summarize and group your data in Metabase's query builder to calculate metrics like counts, sums, and averages across different dimensions.
 ---
 
 # Summarizing and grouping
+
+This page covers the Summarize and Grouping steps in the [query builder](./editor.md).
 
 ![Summarizing](../images/summarize-step.png)
 
@@ -27,9 +30,9 @@ And a lot of the time, you'll then **group** that metric by:
 
 Adding a summarize step lets you choose how to aggregate the data from the previous step. You can pick one or more metrics, and optionally group those metrics by one or more dimensions (columns). When picking your metrics you can choose from basic functions like `sum`, `average`, and `count`; or you can pick a common metric defined by an admin; or you can create a [custom expression](./expressions.md) by writing a formula.
 
-Common metrics include:
+Basic metrics include:
 
-- **Count of rows:** the total of number of rows in the table, after any filters have been applied. If you're looking at your `Orders` table and want to know how many orders were placed with a price greater than \$40, you’d filter by “Price greater than 40,” and then select `Count of rows`, because you want Metabase to count how many orders matched your filter.
+- **Count of rows:** the total number of rows in the table, after any filters have been applied. If you're looking at your `Orders` table and want to know how many orders were placed with a price greater than \$40, you’d filter by “Price greater than 40,” and then select `Count of rows`, because you want Metabase to count how many orders matched your filter.
 - **Sum of …:** the sum of all the values in a specific column.
 - **Average of …:** the average of all the values in a single column.
 - **Number of distinct values of…:** the number of unique values in all the cells of a single column. This is useful when trying to find out things like how many different _types_ of products were sold last month (not how many were sold in total).
@@ -43,9 +46,11 @@ If you summarize and add a grouping you can then summarize _again_. You can also
 
 ![Multiple summarize steps](../images/multiple-summarize-steps.png)
 
-You can also add metrics and groupings on the results page in a sidebar: the top of the sidebar where you pick the number ("metric") you want to see, and the part below is where you pick how to group that number (or how to "break it out").
+You can also add metrics and groupings on the results page in a sidebar: the top of the sidebar is where you pick the number ("metric") you want to see, and the part below is where you pick how to group that number (or how to "break it out").
 
-If your admins have created any named [metrics](../../data-modeling/metrics.md) that are specific to your company or organization, they will be in this dropdown under the **Common Metrics** section. These might be things like your company’s official way of calculating revenue.
+If your admins have created any named [metrics](../../data-modeling/semantic-layer/metrics.md) or [measures](../../data-modeling/semantic-layer/measures.md) that are specific to your company or organization, they will be in this dropdown under the **Metrics** or **Measures** section. These might be things like your company’s official way of calculating revenue.
+
+By default, Metabase will limit the number of aggregated rows displayed to 10,000 rows. You can change this limit with the environment variable [`MB_AGGREGATED_QUERY_ROW_LIMIT`](../../configuring-metabase/environment-variables.md#mb_aggregated_query_row_limit).
 
 ## Grouping your metrics
 
@@ -62,6 +67,8 @@ Some grouping columns will give you the option of choosing how big or small to m
 - For datetime columns, you can click on the words `by month` to change the grouping to day, week, hour, quarter, year, etc. You'll also be able to add multiple breakouts by the same datetime column with different time granularities (for example, group by week and day of the week). For information on grouping by week of year, see [Week of year](./expressions/week.md).
 - For numeric columns like age, Metabase will automatically "bin" the results, so you'll see your metric grouped in age brackets, like 0–10, 11–20, 21–30, etc. Just like with dates, you can click on the current binning option to change it to a specific number of bins. Currently, you can't choose your own ranges for bins.
 
-  ![Multiple groupings](../images/histogram-bins.png)
+  ![Binning options](../images/histogram-bins.png)
 
   If you select a fixed number of bins, Metabase will break the range of the data into that number of equal size intervals. Some intervals might end up having no data, and Metabase will not display them.
+
+- For latitude and longitude columns, Metabase bins the results automatically. Click the binning option to bin by a set number of degrees, or to turn binning off.

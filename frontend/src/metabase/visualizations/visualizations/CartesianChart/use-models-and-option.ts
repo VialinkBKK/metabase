@@ -1,25 +1,29 @@
 import { useCallback, useMemo } from "react";
 
-import { useTranslateContent } from "metabase/i18n/hooks";
-import { isReducedMotionPreferred } from "metabase/lib/dom";
-import { extractRemappings } from "metabase/visualizations";
-import { getChartMeasurements } from "metabase/visualizations/echarts/cartesian/chart-measurements";
-import { getCartesianChartModel } from "metabase/visualizations/echarts/cartesian/model";
-import type {
-  CartesianChartModel,
-  ScatterPlotModel,
-  WaterfallChartModel,
-} from "metabase/visualizations/echarts/cartesian/model/types";
-import { getCartesianChartOption } from "metabase/visualizations/echarts/cartesian/option";
+import { useTranslateContent } from "metabase/content-translation/hooks";
+import { isReducedMotionPreferred } from "metabase/utils/dom";
+import type { LegendChart } from "metabase/visualizations/components/legend/plots";
 import { getTooltipOption } from "metabase/visualizations/echarts/cartesian/option/tooltip";
-import { getScatterPlotModel } from "metabase/visualizations/echarts/cartesian/scatter/model";
-import { getScatterPlotOption } from "metabase/visualizations/echarts/cartesian/scatter/option";
-import { getTimelineEventsModel } from "metabase/visualizations/echarts/cartesian/timeline-events/model";
-import { getWaterfallChartModel } from "metabase/visualizations/echarts/cartesian/waterfall/model";
-import { getWaterfallChartOption } from "metabase/visualizations/echarts/cartesian/waterfall/option";
 import { useBrowserRenderingContext } from "metabase/visualizations/hooks/use-browser-rendering-context";
 import type { VisualizationProps } from "metabase/visualizations/types";
-import type { CardDisplayType } from "metabase-types/api";
+import {
+  type CartesianChartModel,
+  type ScatterPlotModel,
+  type WaterfallChartModel,
+  extractRemappings,
+  getCartesianChartModel,
+  getCartesianChartOption,
+  getChartLayout,
+  getChartModelAtHeight,
+  getScatterPlotModel,
+  getScatterPlotOption,
+  getTimelineEventsModel,
+  getWaterfallChartModel,
+  getWaterfallChartOption,
+} from "metabase/viz-core";
+import type { CardDisplayType, TimelineEventId } from "metabase-types/api";
+
+const NO_SELECTED_TIMELINE_EVENT_IDS: TimelineEventId[] = [];
 
 export function useModelsAndOption(
   {
@@ -31,18 +35,19 @@ export function useModelsAndOption(
     height,
     hiddenSeries = new Set(),
     timelineEvents,
-    selectedTimelineEventIds,
+    selectedTimelineEventIds = NO_SELECTED_TIMELINE_EVENT_IDS,
     onRender,
-    hovered,
-    isFullscreen,
+    isDashboard,
   }: VisualizationProps,
-  containerRef: React.RefObject<HTMLDivElement>,
+  containerRef: React.RefObject<HTMLDivElement | null>,
+  containerSize: Pick<VisualizationProps, "width" | "height">,
 ) {
   const tc = useTranslateContent();
 
   const renderingContext = useBrowserRenderingContext({
     fontFamily,
-    isFullscreen,
+    isDashboard,
+    containerSize,
   });
 
   const seriesToRender = useMemo(
@@ -59,7 +64,7 @@ export function useModelsAndOption(
     ? timelineEvents.length !== 0
     : false;
 
-  const chartModel = useMemo(() => {
+  const baseChartModel = useMemo(() => {
     let getModel;
 
     settings["graph.x_axis.title_text"] = tc(
@@ -67,6 +72,9 @@ export function useModelsAndOption(
     );
     settings["graph.y_axis.title_text"] = tc(
       settings["graph.y_axis.title_text"],
+    );
+    settings["graph.y_axis.right.title_text"] = tc(
+      settings["graph.y_axis.right.title_text"],
     );
 
     getModel = getCartesianChartModel;
@@ -100,9 +108,25 @@ export function useModelsAndOption(
     tc,
   ]);
 
-  const chartMeasurements = useMemo(
+  // Fold before layout: the fold decides which category labels get measured.
+  const chartModel = useMemo(
+    () => getChartModelAtHeight(baseChartModel, height, settings),
+    [baseChartModel, height, settings],
+  );
+
+  const legendChart: LegendChart = useMemo(
+    () => ({
+      chartModel: baseChartModel,
+      settings,
+      hasTimelineEvents,
+      renderingContext,
+    }),
+    [baseChartModel, settings, hasTimelineEvents, renderingContext],
+  );
+
+  const chartLayout = useMemo(
     () =>
-      getChartMeasurements(
+      getChartLayout(
         chartModel,
         settings,
         hasTimelineEvents,
@@ -114,33 +138,15 @@ export function useModelsAndOption(
   );
 
   const timelineEventsModel = useMemo(
-    () =>
-      getTimelineEventsModel(
-        chartModel,
-        chartMeasurements,
-        timelineEvents ?? [],
-        renderingContext,
-      ),
-    [chartModel, chartMeasurements, timelineEvents, renderingContext],
+    () => getTimelineEventsModel(chartModel, chartLayout, timelineEvents ?? []),
+    [chartModel, chartLayout, timelineEvents],
   );
-
-  const selectedOrHoveredTimelineEventIds = useMemo(() => {
-    const ids = [];
-
-    if (selectedTimelineEventIds != null) {
-      ids.push(...selectedTimelineEventIds);
-    }
-    if (hovered?.timelineEvents != null) {
-      ids.push(...hovered.timelineEvents.map((e) => e.id));
-    }
-
-    return ids;
-  }, [selectedTimelineEventIds, hovered?.timelineEvents]);
 
   const tooltipOption = useMemo(() => {
     return getTooltipOption(
       chartModel,
       settings,
+      // Unjustified type cast. FIXME
       card.display as CardDisplayType,
       containerRef,
     );
@@ -154,14 +160,17 @@ export function useModelsAndOption(
     const shouldAnimate = !isReducedMotionPreferred();
 
     let baseOption;
+
     switch (card.display) {
       case "waterfall":
         baseOption = getWaterfallChartOption(
+          // Unjustified type cast. FIXME
           chartModel as WaterfallChartModel,
           width,
-          chartMeasurements,
+          chartLayout,
+          hasTimelineEvents,
           timelineEventsModel,
-          selectedOrHoveredTimelineEventIds,
+          selectedTimelineEventIds,
           settings,
           shouldAnimate,
           renderingContext,
@@ -169,10 +178,12 @@ export function useModelsAndOption(
         break;
       case "scatter":
         baseOption = getScatterPlotOption(
+          // Unjustified type cast. FIXME
           chartModel as ScatterPlotModel,
-          chartMeasurements,
+          chartLayout,
+          hasTimelineEvents,
           timelineEventsModel,
-          selectedOrHoveredTimelineEventIds,
+          selectedTimelineEventIds,
           settings,
           width,
           shouldAnimate,
@@ -181,10 +192,12 @@ export function useModelsAndOption(
         break;
       default:
         baseOption = getCartesianChartOption(
+          // Unjustified type cast. FIXME
           chartModel as CartesianChartModel,
-          chartMeasurements,
+          chartLayout,
+          hasTimelineEvents,
           timelineEventsModel,
-          selectedOrHoveredTimelineEventIds,
+          selectedTimelineEventIds,
           settings,
           width,
           shouldAnimate,
@@ -202,12 +215,20 @@ export function useModelsAndOption(
     card.display,
     tooltipOption,
     chartModel,
-    chartMeasurements,
+    chartLayout,
+    hasTimelineEvents,
     timelineEventsModel,
-    selectedOrHoveredTimelineEventIds,
+    selectedTimelineEventIds,
     settings,
     renderingContext,
   ]);
 
-  return { chartModel, timelineEventsModel, option };
+  return {
+    chartModel,
+    chartLayout,
+    legendChart,
+    timelineEventsModel,
+    option,
+    renderingContext,
+  };
 }

@@ -1,47 +1,51 @@
 import { useMemo } from "react";
 import { t } from "ttag";
 
-/* eslint-disable-next-line no-restricted-imports -- deprecated sdk import */
-import { useSdkDashboardContext } from "embedding-sdk/components/public/dashboard/context";
-/* eslint-disable-next-line no-restricted-imports -- deprecated sdk import */
-import { transformSdkQuestion } from "embedding-sdk/lib/transform-question";
-import { editQuestion } from "metabase/dashboard/actions";
+import { canDownloadResults } from "metabase/common/utils/dataset";
+import { editQuestion, openEventsSidebar } from "metabase/dashboard/actions";
 import { useDashboardContext } from "metabase/dashboard/context";
-import type { DashboardCardCustomMenuItem } from "metabase/embedding-sdk/types/plugins";
-import { useDispatch } from "metabase/lib/redux";
-import { isNotNull } from "metabase/lib/types";
-import { PLUGIN_DASHCARD_MENU } from "metabase/plugins";
+import { transformSdkQuestion } from "metabase/embedding-sdk/lib/transform-question";
+import type {
+  DashCardMenuItem,
+  DashboardCardCustomMenuItem,
+} from "metabase/embedding-sdk/types/plugins";
+import { useDispatch } from "metabase/redux";
 import { Icon, Menu } from "metabase/ui";
 import type Question from "metabase-lib/v1/Question";
 import type { DashCardId, Dataset } from "metabase-types/api";
 
-import type { DashCardMenuItem } from "./dashcard-menu";
-import { canDownloadResults, canEditQuestion } from "./utils";
+import { canEditQuestion } from "./utils";
 
 type DashCardMenuItemsProps = {
+  dashcardId: DashCardId;
   question: Question;
   result: Dataset;
   isDownloadingData: boolean;
   onDownload: () => void;
   onEditVisualization?: () => void;
-  dashcardId?: DashCardId;
+  canEdit?: boolean;
+  withTimelineEvents?: boolean;
 };
 export const DashCardMenuItems = ({
+  dashcardId,
   question,
   result,
   isDownloadingData,
   onDownload,
   onEditVisualization,
-  dashcardId,
+  canEdit,
+  withTimelineEvents = false,
 }: DashCardMenuItemsProps) => {
   const dispatch = useDispatch();
 
   const {
-    onEditQuestion = (question, mode = "notebook") =>
-      dispatch(editQuestion(question, mode)),
-  } = useSdkDashboardContext();
-
-  const { dashcardMenu } = useDashboardContext();
+    dashcardMenu,
+    onEditQuestion = (
+      question: Question,
+      mode: "query" | "view" | "notebook" = "notebook",
+    ) => dispatch(editQuestion(question, mode)),
+  } = useDashboardContext();
+  // Unjustified type cast. FIXME
   const dashcardMenuItems = dashcardMenu as
     | DashboardCardCustomMenuItem
     | undefined;
@@ -57,14 +61,14 @@ export const DashCardMenuItems = ({
       key: string;
     })[] = [];
 
-    if (withEditLink && onEditVisualization) {
+    if (withEditLink && canEdit && onEditVisualization) {
       items.push({
         key: "MB_EDIT_VISUALIZER_QUESTION",
         iconName: "lineandbar",
         label: t`Edit visualization`,
         onClick: onEditVisualization,
       });
-    } else if (withEditLink && canEditQuestion(question)) {
+    } else if (withEditLink && canEdit && canEditQuestion(question)) {
       const type = question.type();
       if (type === "question") {
         items.push({
@@ -92,6 +96,16 @@ export const DashCardMenuItems = ({
       }
     }
 
+    if (withTimelineEvents) {
+      items.push({
+        key: "MB_TIMELINE_EVENTS",
+        iconName: "calendar",
+        label: t`Events`,
+        onClick: () =>
+          dispatch(openEventsSidebar({ dashcardId }, "dashcard_menu")),
+      });
+    }
+
     if (withDownloads && canDownloadResults(result)) {
       items.push({
         key: "MB_DOWNLOAD_RESULTS",
@@ -102,12 +116,6 @@ export const DashCardMenuItems = ({
         closeMenuOnClick: false,
       });
     }
-
-    items.push(
-      ...PLUGIN_DASHCARD_MENU.dashcardMenuItemGetters
-        .map((itemGetter) => itemGetter(question, dashcardId, dispatch))
-        .filter(isNotNull),
-    );
 
     if (customItems) {
       items.push(
@@ -135,9 +143,11 @@ export const DashCardMenuItems = ({
     result,
     withDownloads,
     withEditLink,
-    onEditVisualization,
+    withTimelineEvents,
     dashcardId,
     dispatch,
+    onEditVisualization,
+    canEdit,
   ]);
 
   return menuItems.map((item) => {

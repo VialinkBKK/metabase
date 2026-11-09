@@ -6,7 +6,7 @@
    [metabase.util.i18n :refer [deferred-tru]]))
 
 (defsetting store-use-staging
-  (deferred-tru "If staging store should be used instead of prod. True on dev.")
+  "If staging store should be used instead of prod. True on dev."
   :type       :boolean
   :visibility :internal
   :default    config/is-dev?
@@ -25,7 +25,7 @@
 (defn- store-url-default
   "Returns the default store URL, with support for environment variable override in dev mode only."
   []
-  (if-some [env-url (and config/is-dev? (config/config-str :mb-store-url))]
+  (if-some [env-url (when config/is-dev? (config/config-str :mb-store-url))]
     (str env-url)
     (str "https://store" (when (default-to-staging?) ".staging") ".metabase.com")))
 
@@ -35,7 +35,7 @@
 (defsetting store-url
   (deferred-tru "Store URL.")
   :type       :string
-  :encryption :no
+  :encryption :when-encryption-key-set
   ;; should be :internal, but FE doesn't get internal settings. -- Someone else
   ;;
   ;; OK, then no it shouldn't be internal at all, internal is literally for Settings that are only visible to backend
@@ -45,18 +45,9 @@
   :doc        false
   :export?    false)
 
-(defsetting store-api-url
-  (deferred-tru "Store API URL.")
-  :type       :string
-  :encryption :no
-  :visibility :internal
-  :default    (str "https://store-api" (when (default-to-staging?) ".staging") ".metabase.com")
-  :doc        false
-  :export?    false)
-
 (defsetting migration-dump-file
-  (deferred-tru "Dump file for migrations.")
-  :encryption :no
+  "Dump file for migrations."
+  :encryption :when-encryption-key-set
   :visibility :internal
   :default    nil
   :doc        false
@@ -69,7 +60,7 @@
   (or (= version "vLOCAL_DEV") (= version "vUNKNOWN") (str/ends-with? version "-SNAPSHOT")))
 
 (defsetting migration-dump-version
-  (deferred-tru "Custom dump version for migrations.")
+  "Custom dump version for migrations."
   :encryption :no
   :visibility :internal
   ;; Use a known version on staging when there's no real version.
@@ -86,7 +77,7 @@
         "Will take up to 1m to propagate to other Metabase instances in a cluster."
         "Audit tables are excluded from read-only-mode mode."))
   :type       :boolean
-  :visibility :admin
+  :visibility :admin-write-authed-read
   :default    false
   :doc        false
   :export?    false)

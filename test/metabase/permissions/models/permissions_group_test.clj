@@ -3,10 +3,9 @@
    [clojure.test :refer :all]
    [metabase.config.core :as config]
    [metabase.models.interface :as mi]
-   [metabase.permissions.api-test-util :as perm-test-util]
+   [metabase.permissions-rest.api-test-util :as perm-test-util]
+   [metabase.permissions-rest.data-permissions.graph :as data-perms.graph]
    [metabase.permissions.core :as perms]
-   [metabase.permissions.models.data-permissions :as data-perms]
-   [metabase.permissions.models.data-permissions.graph :as data-perms.graph]
    [metabase.permissions.models.permissions-group :as perms-group]
    [metabase.test :as mt]
    [metabase.test.fixtures :as fixtures]
@@ -16,6 +15,11 @@
    [toucan2.core :as t2]))
 
 (use-fixtures :once (fixtures/initialize :test-users))
+
+(deftest ^:parallel group-display-name-preserves-stored-name-test
+  (let [group {:magic_group_type perms-group/all-users-magic-group-type :name "Stored group name"}]
+    (is (= "Stored group name" (perms-group/group-display-name group false)))
+    (is (= "All internal users" (perms-group/group-display-name group true)))))
 
 (deftest admin-root-entry-test
   (testing "Check that the root entry for Admin was created"
@@ -41,7 +45,7 @@
           (is (thrown-with-msg?
                clojure.lang.ExceptionInfo
                #"You cannot edit or delete the .* permissions group"
-               (t2/update! :model/PermissionsGroup (u/the-id group) {:name "Cool People"}))))))))
+               (t2/update! :model/PermissionsGroup :id (u/the-id group) {:name "Cool People"}))))))))
 
 (deftest ^:parallel new-users-test
   (testing "newly created users should get added to the appropriate magic groups"
@@ -90,6 +94,23 @@
         (testing (format "Group = %s" (pr-str (:name group)))
           (is (group-has-full-access? (u/the-id group) database-id)))))))
 
+(deftest all-tenant-users-get-least-access-to-newly-created-databases-test
+  (let [group-id (u/the-id (perms-group/all-external-users))]
+    (mt/with-restored-data-perms-for-group! group-id
+      (doseq [database-id (t2/select-pks-set :model/Database :router_database_id nil)]
+        (perms/set-database-permission! group-id database-id :perms/view-data :unrestricted)
+        (perms/set-database-permission! group-id database-id :perms/create-queries :query-builder-and-native)
+        (perms/set-database-permission! group-id database-id :perms/download-results :one-million-rows))
+      (mt/with-model-cleanup [:model/Database]
+        (let [database-id (t2/insert-returning-pk! :model/Database
+                                                   {:name "Test" :engine "h2" :details "{}"})]
+          (is (= {:perms/view-data      :blocked
+                  :perms/create-queries :no}
+                 (t2/select-fn->fn :perm_type :perm_value :model/DataPermissions
+                                   :group_id group-id
+                                   :db_id database-id
+                                   :perm_type [:in [:perms/view-data :perms/create-queries]]))))))))
+
 (deftest add-remove-from-admin-group-test
   (testing "flipping the is_superuser bit should add/remove user from Admin group as appropriate"
     (testing "adding user to Admin should set is_superuser -> true"
@@ -101,27 +122,27 @@
   (testing "flipping the is_superuser bit should add/remove user from Admin group as appropriate"
     (testing "removing user from Admin should set is_superuser -> false"
       (mt/with-temp [:model/User {user-id :id} {:is_superuser true}]
-        (t2/delete! :model/PermissionsGroupMembership, :user_id user-id, :group_id (u/the-id (perms-group/admin)))
+        (perms/remove-user-from-group! user-id (perms-group/admin))
         (is (false? (t2/select-one-fn :is_superuser :model/User, :id user-id)))))))
 
 (deftest add-remove-from-admin-group-test-3
   (testing "flipping the is_superuser bit should add/remove user from Admin group as appropriate"
     (testing "setting is_superuser -> true should add user to Admin"
       (mt/with-temp [:model/User {user-id :id}]
-        (t2/update! :model/User user-id {:is_superuser true})
+        (t2/update! :model/User :id user-id {:is_superuser true})
         (is (true? (t2/exists? :model/PermissionsGroupMembership, :user_id user-id, :group_id (u/the-id (perms-group/admin)))))))))
 
 (deftest add-remove-from-admin-group-test-4
   (testing "flipping the is_superuser bit should add/remove user from Admin group as appropriate"
     (testing "setting is_superuser -> false should remove user from Admin"
       (mt/with-temp [:model/User {user-id :id} {:is_superuser true}]
-        (t2/update! :model/User user-id {:is_superuser false})
+        (t2/update! :model/User :id user-id {:is_superuser false})
         (is (false? (t2/exists? :model/PermissionsGroupMembership, :user_id user-id, :group_id (u/the-id (perms-group/admin)))))))))
 
 (deftest data-graph-for-group-check-all-groups-test
   (mt/with-temp [:model/PermissionsGroup {} {}
                  :model/Database         {} {}]
-    (doseq [group-id (t2/select-fn-set :id :model/PermissionsGroup)]
+    (doseq [group-id (t2/select-fn-set :id :model/PermissionsGroup :is_tenant_group false)]
       (testing (str "testing data-graph-for-group with group-id: [" group-id "].")
         (let [graph (data-perms.graph/api-graph {:group-id group-id})]
           (is (malli= [:map [:revision :int] [:groups :map]] graph))
@@ -158,20 +179,23 @@
                    :perms/download-results :one-million-rows
                    :perms/manage-table-metadata :no
                    :perms/manage-database :no}}}
-                (data-perms/data-permissions-graph :group-id group-id :db-id db-id))))))
-
+                (data-perms.graph/data-permissions-graph :group-id group-id :db-id db-id))))))
       (mt/with-temp [:model/Database         {db-id :id}    {}]
         (mt/with-no-data-perms-for-all-users!
           (mt/with-temp [:model/PermissionsGroup {group-id :id} {}]
             (is
              (= {group-id
                  {db-id
-                  {:perms/view-data :unrestricted
+                  ;; When EE code is on the classpath, a new group fails CLOSED to :blocked for a DB
+                  ;; where All Users is blocked, regardless of token features (UXW-4927); only a true
+                  ;; OSS jar falls back to :unrestricted.
+                  {:perms/view-data (if config/ee-available? :blocked :unrestricted)
                    :perms/create-queries :no
                    :perms/download-results :no
                    :perms/manage-table-metadata :no
-                   :perms/manage-database :no}}}
-                (data-perms/data-permissions-graph :group-id group-id :db-id db-id)))))))))
+                   :perms/manage-database :no
+                   :perms/transforms :no}}}
+                (data-perms.graph/data-permissions-graph :group-id group-id :db-id db-id)))))))))
 
 (deftest hydrate-members-tests
   (mt/with-temp [:model/PermissionsGroup           {group-id-1 :id}         {}
@@ -191,13 +215,11 @@
                                 (into {} results)
                                 (update-vals results (fn [members]
                                                        (set (map #(select-keys % [:id :is_group_manager]) members))))))]
-
       (testing "hydrate members only return active users for each group"
         (is (= {group-id-1 #{{:id user-1-g1}
                              {:id user-2-g1}}
                 group-id-2 #{{:id user-1-g2}}}
                (group-id->members))))
-
       (testing "return is_group_manager for each group if premium features are enabled"
         (when config/ee-available?
           (mt/with-premium-features #{:advanced-permissions}

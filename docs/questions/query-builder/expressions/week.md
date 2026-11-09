@@ -19,7 +19,7 @@ You can choose to group a metric by week of year in the query builder.
 2. Click on the dropdown with date granularity (for example, "by month") to the right of the field name;
 3. In the popup with date granularity options, click **More...** to see additional options, and select **Week of year**.
 
-The result will be summarized by week number (as opposed to week _dates_, like when you select "by week" option):
+The result will be summarized by week number (as opposed to week _dates_, like when you select the "by week" option):
 
 ![Summarize by week of year](../../images/summarize-by-week-of-year.png)
 
@@ -91,5 +91,5 @@ Here's an incomplete list of example functions:
 | -------- | ----------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
 | Postgres | `EXTRACT(WEEK FROM TIMESTAMP created_at)` | ISO algorithm                                                                                                         |
 | MySQL    | `WEEKOFYEAR("2017-06-15")`                | The first day of the week is Monday and the first week of the year has more than 3 days. Alternative functions exist. |
-| BigQuery | `EXTRACT(WEEK FROM DATE ticreated_at)`    | Weeks numbered from 0. Dates prior to the first Sunday of the year are in week 0. Alternative functions exist.        |
+| BigQuery | `EXTRACT(WEEK FROM DATE ticreated_at)`    | Weeks numbered from 0. Dates before the first Sunday of the year are in week 0. Alternative functions exist.        |
 | Redshift | `DATE_PART(week, TIMESTAMP created_at)`   | ISO algorithm                                                                                                         |

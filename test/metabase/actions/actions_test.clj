@@ -1,21 +1,27 @@
 (ns ^:mb/driver-tests metabase.actions.actions-test
+  {:clj-kondo/config '{:linters {:deprecated-var {:exclude {metabase.test.data/mbql-query {:namespaces [metabase.actions.actions-test]}
+                                                            metabase.test.data/run-mbql-query {:namespaces [metabase.actions.actions-test]}}}}}}
   (:require
+   [clojure.java.jdbc :as jdbc]
    [clojure.test :refer :all]
    [clojure.walk :as walk]
    [metabase.actions.actions :as actions]
+   [metabase.actions.error :as actions.error]
    [metabase.actions.execution :as actions.execution]
    [metabase.actions.models :as action]
    [metabase.api.common :refer [*current-user-permissions-set*]]
    [metabase.driver :as driver]
-   [metabase.query-processor :as qp]
+   [metabase.driver.connection :as driver.conn]
+   [metabase.driver.sql-jdbc.connection :as sql-jdbc.conn]
+   [metabase.driver.test-util :as driver.tu]
+   [metabase.query-processor.test :as qp]
+   [metabase.sync.core :as sync]
    [metabase.test :as mt]
+   [metabase.test.data.interface :as tx]
    [metabase.util :as u]
    [metabase.util.malli :as mu]
    [metabase.util.malli.schema :as ms]
-   [toucan2.core :as t2])
-  (:import
-   (org.apache.sshd.server SshServer)
-   (org.apache.sshd.server.forward AcceptAllForwardingFilter)))
+   [toucan2.core :as t2]))
 
 (set! *warn-on-reflection* true)
 
@@ -33,7 +39,7 @@
 
 (mu/defn- format-field-name :- :string
   "Format `field-name` appropriately for the current driver (e.g. uppercase it if we're testing against H2)."
-  [field-name]
+  [field-name :- :keyword]
   (name (mt/format-name (name field-name))))
 
 (defn- categories-row-count []
@@ -80,7 +86,7 @@
         (is (= {:rows-updated 1}
                (actions/perform-action! :model.row/update
                                         (assoc (mt/mbql-query categories {:filter [:= $id 50]})
-                                               :update_row {(format-field-name :name) "updated_row"})))
+                                               :update-row {(format-field-name :name) "updated_row"})))
             "Update should return the right shape")
         (is (= "updated_row"
                (-> (mt/rows (mt/run-mbql-query categories {:filter [:= $id 50]})) last last))
@@ -114,14 +120,14 @@
                                 result)))}
    {:action       :model.row/update
     :request-body (assoc (mt/mbql-query categories {:filter [:= $id 1]})
-                         :update_row {(format-field-name :name) "updated_row"})
+                         :update-row {(format-field-name :name) "updated_row"})
     :expected     {:rows-updated 1}}
    {:action       :model.row/delete
     :request-body (mt/mbql-query categories {:filter [:= $id 1]})
     :expected     {:rows-deleted 1}}
    {:action       :model.row/update
     :request-body (assoc (mt/mbql-query categories {:filter [:= $id 10]})
-                         :update_row {(format-field-name :name) "new-category-name"})
+                         :update-row {(format-field-name :name) "new-category-name"})
     :expected     {:rows-updated 1}}])
 
 (deftest feature-flags-test
@@ -162,7 +168,7 @@
                                                         test-scope
                                                         [{:database db-id
                                                           :table-id table-id
-                                                          :values   {:name "Toucannery"}}]))))))
+                                                          :values   {"name" "Toucannery"}}]))))))
 
 (defn- row-action? [action]
   (= (namespace action) "row"))
@@ -184,9 +190,9 @@
     (mt/with-actions-enabled
       (binding [*current-user-permissions-set* (delay #{"/"})]
         (let [query-that-returns-more-than-one (assoc (mt/mbql-query users {:filter [:>= $id 1]})
-                                                      :update_row {(format-field-name :name) "new-name"})
+                                                      :update-row {(format-field-name :name) "new-name"})
               query-that-returns-zero-row      (assoc (mt/mbql-query users {:filter [:= $id Integer/MAX_VALUE]})
-                                                      :update_row {(format-field-name :name) "new-name"})
+                                                      :update-row {(format-field-name :name) "new-name"})
               result-count                     (count (mt/rows (qp/process-query query-that-returns-more-than-one)))]
           (is (< 1 result-count))
           (is (thrown-with-msg? Exception #"Sorry, this would update [\d|,]+ rows, but you can only act on 1"
@@ -200,10 +206,8 @@
   (mt/test-drivers (mt/normal-drivers-with-feature :actions)
     (mt/with-actions-enabled
       (binding [*current-user-permissions-set* (delay #{"/"})]
-        (let [query-that-returns-more-than-one (assoc (mt/mbql-query checkins {:filter [:>= $id 1]})
-                                                      :update_row {(format-field-name :name) "new-name"})
-              query-that-returns-zero-row      (assoc (mt/mbql-query checkins {:filter [:= $id Integer/MAX_VALUE]})
-                                                      :update_row {(format-field-name :name) "new-name"})
+        (let [query-that-returns-more-than-one (mt/mbql-query checkins {:filter [:>= $id 1]})
+              query-that-returns-zero-row      (mt/mbql-query checkins {:filter [:= $id Integer/MAX_VALUE]})
               result-count                     (count (mt/rows (qp/process-query query-that-returns-more-than-one)))]
           (is (< 1 result-count))
           (is (thrown-with-msg? Exception #"Sorry, this would delete [\d|,]+ rows, but you can only act on 1"
@@ -235,7 +239,6 @@
       (mt/test-drivers (mt/normal-drivers-with-feature :actions)
         (mt/with-actions-test-data-tables #{"venues" "categories"}
           (with-actions-test-data-and-actions-permissively-enabled!
-
             ;; attempting to delete the `Pizza` category should fail because there are several rows in `venues` that have
             ;; this `category_id` -- it's an FK constraint violation.
             (is (thrown-with-msg? Exception (case driver/*driver*
@@ -281,6 +284,41 @@
                  (mt/rows (mt/run-mbql-query categories {:filter   [:starts-with $name "NEW"]
                                                          :order-by [[:asc $id]]}))))
           (is (= 77
+                 (categories-row-count))))))))
+
+(defn- unset-entity-key! [table-id]
+  (t2/update! :model/Field
+              {:table_id      table-id
+               :semantic_type :type/PK}
+              {:semantic_type nil}))
+
+(deftest table-row-create-no-pk
+  (testing "table.row/create"
+    (mt/test-drivers (mt/normal-drivers-with-feature :actions)
+      (with-actions-test-data-and-actions-permissively-enabled!
+        (let [db-id    (mt/id)
+              table-id (mt/id :categories)
+              name-col (format-field-name :name)]
+          (unset-entity-key! table-id)
+          (is (= 75
+                 (categories-row-count)))
+          (is (= {:status-code               400
+                  :errors                    [{:index 0, :error "Cannot edit a table without it having at least one entity key configured.", :type :data-editing/no-pk, :status-code 400, :table-id table-id}
+                                              {:index 1, :error "Cannot edit a table without it having at least one entity key configured.", :type :data-editing/no-pk, :status-code 400, :table-id table-id}]
+                  :results                   []
+                  :metabase.util.log/context {:action :table.row/create, :db-id db-id}}
+                 (try
+                   (actions/perform-action-v2! :table.row/create
+                                               test-scope
+                                               [{:database db-id, :table-id table-id, :row {name-col "NEW_A"}}
+                                                {:database db-id, :table-id table-id, :row {name-col "NEW_B"}}])
+                   ::did-not-throw
+                   (catch Exception e
+                     (or (ex-data e) ::did-not-throw-ex-info)))))
+          (is (= []
+                 (mt/rows (mt/run-mbql-query categories {:filter   [:starts-with $name "NEW"]
+                                                         :order-by [[:asc $id]]}))))
+          (is (= 75
                  (categories-row-count))))))))
 
 (deftest table-row-create-failure-test
@@ -345,6 +383,31 @@
                                                  :table-id table-id
                                                  :row      {(format-field-name :id) 74}}])))))
           (is (= 73 (categories-row-count))))))))
+
+(deftest table-row-delete-no-pk
+  (testing "table.row/delete"
+    (mt/test-drivers (mt/normal-drivers-with-feature :actions)
+      (with-actions-test-data-and-actions-permissively-enabled!
+        (let [db-id    (mt/id)
+              table-id (mt/id :categories)]
+          (unset-entity-key! table-id)
+          (is (= 75 (categories-row-count)))
+          (is (= {:type                      :data-editing/no-pk
+                  :status-code               400
+                  :table-id                  table-id
+                  :metabase.util.log/context {:action :table.row/delete
+                                              :db-id  db-id}}
+                 (try
+                   (actions/perform-action-v2! :table.row/delete
+                                               test-scope
+                                               [{:database db-id
+                                                 :table-id table-id
+                                                 :row      {}}])
+                   ::did-not-throw
+                   (catch Exception e
+                     (or (ex-data e) ::did-not-throw-ex-info)))))
+          (testing "nothing was deleted"
+            (is (= 75 (categories-row-count)))))))))
 
 (deftest table-row-delete-failure-test
   (testing "table.row/delete"
@@ -433,10 +496,44 @@
                                                   {:database (mt/id)
                                                    :table-id table-id
                                                    :row      row}))))))
-
           (testing "rows should be updated in the DB"
             (is (= [[1 "Seed Bowl"]
                     [2 "Millet Treat"]
+                    [3 "Artisan"]]
+                   (first-three-categories)))))))))
+
+(deftest table-row-update-no-pk
+  (testing "table.row/update"
+    (mt/test-drivers (mt/normal-drivers-with-feature :actions)
+      (with-actions-test-data-and-actions-permissively-enabled!
+        (let [db-id    (mt/id)
+              table-id (mt/id :categories)]
+          (unset-entity-key! table-id)
+          (is (= [[1 "African"]
+                  [2 "American"]
+                  [3 "Artisan"]]
+                 (first-three-categories)))
+          (is (= {:type                      :data-editing/no-pk
+                  :status-code               400
+                  :table-id                  table-id
+                  :metabase.util.log/context {:action :table.row/update
+                                              :db-id  db-id}}
+                 (try
+                   (let [id   (format-field-name :id)
+                         name (format-field-name :name)]
+                     (actions/perform-action-v2! :table.row/update
+                                                 test-scope
+                                                 (for [row [{id 1, name "Seed Bowl"}
+                                                            {id 2, name "Millet Treat"}]]
+                                                   {:database db-id
+                                                    :table-id table-id
+                                                    :row      row})))
+                   ::did-not-throw
+                   (catch Exception e
+                     (or (ex-data e) ::did-not-throw-ex-info)))))
+          (testing "rows should NOT be updated in the DB"
+            (is (= [[1 "African"]
+                    [2 "American"]
                     [3 "Artisan"]]
                    (first-three-categories)))))))))
 
@@ -499,26 +596,6 @@
                     [3 "Artisan"]]
                    (first-three-categories)))))))))
 
-(defn basic-auth-ssh-server ^java.io.Closeable [username password]
-  (try
-    (let [password-auth    (reify org.apache.sshd.server.auth.password.PasswordAuthenticator
-                             (authenticate [_ auth-username auth-password _session]
-                               (and
-                                (= auth-username username)
-                                (= auth-password password))))
-          keypair-provider (org.apache.sshd.server.keyprovider.SimpleGeneratorHostKeyProvider.)
-          sshd             (doto (SshServer/setUpDefaultServer)
-                             (.setPort 0)
-                             (.setKeyPairProvider keypair-provider)
-                             (.setPasswordAuthenticator password-auth)
-                             (.setForwardingFilter AcceptAllForwardingFilter/INSTANCE)
-                             .start)]
-      sshd)
-    (catch Throwable e
-      (throw (ex-info (format "Error starting SSH mock server with password")
-                      {:username username :password password}
-                      e)))))
-
 (deftest actions-on-ssh-tunneled-db
   ;; testing actions against dbs with ssh tunnels. Use an in-memory ssh server that just forwards to the correct port
   ;; through localhost. Since it is local, it's possible for the application to ignore the ssh tunnel and just talk to
@@ -527,13 +604,13 @@
   ;; through the ssh tunnel
   (mt/test-drivers (disj (mt/normal-drivers-with-feature :actions) :h2)
     (let [username "username", password "password"]
-      (with-open [ssh-server (basic-auth-ssh-server username password)]
+      (with-open [ssh-server (driver.tu/basic-auth-ssh-server username password)]
         (doseq [[correct-password? ssh-password] [[true password] [false "wrong-password"]]]
           (with-actions-test-data-and-actions-permissively-enabled!
-            (let [ssh-port (.getPort ^SshServer ssh-server)
+            (let [ssh-port (.getPort ssh-server)
                   table-id (mt/id :categories)]
               (let [details (t2/select-one-fn :details 'Database :id (mt/id))]
-                (t2/update! 'Database (mt/id)
+                (t2/update! 'Database :id (mt/id)
                             ;; enable ssh tunnel
                             {:details (assoc details
                                              :tunnel-enabled true
@@ -566,11 +643,11 @@
                           "None of the errors are from ssh")))))
               (testing "Can perform custom actions on ssh-enabled database"
                 (let [query (update (mt/native-query
-                                      {:query "update categories set name = 'foo' where id = {{id}}"
-                                       :template-tags {:id {:id "id"
-                                                            :name "id"
-                                                            :type "number"
-                                                            :display-name "Id"}}})
+                                     {:query "update categories set name = 'foo' where id = {{id}}"
+                                      :template-tags {:id {:id "id"
+                                                           :name "id"
+                                                           :type "number"
+                                                           :display-name "Id"}}})
                                     :type name)]
                   (mt/with-actions [{card-id :id} {:type :model
                                                    :dataset_query (mt/mbql-query categories)}
@@ -623,7 +700,7 @@
                (actions/perform-action!
                 :model.row/update
                 (assoc (mt/mbql-query ants {:filter [:= $id "d6b02fa2-bf7b-4b32-80d5-060b649c9859"]})
-                       :update_row {(format-field-name :name) "updated_row"})))
+                       :update-row {(format-field-name :name) "updated_row"})))
             "Update should return the right shape")
         (is (= "updated_row"
                (-> (mt/rows (mt/run-mbql-query ants
@@ -664,3 +741,136 @@
         (is (= 2 (first (mt/first-row (mt/run-mbql-query ants {:aggregation [[:count]], :limit 1})))))
         (is (= [] (mt/rows (mt/run-mbql-query ants {:filter [:= $id "d6b02fa2-bf7b-4b32-80d5-060b649c9859"]})))
             "Selecting for deleted rows should return an empty result")))))
+
+(deftest test-permission-denied-errors
+  (testing "Permission denied errors should return nice error messages"
+    ;; can't create users with restricted permissions in h2
+    (mt/with-actions-enabled
+      (mt/test-drivers (disj (mt/normal-drivers-with-feature :actions) :h2)
+        (let [test-db-name   "permission_test"
+              test-user-name "test_user"]
+          ;; Create a test database with test data
+          (tx/drop-if-exists-and-create-db! driver/*driver* test-db-name)
+          (let [details    (mt/dbdef->connection-details driver/*driver* :db {:database-name test-db-name})
+                admin-spec (sql-jdbc.conn/connection-details->spec driver/*driver* details)]
+            ;; Set up test data and user with limited permissions
+            (doseq [stmt (concat
+                          ;; Create the categories table with test data
+                          ["CREATE TABLE categories (id INTEGER PRIMARY KEY, name VARCHAR(255) NOT NULL);"
+                           "INSERT INTO categories (id, name) VALUES (1, 'Test Category');"
+                           "INSERT INTO categories (id, name) VALUES (2, 'Another Category');"]
+                          ;; Create test user with no password and only SELECT permissions
+                          [(format "DROP USER IF EXISTS %s" test-user-name)
+                           (case driver/*driver*
+                             :postgres (format "CREATE USER %s WITH PASSWORD '123456';" test-user-name)
+                             :mysql    (format "CREATE USER '%s'" test-user-name))
+                           (case driver/*driver*
+                             :postgres (format "GRANT SELECT ON TABLE categories TO %s" test-user-name)
+                             :mysql    (format "GRANT SELECT ON %s.categories TO '%s'" test-db-name test-user-name))])]
+              (when stmt
+                (jdbc/execute! admin-spec [stmt])))
+            ;; Create connection details for test user (no password)
+            (let [test-user-details (cond-> details
+                                      (= driver/*driver* :mysql)
+                                      (assoc :user test-user-name
+                                             :additional-options "useSSL=false&allowPublicKeyRetrieval=true")
+
+                                      (= driver/*driver* :postgres)
+                                      (assoc :user test-user-name
+                                             :password "123456"))]
+              ;; Create temporary database with test user credentials
+              (mt/with-temp [:model/Database test-database {:engine driver/*driver*, :details test-user-details :settings {:database-enable-actions true
+                                                                                                                           :database-enable-table-editing true}}]
+                ;; Sync the database to get table metadata
+                (sync/sync-database! (:id test-database))
+                (let [table-id (t2/select-one-pk :model/Table :db_id (:id test-database) :name "categories")]
+                  (testing (str "INSERT permission denied for " driver/*driver*)
+                    (let [result (try
+                                   (actions/perform-action-v2!
+                                    :table.row/create
+                                    test-scope
+                                    [{:database (:id test-database)
+                                      :table-id table-id
+                                      :row      {"name" "New Test Category"}}])
+                                   nil
+                                   (catch Exception e
+                                     (ex-data e)))
+                          first-error (first (:errors result))]
+                      (is (= 400 (:status-code result)))
+                      (is (= actions.error/violate-permission-constraint (:type first-error)))
+                      (is (= "You don't have permission to add data to this table." (:message first-error)))))
+                  (testing (str "UPDATE permission denied for " driver/*driver*)
+                    (let [result (try
+                                   (actions/perform-action-v2!
+                                    :table.row/update
+                                    test-scope
+                                    [{:database (:id test-database)
+                                      :table-id table-id
+                                      :row      {"id" 1 "name" "Updated Category"}}])
+                                   nil
+                                   (catch Exception e
+                                     (ex-data e)))
+                          first-error (first (:errors result))]
+                      (is (= 400 (:status-code result)))
+                      (is (= actions.error/violate-permission-constraint (:type first-error)))
+                      (is (= "You don't have permission to update data in this table." (:message first-error)))))
+                  (testing (str "DELETE permission denied for " driver/*driver*)
+                    (let [result (try
+                                   (actions/perform-action-v2!
+                                    :table.row/delete
+                                    test-scope
+                                    [{:database (:id test-database)
+                                      :table-id table-id
+                                      :row      {"id" 1}}])
+                                   nil
+                                   (catch Exception e
+                                     (ex-data e)))
+                          first-error (first (:errors result))]
+                      (is (= 400 (:status-code result)))
+                      (is (= actions.error/violate-permission-constraint (:type first-error)))
+                      (is (= "You don't have permission to delete data from this table." (:message first-error))))))))))))))
+
+(deftest action-creates-write-pool-test
+  (mt/test-drivers (mt/normal-driver-select {:+parent :sql-jdbc, :+features [:actions]})
+    (mt/with-actions-test-data-and-actions-enabled
+      (let [db-id           (mt/id)
+            write-cache-key [db-id :write-data]]
+        (mt/with-dynamic-fn-redefs [driver.conn/connection-pool-type
+                                    (fn [_database]
+                                      (if (= @#'driver.conn/*connection-type* :write-data)
+                                        :write-data
+                                        :default))]
+          (try
+            (sql-jdbc.conn/invalidate-pool-for-db! (mt/id))
+            (testing "write pool does not exist before action execution"
+              (is (not (contains? @@#'sql-jdbc.conn/pool-cache-key->connection-pool write-cache-key))))
+            (binding [*current-user-permissions-set* (delay #{"/"})]
+              (actions/perform-action! :model.row/create
+                                       (assoc (mt/mbql-query categories)
+                                              :create-row {(format-field-name :name) "write_pool_test"})))
+            (testing "write pool is created during action execution"
+              (is (contains? @@#'sql-jdbc.conn/pool-cache-key->connection-pool write-cache-key)))
+            (finally
+              (sql-jdbc.conn/invalidate-pool-for-db! (mt/id)))))))))
+
+(deftest implicit-action-audit-trail-test
+  (testing "an implicit action records one QueryExecution row holding an action descriptor, not SQL"
+    (with-actions-test-data-and-actions-permissively-enabled!
+      (let [since (mt/latest-query-execution-id)
+            _     (actions/perform-action! :model.row/create
+                                           (assoc (mt/mbql-query categories)
+                                                  :create-row {(format-field-name :name) "audited_row"}))
+            rows  (mt/action-executions since)]
+        (is (= 1 (count rows)))
+        (is (=? {:context     :action-execute
+                 :native      false
+                 :action_id   nil
+                 :result_rows 1
+                 :error       nil
+                 :database_id (mt/id)}
+                (first rows)))
+        (testing "the query row holds the internal descriptor"
+          (is (=? {:type     "internal"
+                   :action   "model.row/create"
+                   :database (mt/id)}
+                  (t2/select-one-fn :query :model/Query :query_hash (:hash (first rows))))))))))

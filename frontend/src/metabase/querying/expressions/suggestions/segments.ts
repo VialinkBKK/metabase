@@ -1,5 +1,6 @@
 import type { CompletionContext } from "@codemirror/autocomplete";
 
+import { modelIconMap } from "metabase/common/utils/icon";
 import * as Lib from "metabase-lib";
 
 import { formatIdentifier } from "../identifier";
@@ -19,7 +20,7 @@ export function suggestSegments({ query, stageIndex }: Options) {
       type: "segment",
       displayLabel: displayInfo.longDisplayName,
       label: formatIdentifier(displayInfo.longDisplayName),
-      icon: "segment" as const,
+      icon: modelIconMap.segment,
     };
   });
 
@@ -27,7 +28,7 @@ export function suggestSegments({ query, stageIndex }: Options) {
     return null;
   }
 
-  const matcher = fuzzyMatcher({ options: segments });
+  const matcher = fuzzyMatcher(segments);
 
   return function (context: CompletionContext) {
     const source = context.state.doc.toString();

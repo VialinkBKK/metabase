@@ -13,14 +13,10 @@
    [metabase.util.json :as json]
    [metabase.util.log :as log]
    [metabase.util.malli :as mu]
+   [metabase.util.malli.registry :as mr]
    [metabase.util.malli.schema :as ms]))
 
 (set! *warn-on-reflection* true)
-
-(defn slack-configured?
-  "Is Slack integration configured?"
-  []
-  (boolean (or (seq (channel.settings/slack-app-token)) (seq (channel.settings/slack-token)))))
 
 (def ^:private slack-token-error-codes
   "List of error codes that indicate an invalid or revoked Slack token."
@@ -29,6 +25,7 @@
   ;; received. This would happen if access to the Slack workspace is manually revoked via the Slack UI.
   #{"invalid_auth", "account_inactive", "token_revoked", "token_expired"})
 
+#_{:clj-kondo/ignore [:metabase/discourage-dynamic-vars]}
 (def ^:private ^:dynamic *send-token-error-emails?*
   "Whether to send an email to all admins when an invalid or revoked token error is received in response to a Slack
   API call. Should be set to false when checking if an unsaved token is valid. (Default: `true`)"
@@ -66,11 +63,10 @@
 (defn- do-slack-request [request-fn endpoint request]
   (let [token (or (get-in request [:query-params :token])
                   (get-in request [:form-params :token])
-                  (channel.settings/unobfuscated-slack-app-token)
-                  (channel.settings/slack-token))]
+                  (channel.settings/unobfuscated-slack-app-token))]
     (when token
       (let [url     (str "https://slack.com/api/" (name endpoint))
-            _       (log/tracef "Slack API request: %s %s" (pr-str url) (pr-str request))
+            _       (log/tracef "Slack API request: %s" (pr-str url))
             request (m/deep-merge
                      {:headers        {:authorization (str "Bearer\n" token)}
                       :as             :stream
@@ -84,7 +80,7 @@
           (catch Throwable e
             (throw (ex-info (.getMessage e) (merge (ex-data e) {:url url}) e))))))))
 
-(defn- GET
+(defn GET
   "Make a GET request to the Slack API."
   [endpoint & {:as query-params}]
   (do-slack-request http/get endpoint {:query-params query-params}))
@@ -175,7 +171,7 @@
         (throw e)))))
 
 (defn user-transform
-  "Tranformation from slack api user to our own internal representation."
+  "Transformation from slack api user to our own internal representation."
   [member]
   {:display-name (str \@ (:name member))
    :type         "user"
@@ -212,7 +208,7 @@
   "Refreshes users and conversations in slack-cache. finds both in parallel, sets
   [[slack-cached-channels-and-usernames]], and resets the [[slack-channels-and-usernames-last-updated]] time."
   []
-  (when (slack-configured?)
+  (when (channel.settings/slack-configured?)
     (log/info "Refreshing slack channels and usernames.")
     (let [users (future (vec (users-list)))
           private-channels? #(contains? (oauth-scopes) "groups:read")
@@ -231,7 +227,7 @@
 (defn bug-report-channel
   "Looks in [[slack-cached-channels-and-usernames]] to check whether a channel exists with the expected name from the
   [[slack-bug-report-channel]] setting with an # prefix. If it does, returns the channel details as a map. If it doesn't,
-  throws an error that advices an admin to create it."
+  throws an error that advises an admin to create it."
   []
   (let [channel-name (channel.settings/slack-bug-report-channel)]
     (if (channel-exists? channel-name)
@@ -266,12 +262,16 @@
                 (recur)))))))))
 
 (defn complete!
-  "Completes the file upload to a Slack channel by calling the `files.completeUploadExternal` endpoint, and polls the
-   same endpoint until the file is uploaded to the channel. Returns the URL of the uploaded file."
-  [& {:keys [file-id filename]}]
+  "Completes the file upload by calling the `files.completeUploadExternal` endpoint, and polls the same endpoint until
+   the file is uploaded. Returns the URL of the uploaded file. Shares into a channel via `channel-id`, or with a user
+   via `user-id` — `channel_id` rejects user IDs, while `channels` takes them and opens the DM itself."
+  [& {:keys [file-id filename channel-id user-id initial-comment]}]
   (let [complete! (fn []
                     (POST "files.completeUploadExternal"
-                      {:query-params {:files (json/encode [{:id file-id, :title filename}])}}))
+                      {:query-params (cond-> {:files (json/encode [{:id file-id, :title filename}])}
+                                       channel-id      (assoc :channel_id channel-id)
+                                       user-id         (assoc :channels user-id)
+                                       initial-comment (assoc :initial_comment initial-comment))}))
         complete-response
         (try
           (complete!)
@@ -304,7 +304,7 @@
    the URL of the uploaded file."
   [file       :- NonEmptyByteArray
    filename   :- ms/NonBlankString]
-  {:pre [(slack-configured?)]}
+  {:pre [(channel.settings/slack-configured?)]}
   ;; TODO: we could make uploading files a lot faster by uploading the files in parallel.
   ;; Steps 1 and 2 can be done for all files in parallel, and step 3 can be done once at the end.
   (let [;; Step 1: Get the upload URL using files.getUploadURLExternal
@@ -318,6 +318,58 @@
               :id file_id}
       (log/debug "Uploaded image" (:url <>)))))
 
+(defn- join-channel!
+  "Best-effort: have the bot join `channel-id`. Sharing a file into a channel requires membership (Slack returns
+  `not_in_channel` otherwise); posting messages does not, since that uses `chat:write.public`. Joining only works for
+  public channels — private channels need the bot invited, so a failure here is logged and ignored."
+  [channel-id]
+  (try
+    (POST "conversations.join" {:query-params {:channel channel-id}})
+    (catch Throwable e
+      (log/warnf "Could not join Slack channel %s; a file share may fail: %s" channel-id (ex-message e)))))
+
+(def ^:private slack-user-id-pattern
+  "Slack user IDs start with U (people) or W (Enterprise Grid). They are rejected by `files.completeUploadExternal`'s
+  `channel_id`, so a file shared with a user goes through its `channels` parameter instead."
+  #"^[UW][A-Z0-9]{8,}$")
+
+(defn- complete-upload!
+  "Get an upload URL from Slack, push the `file` bytes to it, and complete the upload — sharing it as described by
+  `share` (`{:channel-id …}` or `{:user-id …}`), with `initial-comment` as the message text when provided. Returns the
+  uploaded file URL."
+  [file filename share initial-comment]
+  (let [{:keys [upload_url file_id]} (get-upload-url! filename file)]
+    (upload-file-to-url! upload_url file)
+    (complete! (assoc share
+                      :file-id         file_id
+                      :filename        filename
+                      :initial-comment initial-comment))))
+
+(mu/defn upload-file-to-channel!
+  "Upload `file` bytes to Slack and share them as a downloadable file; returns the file URL. `channel-id` may be a
+  channel ID, a user ID, or a legacy display name (\"#general\"/\"@bob\") resolved via the cached channel/user list.
+  Either way the file arrives as one message with `initial-comment` (mrkdwn, optional) as its caption. A channel is
+  joined first, since sharing into one requires membership; a user's DM is opened by Slack itself."
+  ([file       :- NonEmptyByteArray
+    filename   :- ms/NonBlankString
+    channel-id :- ms/NonBlankString]
+   (upload-file-to-channel! file filename channel-id nil))
+  ([file            :- NonEmptyByteArray
+    filename        :- ms/NonBlankString
+    channel-id      :- ms/NonBlankString
+    initial-comment :- [:maybe :string]]
+   {:pre [(channel.settings/slack-configured?)]}
+   (let [target (or (:id (channel.settings/find-cached-slack-channel-or-username channel-id)) channel-id)]
+     (if (re-matches slack-user-id-pattern target)
+       (complete-upload! file filename {:user-id target} initial-comment)
+       (do
+         (join-channel! target)
+         (complete-upload! file filename {:channel-id target} initial-comment))))))
+
+(mr/def ::slack-block
+  "A Slack Block Kit block or legacy `attachments` entry, whose keys are Slack's (see https://api.slack.com/block-kit)."
+  [:map {:closed false, ::mr/deliberately-open true, :description "Slack Block Kit block"}])
+
 (mu/defn post-chat-message!
   "Calls Slack API `chat.postMessage` endpoint and posts a message to a channel.
   message-blocks if provided should be a map containing slack message blocks
@@ -325,11 +377,11 @@
   See: https://app.slack.com/block-kit-builder"
   [message-content :- [:map {:closed true}
                        [:channel                      :string]
-                       [:blocks      {:optional true} [:sequential :map]]
+                       [:blocks      {:optional true} [:sequential ::slack-block]]
                        [:text        {:optional true} :string]
-                       [:attachments {:optional true} [:sequential :map]]]]
+                       [:attachments {:optional true} [:sequential ::slack-block]]]]
   ;; TODO: it would be nice to have an emoji or icon image to use here
-  (let [base-params    {:username "MetaBot"
+  (let [base-params    {:username "Metabot"
                         :icon_url "http://static.metabase.com/metabot_slack_avatar_whitebg.png"}
         message-params (update-vals message-content #(if (string? %) % (json/encode %)))]
     ;; https://api.slack.com/methods/chat.postMessage

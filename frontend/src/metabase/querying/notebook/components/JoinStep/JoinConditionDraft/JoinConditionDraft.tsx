@@ -60,11 +60,24 @@ export function JoinConditionDraft({
     rhsTemporalBucket: Lib.Bucket | null,
   ) => {
     if (lhsExpression != null && rhsExpression != null) {
+      // Prefer a real bucket over the explicit `:default` ("Don't bin") when picking which side's
+      // bucket to propagate: the "first non-empty" contract treats `:default` as empty. If both
+      // sides are `:default`, fall through so the join still gets synced to `:default`.
+      const nonDefault = (b: Lib.Bucket | null): Lib.Bucket | null =>
+        b !== null &&
+        Lib.displayInfo(query, stageIndex, b).shortName === "default"
+          ? null
+          : b;
+      const chosenBucket =
+        nonDefault(lhsTemporalBucket) ??
+        nonDefault(rhsTemporalBucket) ??
+        lhsTemporalBucket ??
+        rhsTemporalBucket;
       const newCondition = Lib.joinConditionUpdateTemporalBucketing(
         query,
         stageIndex,
         Lib.joinConditionClause(operator, lhsExpression, rhsExpression),
-        lhsTemporalBucket ?? rhsTemporalBucket,
+        chosenBucket,
       );
       onChange(newCondition);
     }
@@ -109,8 +122,8 @@ export function JoinConditionDraft({
 
   return (
     <Flex className={S.JoinConditionRoot}>
-      <Flex align="center" gap="xs" mih="47px" p="xs">
-        <Box ml={!lhsExpression ? "xs" : undefined}>
+      <Flex align="center" gap="xxs" p="sm">
+        <Box>
           <JoinConditionColumnPicker
             query={query}
             stageIndex={stageIndex}
@@ -134,7 +147,7 @@ export function JoinConditionDraft({
           isConditionComplete={false}
           onChange={setOperator}
         />
-        <Box mr={!rhsExpression ? "xs" : undefined}>
+        <Box>
           <JoinConditionColumnPicker
             query={query}
             stageIndex={stageIndex}

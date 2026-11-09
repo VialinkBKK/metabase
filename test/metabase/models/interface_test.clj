@@ -1,60 +1,92 @@
 (ns metabase.models.interface-test
+  {:clj-kondo/config '{:linters {:deprecated-var {:level :off}}}}
   (:require
+   [clojure.string :as str]
    [clojure.test :refer :all]
    [java-time.api :as t]
-   [metabase.legacy-mbql.normalize :as mbql.normalize]
    [metabase.models.interface :as mi]
    [metabase.test :as mt]
    [metabase.util :as u]
+   [metabase.util.date-2 :as u.date]
    [metabase.util.encryption :as encryption]
    [metabase.util.encryption-test :as encryption-test]
    [metabase.util.json :as json]
-   [toucan2.core :as t2])
-  (:import (com.fasterxml.jackson.core JsonParseException)))
+   [metabase.util.malli.registry :as mr]
+   [metabase.util.malli.registry-test-macro :as registry-test-macro]
+   [toucan2.core :as t2]))
 
-;; let's make sure the `transform-metabase-query`/`transform-metric-segment-definition`/`transform-parameters-list`
-;; normalization functions respond gracefully to invalid stuff when pulling them out of the Database. See #8914
+(set! *warn-on-reflection* true)
 
-(deftest ^:parallel handle-bad-template-tags-test
-  (testing (str "an malformed template tags map like the one below is invalid. Rather than potentially destroy an entire API "
-                "response because of one malformed Card, dump the error to the logs and return nil.")
-    (is (= nil
-           ((:out mi/transform-metabase-query)
-            (json/encode
-             {:database 1
-              :type     :native
-              :native   {:template-tags 1000}}))))))
+;; Let's make sure `transform-metric-segment-definition`/`transform-parameters-list` normalization functions respond
+;; gracefully to invalid stuff when pulling them out of the Database. See #8914
 
-(deftest ^:parallel template-tag-validate-saves-test
-  (testing "on the other hand we should be a little more strict on the way and disallow you from saving the invalid stuff"
-    ;; TODO -- we should make sure this returns a good error message so we don't have to dig thru the exception chain.
-    (is (thrown?
-         Exception
-         ((:in mi/transform-metabase-query)
-          {:database 1
-           :type     :native
-           :native   {:template-tags {100 [:field-id "WOW"]}}})))))
+(deftest decrypt-error-context-test
+  (encryption-test/with-secret-key "0123456789abcdef"
+    (testing "a decrypt failure in an encrypted transform names the column in the message (and never the value)"
+      (doseq [[transform source] {(mi/transform-encrypted-json "metabase_database.details") "metabase_database.details"
+                                  (mi/transform-encrypted-text "report_card.public_uuid")   "report_card.public_uuid"}]
+        (testing source
+          (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                                (re-pattern (str "Error decrypting " source ": Expected an encrypted value"))
+                                ((:out transform) "plaintext-sekret")))
+          (try ((:out transform) "plaintext-sekret")
+               (catch Exception e
+                 (is (not (re-find #"sekret" (ex-message e))))
+                 (is (= source (:source (ex-data e)))))))))
+    (testing "a value written through the transform still round-trips"
+      (let [{:keys [in out]} (mi/transform-encrypted-text "report_card.public_uuid")]
+        (is (= "some-uuid" (out (in "some-uuid"))))))
+    (testing "bytes: a plaintext secret value names the column too"
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                            #"Error decrypting secret\.value: Expected an encrypted value"
+                            ((:out (mi/transform-secret-value "secret.value")) (.getBytes "plaintext-sekret")))))))
 
-(deftest ^:parallel normalize-empty-query-test
-  (is (= {}
-         ((:out mi/transform-metabase-query) "{}"))))
+(mr/def ::interface-test.thing
+  "A schema with one field of each kind JSON cannot carry on its own."
+  [:map
+   [:kind  {:optional true} [:maybe :keyword]]
+   [:tag   {:optional true} [:enum :a :b]]
+   [:by-id {:optional true} [:map-of :int :string]]
+   [:note  {:optional true} :string]])
 
-(deftest handle-errors-gracefully-test
-  (testing (str "Cheat and override the `normalization-tokens` function to always throw an Exception so we can make "
-                "sure the Toucan type fn handles the error gracefully")
-    (with-redefs [mbql.normalize/normalize-tokens (fn [& _] (throw (Exception. "BARF")))]
-      (is (= nil
-             ((:out mi/transform-parameters-list)
-              (json/encode
-               [{:target [:dimension [:field "ABC" nil]]}])))))))
+(def ^:private a-thing
+  {:kind :time-series, :tag :b, :by-id {10 "x", 20 "y"}, :note "plain"})
 
-(deftest do-not-eat-exceptions-test
-  (testing "should not eat Exceptions if normalization barfs when saving"
-    (is (thrown?
-         Exception
-         (with-redefs [mbql.normalize/normalize-tokens (fn [& _] (throw (Exception. "BARF")))]
-           ((:in mi/transform-parameters-list)
-            [{:target [:dimension [:field "ABC" nil]]}]))))))
+(deftest transform-json-with-schema-test
+  (let [{:keys [in out]} (mi/transform-json-with-schema "test_table.thing" ::interface-test.thing)]
+    (testing "the stored value is plain JSON -- every keyword, and every integer map key, is a string"
+      (is (= {"kind" "time-series", "tag" "b", "by-id" {"10" "x", "20" "y"}, "note" "plain"}
+             (json/decode (in a-thing)))))
+    (testing "the schema is what puts the keywords and the integer keys back on the way out"
+      (is (= a-thing (out (in a-thing)))))
+    (testing "nil is SQL NULL rather than the string \"null\", and an empty map stays an empty map"
+      (is (nil? (in nil)))
+      (is (nil? (out nil)))
+      (is (= {} (out (in {})))))
+    (testing "an unreadable blob reads as nil rather than breaking the whole select"
+      (is (nil? (out "{not json ]["))))))
+
+(deftest transform-json-with-schema-caches-its-codec-test
+  (testing "the encoder and decoder are built once per schema, not rebuilt for every row -- these run
+           on every read of every row of a table, and building a transformer for a nested schema is
+           not cheap (see metabase.api.macros, which caches the same way at the HTTP boundary)"
+    (let [{:keys [in out]} (mi/transform-json-with-schema "test_table.thing" ::interface-test.thing)]
+      (out (in a-thing))
+      (is (zero? (registry-test-macro/with-returning-cache-miss-count
+                   (dotimes [_ 10]
+                     (out (in a-thing)))))))))
+
+(deftest transform-encrypted-json-with-schema-test
+  (encryption-test/with-secret-key "0123456789abcdef"
+    (let [{:keys [in out]} (mi/transform-encrypted-json-with-schema "test_table.thing" ::interface-test.thing)]
+      (testing "the value round-trips through encryption with its keywords intact"
+        (let [stored (in a-thing)]
+          (is (not (str/includes? stored "time-series")))
+          (is (= a-thing (out stored)))))
+      (testing "a decrypt failure names the column, like every other encrypted transform"
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                              #"Error decrypting test_table\.thing: Expected an encrypted value"
+                              (out "plaintext-sekret")))))))
 
 (deftest timestamped-property-test
   (testing "Make sure updated_at gets updated for timestamped models"
@@ -62,19 +94,22 @@
       (let [updated-at (:updated_at table)
             new-name   (u/qualified-name ::a-new-name)]
         (is (= 1
-               (t2/update! table (u/the-id table) {:name new-name})))
+               (t2/update! table :id (u/the-id table) {:name new-name})))
         (is (=? {:id         (:id table)
                  :name       new-name
                  :updated_at (partial not= updated-at)}
-                (t2/select-one [:model/Table :id :name :updated_at] (u/the-id table))))))))
+                (t2/select-one [:model/Table :id :name :updated_at] :id (u/the-id table))))))))
 
-(deftest timestamped-property-do-not-stomp-on-explicit-values-test
+(deftest ^:parallel timestamped-property-do-not-stomp-on-explicit-values-test
   (testing "The :timestamped property should not stomp on :created_at/:updated_at if they are explicitly specified"
     (mt/with-temp [:model/Field field]
       (testing "Nothing specified: use now() for both"
         (is (=? {:created_at java.time.temporal.Temporal
                  :updated_at java.time.temporal.Temporal}
-                field))))
+                field))))))
+
+(deftest ^:parallel timestamped-property-do-not-stomp-on-explicit-values-test-2
+  (testing "The :timestamped property should not stomp on :created_at/:updated_at if they are explicitly specified"
     (let [t                  #t "2022-10-13T19:21:00Z"
           expected-timestamp (t/offset-date-time "2022-10-13T19:21:00Z")]
       (testing "Explicitly specify :created_at"
@@ -88,15 +123,24 @@
                    :updated_at expected-timestamp}
                   field)))))))
 
+(deftest ^:parallel current-timestamp-reads-back-unchanged-test
+  (testing "a timestamp from current-timestamp reads back from the app DB as the same text an export writes"
+    (let [now (mi/current-timestamp)]
+      (mt/with-temp [:model/Field field {:created_at now}]
+        (is (= (u.date/format now)
+               (u.date/format (t2/select-one-fn :created_at :model/Field :id (:id field)))))))))
+
 (defmethod mi/non-timestamped-fields :test-model/updated-at-tester [_]
   #{:non_timestamped :other})
 
-(deftest timestamped-property-skips-non-timestamped-fields-test
+(deftest ^:parallel timestamped-property-skips-non-timestamped-fields-test
   (testing "Does not add a timestamp if it only includes non-timestamped fields"
     (let [instance (-> (t2/instance :test-model/updated-at-tester {:non_timestamped nil})
                        (assoc :non_timestamped 1))]
       (is (= {:non_timestamped 1}
-             (#'mi/add-updated-at-timestamp instance)))))
+             (#'mi/add-updated-at-timestamp instance))))))
+
+(deftest ^:parallel timestamped-property-skips-non-timestamped-fields-test-2
   (testing "Adds a timestamp if it includes other fields"
     (let [instance (-> (t2/instance :test-model/updated-at-tester {:non_timestamped nil :included nil})
                        (assoc :non_timestamped 1)
@@ -137,25 +181,25 @@
       (is (= {:a 1}
              (encryption-test/with-secret-key "qwe"
                (mi/encrypted-json-out
-                (encryption/encrypt (encryption/secret-key->hash "qwe") "{\"a\": 1}"))))))
+                (encryption/encrypt "{\"a\": 1}" {:secret-key (encryption/secret-key->hash "qwe")}))))))
     (testing "Logs an error message when incoming data looks encrypted"
       (mt/with-log-messages-for-level [messages :error]
         (mi/encrypted-json-out
-         (encryption/encrypt (encryption/secret-key->hash "qwe") "{\"a\": 1}"))
+         (encryption/encrypt "{\"a\": 1}" {:secret-key (encryption/secret-key->hash "qwe")}))
         (is (=? [{:level   :error
-                  :e       JsonParseException
+                  :e       nil
                   :message "Could not decrypt encrypted field! Have you forgot to set MB_ENCRYPTION_SECRET_KEY?"}]
                 (messages)))))
     (testing "Invalid JSON throws correct error"
       (mt/with-log-messages-for-level [messages :error]
         (mi/encrypted-json-out "{\"a\": 1")
-        (is (=? [{:level :error, :e JsonParseException, :message "Error parsing JSON"}]
+        (is (=? [{:level :error, :e nil, :message #"(?s)^Error parsing JSON: .*"}]
                 (messages))))
       (mt/with-log-messages-for-level [messages :error]
         (encryption-test/with-secret-key "qwe"
           (mi/encrypted-json-out
-           (encryption/encrypt (encryption/secret-key->hash "qwe") "{\"a\": 1")))
-        (is (=? [{:level :error, :e JsonParseException, :message "Error parsing JSON"}]
+           (encryption/encrypt "{\"a\": 1" {:secret-key (encryption/secret-key->hash "qwe")})))
+        (is (=? [{:level :error, :e nil, :message #"(?s)^Error parsing JSON: .*"}]
                 (messages)))))))
 
 (deftest ^:parallel instances-with-hydrated-data-test
@@ -211,6 +255,15 @@
             :graph.dimensions ["CREATED_AT"]}
            (mi/normalize-visualization-settings viz-settings)))))
 
+(deftest ^:parallel normalize-invalid-visualization-settings-test
+  (testing "Unknown keys in `:column_settings` should be removed rather than causing normalization to fail (#69626)"
+    (let [viz-settings {"column_settings" {"[\"ref\",[\"expression\",\"expression\"]]" {:number_style "x"}
+                                           "[\"REF\",[\"expression\",\"expression\"]]" {:number_style "y"}
+                                           "[\"bad-clause\",\"a\"]"                    {:number_style "z"}}}]
+      (is (= {:column_settings
+              {"[\"ref\",[\"expression\",\"expression\"]]" {:number_style "x"}}}
+             (mi/normalize-visualization-settings viz-settings))))))
+
 (deftest ^:parallel json-in-with-eliding
   (is (= "{}" (#'mi/json-in-with-eliding {})))
   (is (= (json/encode {:a "short"}) (#'mi/json-in-with-eliding {:a "short"})))
@@ -219,9 +272,7 @@
                                                             {"toucan2.jdbc.query/sql-args" (str (apply str (repeat 247 "b")) "...")}]]}})
          (#'mi/json-in-with-eliding {"ex-data" {"toucan2/context-trace" [["execute SQL with class com.mchange.v2.c3p0.impl.NewProxyConnection"
                                                                           {"toucan2.jdbc.query/sql-args" (apply str (repeat 500 "b"))}]]}})))
-
   (is (= (json/encode {:a (repeat 50 "x")}) (#'mi/json-in-with-eliding {:a (repeat 500 "x")})))
-
   (testing "A passed string is not elided"
     (is (= (apply str (repeat 1000 "a")) (#'mi/json-in-with-eliding (apply str (repeat 1000 "a")))))))
 
@@ -231,7 +282,6 @@
                :database-type             "CHARACTER VARYING"
                :display-name              "Category"
                :effective-type            :type/Text
-               :field-ref                 [:field 61339 nil]
                :fingerprint               {:global {:distinct-count 4, :nil% 0.0}
                                            :type   {:type/Text {:average-length 6.375
                                                                 :percent-email  0.0
@@ -242,7 +292,6 @@
                :name                      "CATEGORY"
                :position                  3
                :semantic-type             :type/Category
-               :source                    :breakout
                :table-id                  10808
                :visibility-type           :normal
                :lib/breakout?             true
@@ -253,6 +302,27 @@
                :lib/source                :source/table-defaults
                :lib/source-column-alias   "CATEGORY"
                :lib/type                  :metadata/column}]]
-
     (is (= cols
            (#'mi/result-metadata-out (json/encode cols))))))
+
+;;; ---------------------------------------- can-query? tests ----------------------------------------
+
+(deftest can-query?-default-falls-back-to-can-read?-test
+  (testing "Default implementation falls back to can-read?"
+    ;; Use Card model which uses the default can-query? implementation
+    (mt/with-temp [:model/Card card {}]
+      (with-redefs [mi/can-read? (constantly true)]
+        (is (true? (mi/can-query? card))))
+      (with-redefs [mi/can-read? (constantly false)]
+        (is (false? (mi/can-query? card)))))))
+
+(deftest can-query-hydration-returns-boolean-test
+  (testing ":can_query hydration returns a boolean value"
+    (mt/with-temp [:model/Card card {}]
+      (let [hydrated (t2/hydrate card :can_query)]
+        (is (contains? hydrated :can_query))
+        (is (boolean? (:can_query hydrated)))))))
+
+(deftest ^:parallel ->integer-test
+  (testing "casts to an integer on every app DB, though MySQL and MariaDB have no INTEGER cast type"
+    (is (= 42 (:n (t2/query-one {:select [[(mi/->integer "42") :n]]}))))))

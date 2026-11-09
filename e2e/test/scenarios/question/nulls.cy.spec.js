@@ -24,14 +24,14 @@ describe("scenarios > question > null", () => {
 
     // find and open previously created question
     cy.visit("/collection/root");
-    // eslint-disable-next-line no-unscoped-text-selectors -- deprecated usage
+    // eslint-disable-next-line metabase/no-unscoped-text-selectors -- deprecated usage
     cy.findByText("13571").click();
 
     cy.log("'No Results since at least v0.34.3");
     H.openObjectDetail(0);
     cy.findByRole("dialog").within(() => {
-      cy.findByText(/Discount/i);
-      cy.findByText("Empty");
+      cy.findByText(/Discount/i).should("be.visible");
+      cy.findByText("empty").should("be.visible");
     });
   });
 
@@ -91,7 +91,7 @@ describe("scenarios > question > null", () => {
       cy.findByTestId("dashcard-container").within(() => {
         cy.findByTestId("loading-indicator").should("not.exist");
         cy.findByTestId("legend-caption-title").should("have.text", "13626");
-        cy.findByText("TOTAL").should("be.visible");
+        cy.findByText("Total").should("be.visible");
         cy.findByText("0").should("be.visible");
       });
     });
@@ -121,10 +121,15 @@ describe("scenarios > question > null", () => {
 
           H.visitDashboard(DASHBOARD_ID);
           cy.log("P0 regression in v0.37.1!");
-          cy.findByTestId("loading-indicator").should("not.exist");
-          cy.findByText("13801_Q1");
-          cy.findAllByTestId("scalar-value").should("contain", "0");
-          cy.findByText("13801_Q2");
+          H.getDashboardCard(1).within(() => {
+            cy.findByText("13801_Q2").should("be.visible");
+            cy.findByTestId("scalar-value").should("have.text", "0");
+          });
+          H.getDashboardCard(0).within(() => {
+            cy.findByText("13801_Q1").should("be.visible");
+            cy.findByTestId("scalar-value").should("exist");
+            cy.findByTestId("loading-indicator").should("not.exist");
+          });
         });
       });
     });
@@ -132,12 +137,14 @@ describe("scenarios > question > null", () => {
 
   it("should filter by clicking on the row with `null` value (metabase#18386)", () => {
     H.openOrdersTable();
+    const findGridcell = (text) =>
+      cy.findByRole("grid").findByRole("gridcell", { name: text });
+
+    findGridcell("49.21").should("be.visible");
+    cy.intercept("POST", "/api/dataset").as("dataset");
 
     // Total of "39.72", and the next cell is the `discount` (which is empty)
-    // eslint-disable-next-line no-unscoped-text-selectors -- deprecated usage
-    cy.findByText("39.72")
-      .closest("[role=gridcell]")
-      .parent()
+    findGridcell("39.72")
       .next()
       .find("div")
       .should("be.empty")
@@ -145,12 +152,12 @@ describe("scenarios > question > null", () => {
       .click({ force: true });
 
     H.popover().contains("=").click();
+    cy.wait("@dataset");
+    cy.findByTestId("filter-pill").should("contain.text", "Discount is empty");
 
-    // eslint-disable-next-line no-unscoped-text-selectors -- deprecated usage
-    cy.findByText("39.72");
+    findGridcell("39.72").should("be.visible");
     // This row ([id] 3) had the `discount` column value and should be filtered out now
-    // eslint-disable-next-line no-unscoped-text-selectors -- deprecated usage
-    cy.findByText("49.21").should("not.exist");
+    findGridcell("49.21").should("not.exist");
   });
 
   describe("aggregations with null values", () => {
@@ -162,7 +169,7 @@ describe("scenarios > question > null", () => {
         // remove pre-selected "Count"
         cy.icon("close").click();
       });
-      // eslint-disable-next-line no-unscoped-text-selectors -- deprecated usage
+      // eslint-disable-next-line metabase/no-unscoped-text-selectors -- deprecated usage
       cy.findByText("Add a function or metric").click();
       // dropdown immediately opens with the new set of metrics to choose from
       H.popover().within(() => {
@@ -170,17 +177,17 @@ describe("scenarios > question > null", () => {
         cy.findByText("Discount").click();
       });
       // Group by
-      // eslint-disable-next-line no-unscoped-text-selectors -- deprecated usage
+      // eslint-disable-next-line metabase/no-unscoped-text-selectors -- deprecated usage
       cy.contains("Created At").click();
-      // eslint-disable-next-line no-unscoped-text-selectors -- deprecated usage
+      // eslint-disable-next-line metabase/no-unscoped-text-selectors -- deprecated usage
       cy.contains("Cumulative sum of Discount by Created At: Month");
 
-      // eslint-disable-next-line no-unscoped-text-selectors -- deprecated usage
+      H.cartesianChartCircle().should("have.length.of.at.least", 40);
+
+      // eslint-disable-next-line metabase/no-unscoped-text-selectors -- deprecated usage
       cy.findByText("There was a problem with your question").should(
         "not.exist",
       );
-
-      H.cartesianChartCircle().should("have.length.of.at.least", 40);
     });
   });
 });

@@ -1,12 +1,40 @@
 (ns metabase.api.docs
   "OpenAPI documentation for our API."
   (:require
+   [clojure.java.io :as io]
    [clojure.string :as str]
    [compojure.core :refer [GET]]
+   [metabase.api.docs.regenerate]
    [metabase.api.open-api :as open-api]
    [metabase.api.util.handlers :as handlers]
+   [metabase.config.core :as config]
+   [metabase.util.json :as json]
+   [metabase.util.log :as log]
+   [potemkin :as p]
    [ring.middleware.content-type :as content-type]
    [ring.util.response :as response]))
+
+(set! *warn-on-reflection* true)
+
+;; kept on this namespace so existing callers (metabase.api-routes.cmd) are unaffected by the split
+(p/import-vars
+ [metabase.api.docs.regenerate
+  openapi-file-path
+  request-spec-regeneration!
+  write-openapi-spec-to-file!])
+
+(defn- read-openapi-spec-from-file
+  "Read the OpenAPI specification from the local file.
+  Returns the parsed JSON content, or nil if the file doesn't exist or can't be read."
+  []
+  (try
+    (let [file (io/file openapi-file-path)]
+      (when (.exists ^java.io.File file)
+        (with-open [f (io/reader file)]
+          (json/decode+kw f))))
+    (catch Throwable e
+      (log/errorf "Failed to read OpenAPI specification from file: %s" (ex-message e))
+      nil)))
 
 (defn- index-handler
   "OpenAPI 3.1.0 JSON and UI
@@ -20,7 +48,7 @@
          (content-type/content-type-response {:uri "index.html"})
          ;; Better would be to append this to our CSP, but there is no good way right now and it's just a single page.
          ;; Necessary for Scalar to work, script injects styles in runtime.
-         (assoc-in [:headers "Content-Security-Policy"] "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net"))))
+         (assoc-in [:headers "Content-Security-Policy"] "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net"))))
 
   ([request respond raise]
    (try
@@ -29,15 +57,21 @@
        (raise e)))))
 
 (defn- json-handler
-  "Given the [[metabase.api-routes.core/routes]] handler, return a Ring handler that returns `openapi.json`."
+  "Given the [[metabase.api-routes.core/routes]] handler, return a Ring handler that returns `openapi.json`.
+  Attempts to read from the local file first; if not available, generates on-the-fly."
   [root-handler]
   (fn handler*
     ([_request]
-     {:status 200
-      :body  (merge
-              (open-api/root-open-api-object root-handler)
-              {:servers [{:url         ""
-                          :description "Metabase API"}]})})
+     (let [spec (or (when (config/config-bool :mb-enable-openapi-auto-regen)
+                      (read-openapi-spec-from-file))
+                    (do
+                      (log/warn "OpenAPI spec file not found, generating on-the-fly")
+                      (merge
+                       (open-api/root-open-api-object root-handler)
+                       {:servers [{:url         ""
+                                   :description "Metabase API"}]})))]
+       {:status 200
+        :body   spec}))
 
     ([request respond raise]
      (try

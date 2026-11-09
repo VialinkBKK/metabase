@@ -5,10 +5,25 @@ import { fireEvent, render, screen } from "__support__/ui";
 
 import { TextWidget } from "./TextWidget";
 
-const TextInputWithStateWrapper = ({ value }: { value?: number | string }) => {
+const TextInputWithStateWrapper = ({
+  value,
+  onChange,
+  focusChanged,
+}: {
+  value?: number | string;
+  onChange?: (value: string | number | null) => void;
+  focusChanged?: (focused: boolean) => void;
+}) => {
   const [val, setVal] = useState<number | string | null>(value ?? "");
   return (
-    <TextWidget value={val ?? ""} setValue={setVal} focusChanged={jest.fn()} />
+    <TextWidget
+      value={val ?? ""}
+      setValue={(value) => {
+        setVal(value);
+        onChange?.(value);
+      }}
+      focusChanged={focusChanged ?? jest.fn()}
+    />
   );
 };
 
@@ -63,5 +78,49 @@ describe("TextWidget", () => {
 
     await userEvent.type(textbox, "0{enter}");
     expect(textbox).toHaveValue("0");
+  });
+
+  it("should keep the full precision of a big integer", async () => {
+    const onChangeSpy = jest.fn();
+
+    render(<TextInputWithStateWrapper onChange={onChangeSpy} />);
+
+    const textbox = screen.getByRole("textbox");
+
+    await userEvent.type(textbox, "9223372036854775807{enter}");
+
+    expect(textbox).toHaveValue("9223372036854775807");
+    expect(onChangeSpy).toHaveBeenCalledWith("9223372036854775807");
+  });
+
+  it("should not call setValue twice when pressing enter", async () => {
+    const onChangeSpy = jest.fn();
+
+    render(<TextInputWithStateWrapper onChange={onChangeSpy} />);
+
+    const textbox = screen.getByRole("textbox");
+
+    await userEvent.type(textbox, "0{enter}");
+
+    expect(onChangeSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("should not call handlers when pressing `esc`", async () => {
+    const onChangeSpy = jest.fn();
+    const focusChangedSpy = jest.fn();
+
+    render(
+      <TextInputWithStateWrapper
+        onChange={onChangeSpy}
+        focusChanged={focusChangedSpy}
+      />,
+    );
+
+    const textbox = screen.getByRole("textbox");
+
+    await userEvent.type(textbox, "Foo{esc}");
+
+    expect(onChangeSpy).toHaveBeenCalledTimes(0);
+    expect(focusChangedSpy).not.toHaveBeenCalledWith(false);
   });
 });

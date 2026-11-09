@@ -1,25 +1,45 @@
-import { memo, useMemo, useState } from "react";
-import { msgid, ngettext } from "ttag";
-import _ from "underscore";
+import { memo, useCallback, useMemo, useState } from "react";
+import { msgid, ngettext, t } from "ttag";
 
 import CollectionCopyEntityModal from "metabase/collections/components/CollectionCopyEntityModal";
-import { isTrashedCollection } from "metabase/collections/utils";
-import { BulkActionBar } from "metabase/common/components/BulkActionBar";
-import Modal from "metabase/common/components/Modal";
-import { BulkMoveModal } from "metabase/common/components/MoveModal";
-import type { CollectionPickerItem } from "metabase/common/components/Pickers/CollectionPicker";
-import type { Collection, CollectionItem } from "metabase-types/api";
-
-import { ArchivedBulkActions } from "./ArchivedBulkActions";
+import { moveCollectionItemAndTrack } from "metabase/common/collections/analytics";
 import {
   type Destination,
   QuestionMoveConfirmModal,
-} from "./QuestionMoveConfirmModal";
+} from "metabase/common/collections/components/QuestionMoveConfirmModal";
+import { isTrashedCollection } from "metabase/common/collections/utils";
+import { BulkActionBar } from "metabase/common/components/BulkActionBar";
+import { ConfirmModal } from "metabase/common/components/ConfirmModal";
+import type { OmniPickerItem } from "metabase/common/components/Pickers";
+import { BulkMoveModal } from "metabase/common/components/Pickers/MoveModal/MoveModal";
+import {
+  canMoveItem,
+  isMovable,
+  useSetCollection,
+} from "metabase/common/hooks";
+import {
+  type RegisterShortcutProps,
+  useRegisterShortcut,
+} from "metabase/palette/hooks/useRegisterShortcut";
+import type { Bookmark, Collection, CollectionItem } from "metabase-types/api";
+
+import { ArchivedBulkActions } from "./ArchivedBulkActions";
 import { UnarchivedBulkActions } from "./UnarchivedBulkActions";
+import { useBulkArchive } from "./use-bulk-archive";
+
+const BLOCKING_OVERLAY_SELECTOR =
+  '[role="dialog"], [data-element-id="mantine-popover"]';
+
+function hasBlockingOverlay() {
+  return Array.from(
+    document.querySelectorAll<HTMLElement>(BLOCKING_OVERLAY_SELECTOR),
+  ).some((element) => element.style.display !== "none");
+}
 
 type CollectionBulkActionsProps = {
-  selected: any[];
+  selected: CollectionItem[];
   collection: Collection;
+  bookmarks?: Bookmark[];
   selectedItems: CollectionItem[] | null;
   setSelectedItems: (items: CollectionItem[] | null) => void;
   selectedAction: string | null;
@@ -31,6 +51,7 @@ export const CollectionBulkActions = memo(
   ({
     selected,
     collection,
+    bookmarks,
     selectedItems,
     setSelectedItems,
     selectedAction,
@@ -39,13 +60,67 @@ export const CollectionBulkActions = memo(
   }: CollectionBulkActionsProps) => {
     const [rememberedDestination, setRememberedDestination] =
       useState<Destination | null>(null);
+    const setCollection = useSetCollection();
+    const { canArchive, archiveSelected } = useBulkArchive(
+      selected,
+      collection,
+    );
+    const isTrashed = isTrashedCollection(collection);
+    const isTrashConfirmOpen = selectedAction === "trash";
+    const openTrashConfirm = useCallback(
+      () => setSelectedAction("trash"),
+      [setSelectedAction],
+    );
+    const closeTrashConfirm = useCallback(
+      () => setSelectedAction(null),
+      [setSelectedAction],
+    );
+
+    const hasBlockingDialog = selectedAction !== null;
+
+    const canRunSelectionShortcut = useCallback(() => {
+      return selected.length > 0 && !hasBlockingDialog && !hasBlockingOverlay();
+    }, [hasBlockingDialog, selected.length]);
+
+    const handleTrashShortcut = useCallback(() => {
+      if (canRunSelectionShortcut() && canArchive) {
+        openTrashConfirm();
+      }
+    }, [canArchive, canRunSelectionShortcut, openTrashConfirm]);
+
+    const handleClearSelectionShortcut = useCallback(() => {
+      if (canRunSelectionShortcut()) {
+        clearSelected();
+      }
+    }, [canRunSelectionShortcut, clearSelected]);
+
+    useBulkActionsShortcuts(
+      handleTrashShortcut,
+      handleClearSelectionShortcut,
+      isTrashed,
+    );
+
+    const handleConfirmTrash = async () => {
+      closeTrashConfirm();
+      try {
+        await archiveSelected();
+      } finally {
+        clearSelected();
+      }
+    };
 
     const isVisible = selected.length > 0 && selectedAction !== "confirm-move";
 
-    const hasSelectedItems = useMemo(
-      () => !!selectedItems && !_.isEmpty(selectedItems),
-      [selectedItems],
+    const hasSelectedItems = selectedItems !== null && selectedItems.length > 0;
+    const canMove = useMemo(
+      () => selected.every((item) => canMoveItem(item, collection)),
+      [selected, collection],
     );
+
+    const handleBulkMoveStart = useCallback(() => {
+      setSelectedItems([...selected]);
+      setSelectedAction("move");
+    }, [selected, setSelectedAction, setSelectedItems]);
 
     const handleCloseModal = () => {
       setSelectedItems(null);
@@ -54,8 +129,11 @@ export const CollectionBulkActions = memo(
       clearSelected();
     };
 
-    const tryOrClear = (promise: Promise<any>) =>
-      promise.finally(() => clearSelected());
+    const handleCancelModal = () => {
+      setSelectedItems(null);
+      setSelectedAction(null);
+      setRememberedDestination(null);
+    };
 
     const handleConfirmedBulkQuestionMove = async () => {
       if (rememberedDestination) {
@@ -66,11 +144,15 @@ export const CollectionBulkActions = memo(
 
     const doMove = async (destination: Destination) => {
       if (selectedItems) {
-        await tryOrClear(
-          Promise.all(
-            selectedItems.map((item) => item.setCollection?.(destination)),
+        await Promise.all(
+          selectedItems.filter(isMovable).map((item) =>
+            moveCollectionItemAndTrack({
+              item,
+              move: () => setCollection(item, destination),
+              triggeredFrom: "move_modal",
+            }),
           ),
-        );
+        ).finally(clearSelected);
       }
       handleCloseModal();
     };
@@ -117,13 +199,13 @@ export const CollectionBulkActions = memo(
 
     // This is a little cheeky, but by virtue of the screens we show the BulkMoveModal, all
     // selected items should have the same collection id. yatta!
-    const recentAndSearchFilter = (item: CollectionPickerItem) =>
+    const recentAndSearchFilter = (item: OmniPickerItem) =>
       item.model === "collection" && item.id === collection.id;
 
     return (
       <>
         <BulkActionBar message={actionMessage} opened={isVisible}>
-          {isTrashedCollection(collection) ? (
+          {isTrashed ? (
             <ArchivedBulkActions
               collection={collection}
               selectedItems={selectedItems}
@@ -137,38 +219,49 @@ export const CollectionBulkActions = memo(
             <UnarchivedBulkActions
               selected={selected}
               collection={collection}
+              bookmarks={bookmarks ?? []}
               clearSelected={clearSelected}
-              setSelectedItems={setSelectedItems}
-              setSelectedAction={setSelectedAction}
+              onRequestMove={canMove ? handleBulkMoveStart : undefined}
+              onRequestTrash={canArchive ? openTrashConfirm : undefined}
             />
           )}
         </BulkActionBar>
 
-        {selectedItems && hasSelectedItems && selectedAction === "copy" && (
-          <Modal onClose={handleCloseModal}>
-            <CollectionCopyEntityModal
-              entityObject={selectedItems?.[0]}
-              onClose={handleCloseModal}
-              onSaved={handleCloseModal}
-            />
-          </Modal>
+        <ConfirmModal
+          opened={isTrashConfirmOpen}
+          data-testid="move-to-trash-confirmation"
+          title={ngettext(
+            msgid`Move ${selected.length} item to trash?`,
+            `Move ${selected.length} items to trash?`,
+            selected.length,
+          )}
+          message={t`You can restore items from the trash.`}
+          confirmButtonText={t`Move to trash`}
+          onConfirm={handleConfirmTrash}
+          onClose={closeTrashConfirm}
+        />
+
+        {hasSelectedItems && selectedAction === "copy" && (
+          <CollectionCopyEntityModal
+            entityObject={selectedItems[0]}
+            onClose={handleCloseModal}
+            onSaved={handleCloseModal}
+          />
         )}
 
-        {selectedItems && hasSelectedItems && selectedAction === "move" && (
+        {hasSelectedItems && selectedAction === "move" && (
           <BulkMoveModal
             selectedItems={selectedItems}
-            onClose={handleCloseModal}
+            onClose={handleCancelModal}
             onMove={handleBulkMove}
-            initialCollectionId={
-              isTrashedCollection(collection) ? "root" : collection.id
-            }
+            initialCollectionId={isTrashed ? "root" : collection.id}
             recentAndSearchFilter={recentAndSearchFilter}
           />
         )}
 
         {hasSelectedItems && selectedAction === "confirm-move" && (
           <QuestionMoveConfirmModal
-            selectedItems={selectedItems || []}
+            selectedItems={selectedItems}
             onConfirm={handleConfirmedBulkQuestionMove}
             onClose={handleCloseModal}
             destination={rememberedDestination}
@@ -178,5 +271,31 @@ export const CollectionBulkActions = memo(
     );
   },
 );
+
+function useBulkActionsShortcuts(
+  handleTrashShortcut: () => void,
+  handleClearSelectionShortcut: () => void,
+  isTrashed: boolean,
+) {
+  const shortcutsToRegister: RegisterShortcutProps[] = useMemo(() => {
+    const shortcuts: RegisterShortcutProps[] = [
+      {
+        id: "collection-clear-selection",
+        perform: handleClearSelectionShortcut,
+      },
+    ];
+
+    if (!isTrashed) {
+      shortcuts.push({
+        id: "collection-send-items-to-trash",
+        perform: handleTrashShortcut,
+      });
+    }
+
+    return shortcuts;
+  }, [handleClearSelectionShortcut, handleTrashShortcut, isTrashed]);
+
+  useRegisterShortcut(shortcutsToRegister, [shortcutsToRegister]);
+}
 
 CollectionBulkActions.displayName = "CollectionBulkActions";

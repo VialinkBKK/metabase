@@ -9,24 +9,29 @@ import TransitionS from "metabase/css/core/transitions.module.css";
 import DashboardS from "metabase/dashboard/components/Dashboard/Dashboard.module.css";
 import { FixedWidthContainer } from "metabase/dashboard/components/Dashboard/DashboardComponents";
 import { ExportAsPdfButton } from "metabase/dashboard/components/DashboardHeader/buttons/ExportAsPdfButton";
+import { FilterApplyToast } from "metabase/dashboard/components/FilterApplyToast";
+import { useIsParameterPanelSticky } from "metabase/dashboard/hooks/use-is-parameter-panel-sticky";
+import { isEmbeddingSdk } from "metabase/embedding-sdk/config";
+import {
+  EmbeddingFooter,
+  type FooterVariant,
+} from "metabase/embedding/components/EmbeddingFooter/EmbeddingFooter";
+import EmbedThemeS from "metabase/embedding/theme.module.css";
+import { ParametersList } from "metabase/parameters/components/ParametersList";
+import { SyncedParametersList } from "metabase/parameters/components/SyncedParametersList";
+import { useSyncUrlParameters } from "metabase/parameters/components/use-sync-url-parameters";
+import { getVisibleParameters } from "metabase/parameters/utils/ui";
+import { useSelector } from "metabase/redux";
+import { getSetting } from "metabase/settings";
+import { FullWidthContainer } from "metabase/styled-components/layout/FullWidthContainer";
+import { Box, Stack } from "metabase/ui";
+import { getDashboardType } from "metabase/utils/dashboard";
+import { initializeIframeResizer, isSmallScreen } from "metabase/utils/dom";
 import {
   DASHBOARD_HEADER_PARAMETERS_PDF_EXPORT_NODE_ID,
   DASHBOARD_PDF_EXPORT_ROOT_ID,
-} from "metabase/dashboard/constants";
-import { useIsParameterPanelSticky } from "metabase/dashboard/hooks/use-is-parameter-panel-sticky";
-import { getDashboardType } from "metabase/dashboard/utils";
-import { isEmbeddingSdk } from "metabase/embedding-sdk/config";
-import { initializeIframeResizer, isSmallScreen } from "metabase/lib/dom";
-import { useSelector } from "metabase/lib/redux";
-import { FilterApplyToast } from "metabase/parameters/components/FilterApplyToast";
-import { ParametersList } from "metabase/parameters/components/ParametersList";
-import { getVisibleParameters } from "metabase/parameters/utils/ui";
-import { SyncedParametersList } from "metabase/query_builder/components/SyncedParametersList";
-import { useSyncUrlParameters } from "metabase/query_builder/hooks/use-sync-url-parameters";
-import { getSetting } from "metabase/selectors/settings";
-import { FullWidthContainer } from "metabase/styled-components/layout/FullWidthContainer";
-import { Box } from "metabase/ui";
-import { SAVING_DOM_IMAGE_DISPLAY_NONE_CLASS } from "metabase/visualizations/lib/image-exports";
+} from "metabase/visualizations/lib/save-dashboard-pdf";
+import { SAVING_DOM_IMAGE_DISPLAY_NONE_CLASS } from "metabase/viz-core";
 import type Question from "metabase-lib/v1/Question";
 import { getValuePopulatedParameters } from "metabase-lib/v1/parameters/utils/parameter-values";
 import type {
@@ -39,27 +44,13 @@ import type {
 import type { DashboardUrlHashOptions } from "../../../dashboard/types";
 
 import EmbedFrameS from "./EmbedFrame.module.css";
-import type { FooterVariant } from "./EmbedFrame.styled";
-import {
-  ActionButtonsContainer,
-  Body,
-  ContentContainer,
-  DashboardTabsContainer,
-  Footer,
-  Header,
-  Root,
-  Separator,
-  TitleAndButtonsContainer,
-  TitleAndDescriptionContainer,
-} from "./EmbedFrame.styled";
-import { LogoBadge } from "./LogoBadge";
 import { useGlobalTheme } from "./useGlobalTheme";
 
 export type EmbedFrameBaseProps = Partial<{
   className: string;
   name: string | null;
   description: string | null;
-  question: Question;
+  question: Question | null;
   dashboard: Dashboard | null;
   headerButtons: ReactNode;
   actionButtons: ReactNode;
@@ -75,6 +66,7 @@ export type EmbedFrameBaseProps = Partial<{
   dashboardTabs: ReactNode;
   pdfDownloadsEnabled: boolean;
   withFooter: boolean;
+  contentClassName?: string;
 }>;
 
 type WithRequired<T, K extends keyof T> = T & Required<Pick<T, K>>;
@@ -106,6 +98,7 @@ export const EmbedFrame = ({
   hide_parameters,
   pdfDownloadsEnabled = true,
   withFooter = true,
+  contentClassName,
 }: EmbedFrameProps) => {
   useGlobalTheme(theme);
   const hasEmbedBranding = useSelector(
@@ -177,38 +170,53 @@ export const EmbedFrame = ({
   const hasDashboardTabs = dashboard?.tabs && dashboard.tabs.length > 1;
 
   return (
-    <Root
-      hasScroll={hasFrameScroll}
-      isBordered={bordered}
-      hasVisibleOverflowWhenPriting={isPublicDashboard}
-      className={cx(className, EmbedFrameS.EmbedFrame, {
-        [EmbedFrameS.NoBackground]: !background,
-      })}
+    <Stack
+      className={cx(
+        className,
+        EmbedFrameS.overflowAuto,
+        EmbedThemeS.EmbedFrame,
+        {
+          [EmbedThemeS.NoBackground]: !background,
+          [EmbedFrameS.border]: bordered,
+          [EmbedFrameS.printOverflowVisible]: isPublicDashboard,
+        },
+      )}
+      gap={0}
+      pos={hasFrameScroll ? "absolute" : undefined}
+      inset={hasFrameScroll ? 0 : undefined}
       data-testid="embed-frame"
       data-embed-theme={theme}
     >
-      <ContentContainer
+      <Stack
         id={DASHBOARD_PDF_EXPORT_ROOT_ID}
-        className={cx({
-          [EmbedFrameS.ContentContainer]: true,
-          [EmbedFrameS.WithThemeBackground]: true,
+        // flex stays a class, so a contentClassName can still override it
+        className={cx(contentClassName, CS.flexFull, {
+          [EmbedThemeS.ContentContainer]: true,
+          [EmbedThemeS.WithThemeBackground]: true,
 
           // If we are showing a standalone question, make the entire card a hover parent
           [CS.hoverParent]: question,
           [CS.hoverVisibility]: question,
         })}
+        gap={0}
+        pos="relative"
       >
         {hasHeader && (
-          <Header
+          <Stack
+            component="header"
             className={cx(
-              EmbedFrameS.EmbedFrameHeader,
+              EmbedThemeS.EmbedFrameHeader,
               SAVING_DOM_IMAGE_DISPLAY_NONE_CLASS,
             )}
+            gap={0}
             data-testid="embed-frame-header"
           >
             {(finalName || pdfDownloadsEnabled) && (
-              <TitleAndDescriptionContainer hasTitle={!!finalName}>
-                <TitleAndButtonsContainer
+              <FullWidthContainer
+                mt={finalName ? { base: "sm", sm: "lg", lg: "xl" } : "sm"}
+              >
+                <FixedWidthContainer
+                  className={cx(CS.flex, CS.alignCenter)}
                   data-testid="fixed-width-dashboard-header"
                   isFixedWidth={dashboard?.width === "fixed"}
                 >
@@ -231,28 +239,36 @@ export const EmbedFrame = ({
                     />
                   )}
                   {headerButtons}
-                </TitleAndButtonsContainer>
-              </TitleAndDescriptionContainer>
+                </FixedWidthContainer>
+              </FullWidthContainer>
             )}
             {dashboardTabs && (
-              <DashboardTabsContainer>
+              <FullWidthContainer
+                className={cx(EmbedFrameS.dashboardTabs, {
+                  [EmbedFrameS.narrowTabs]: !titled && pdfDownloadsEnabled,
+                })}
+              >
                 <FixedWidthContainer
                   data-testid="fixed-width-dashboard-tabs"
                   isFixedWidth={dashboard?.width === "fixed"}
                 >
                   {dashboardTabs}
                 </FixedWidthContainer>
-              </DashboardTabsContainer>
+              </FullWidthContainer>
             )}
 
-            {finalName && <Separator className={EmbedFrameS.Separator} />}
-          </Header>
+            {finalName && (
+              <div
+                className={cx(EmbedThemeS.Separator, EmbedFrameS.borderBottom)}
+              />
+            )}
+          </Stack>
         )}
 
         {/* show floating header buttons if there is no title */}
         {headerButtons && !titled ? headerButtons : null}
 
-        <span ref={parameterPanelRef} />
+        <span ref={parameterPanelRef} style={{ position: "relative" }} />
         {hasVisibleParameters && (
           <FullWidthContainer
             className={cx(EmbedFrameS.ParameterPanel, {
@@ -272,8 +288,8 @@ export const EmbedFrame = ({
               isFixedWidth={dashboard?.width === "fixed"}
             >
               <ParametersListComponent
-                question={question}
-                dashboard={dashboard}
+                cardId={question?.id()}
+                dashboardId={dashboard?.id}
                 parameters={valuePopulatedParameters}
                 setParameterValue={setParameterValue}
                 hideParameters={hideParameters}
@@ -285,23 +301,26 @@ export const EmbedFrame = ({
             </FixedWidthContainer>
           </FullWidthContainer>
         )}
-        <Body>{children}</Body>
-      </ContentContainer>
+        <Stack component="main" gap={0} flex="1 0 auto" pos="relative">
+          {children}
+        </Stack>
+      </Stack>
 
       {dashboard && <FilterApplyToast position="fixed" />}
       {isFooterEnabled && (
-        <Footer
-          data-testid="embed-frame-footer"
-          className={EmbedFrameS.EmbedFrameFooter}
+        <EmbeddingFooter
           variant={footerVariant}
+          isDarkMode={theme === "night"}
+          hasEmbedBranding={hasEmbedBranding}
         >
-          {hasEmbedBranding && <LogoBadge dark={theme === "night"} />}
-          {actionButtons && (
-            <ActionButtonsContainer>{actionButtons}</ActionButtonsContainer>
+          {actionButtons && footerVariant === "default" && (
+            <Box c="text-secondary" ml="auto">
+              {actionButtons}
+            </Box>
           )}
-        </Footer>
+        </EmbeddingFooter>
       )}
-    </Root>
+    </Stack>
   );
 };
 

@@ -13,42 +13,44 @@ describe("scenarios > alert", () => {
   });
 
   describe("with nothing set", () => {
-    it("should prompt you to add email/slack credentials", () => {
+    it("should prompt admins to add email/slack credentials and tell non-admins to ask an admin", () => {
       H.visitQuestion(ORDERS_QUESTION_ID);
-      H.openSharingMenu("Create an alert");
+
+      cy.findByLabelText("Move, trash, and more…").click();
+      H.popover().findByText("Create an alert").click();
 
       H.modal().within(() => {
         cy.findByText(
-          "To get notified when something happens, or to send this chart on a schedule, first set up SMTP, Slack, or a webhook.",
+          "To get notified when something happens, or to send this chart on a schedule, first set up email, Slack, or a webhook.",
         );
 
-        cy.findByText("Set up SMTP")
+        cy.findByText("Set up email")
           .should("be.visible")
           .closest("a")
           .should("have.attr", "href", "/admin/settings/email");
         cy.findByText("Set up Slack")
           .should("be.visible")
           .closest("a")
-          .should("have.attr", "href", "/admin/settings/notifications");
+          .should("have.attr", "href", "/admin/settings/slack");
         cy.findByText("Add a webhook")
           .should("be.visible")
           .closest("a")
-          .should("have.attr", "href", "/admin/settings/notifications");
+          .should("have.attr", "href", "/admin/settings/webhooks");
       });
-    });
 
-    it("should say to non-admins that admin must add email credentials", () => {
       cy.signInAsNormalUser();
 
       H.visitQuestion(ORDERS_QUESTION_ID);
-      H.openSharingMenu("Create an alert");
+
+      cy.findByLabelText("Move, trash, and more…").click();
+      H.popover().findByText("Create an alert").click();
 
       H.modal().within(() => {
         cy.findByText(
-          "To get notified when something happens, or to send this chart on a schedule, ask your Admin to set up SMTP or Slack.",
-        );
+          "To get notified when something happens, or to send this chart on a schedule, ask your admin to set up email, Slack, or a webhook.",
+        ).should("be.visible");
 
-        cy.findByText("Set up SMTP").should("not.exist");
+        cy.findByText("Set up email").should("not.exist");
         cy.findByText("Set up Slack").should("not.exist");
         cy.findByText("Add a webhook").should("not.exist");
       });
@@ -65,20 +67,23 @@ describe("scenarios > alert", () => {
         name: "Bar Hook",
         description: "This is another hook",
       });
-      cy.setCookie("metabase.SEEN_ALERT_SPLASH", "true");
     });
 
     it("should be able to create and delete alerts with webhooks enabled", () => {
       H.visitQuestion(ORDERS_QUESTION_ID);
-      H.openSharingMenu("Create an alert");
+
+      cy.findByLabelText("Move, trash, and more…").click();
+      H.popover().findByText("Create an alert").click();
 
       H.addNotificationHandlerChannel("Bar Hook");
 
+      H.selectScheduleTime();
       cy.findByRole("button", { name: "Done" }).click();
 
       H.notificationList().findByText("Your alert is all set up.");
 
-      H.openSharingMenu("Edit alerts");
+      cy.findByLabelText("Move, trash, and more…").click();
+      H.popover().findByText("Edit alerts").click();
 
       H.modal().within(() => {
         cy.findByText("Edit alerts").should("be.visible");
@@ -110,6 +115,13 @@ describe("scenarios > alert", () => {
     });
 
     H.sharingMenuButton().should("not.exist");
+
+    cy.findByLabelText("Move, trash, and more…").click();
+    H.popover().within(() => {
+      cy.findByText("Turn back to saved question").should("be.visible");
+      cy.findByText("Create an alert").should("not.exist");
+      cy.findByText("Edit alerts").should("not.exist");
+    });
   });
 
   it("can set up an alert for a question saved in a dashboard", () => {
@@ -129,109 +141,106 @@ describe("scenarios > alert", () => {
       { visitQuestion: true },
     );
 
-    H.openSharingMenu("Create an alert");
+    cy.findByLabelText("Move, duplicate, and more…").click();
+    H.popover().findByText("Create an alert").click();
+    H.selectScheduleTime();
     H.modal().button("Done").click();
 
-    H.openSharingMenu("Edit alerts");
+    cy.findByLabelText("Move, duplicate, and more…").click();
+    H.popover().findByText("Edit alerts").click();
     H.modal().within(() => {
       cy.findByText("Edit alerts").should("be.visible");
       cy.findByText(/Created by you/).should("be.visible");
     });
   });
 
-  describe(
-    "scenarios > sharing > approved domains (EE)",
-    { tags: "@external" },
-    () => {
-      const allowedDomain = "metabase.test";
-      const deniedDomain = "metabase.example";
-      const deniedEmail = `mailer@${deniedDomain}`;
-      // We're not exposing allowed domains to normal users.
-      const normalUserAlertError = `Failed save alert. The following email addresses are not allowed: ${deniedEmail}`;
-      const normalUserSubscriptionError = `Cannot create subscription. The following email addresses are not allowed: ${deniedEmail} Please contact your administrator.`;
-      const adminAlertError = `You're only allowed to email alerts to addresses ending in ${allowedDomain}`;
-      const adminSubscriptionError = `You're only allowed to email subscriptions to addresses ending in ${allowedDomain}`;
+  describe("approved domains (EE)", { tags: "@external" }, () => {
+    const allowedDomain = "metabase.test";
+    const deniedDomain = "metabase.example";
+    const deniedEmail = `mailer@${deniedDomain}`;
+    // We're not exposing allowed domains to normal users.
+    const normalUserAlertError = `Failed save alert. The following email addresses are not allowed: ${deniedEmail}`;
+    const normalUserSubscriptionError = `Cannot create subscription. The following email addresses are not allowed: ${deniedEmail} Please contact your administrator.`;
+    const adminAlertError = `You're only allowed to email alerts to addresses ending in ${allowedDomain}`;
+    const adminSubscriptionError = `You're only allowed to email subscriptions to addresses ending in ${allowedDomain}`;
 
-      function addEmailRecipient(email) {
-        cy.findByRole("textbox").click().type(`${email}`).blur();
-      }
+    function addEmailRecipient(email) {
+      cy.findByTestId("token-field")
+        .findByRole("combobox")
+        .click()
+        .type(`${email}`)
+        .blur();
+    }
 
-      function setAllowedDomains() {
-        H.updateSetting("subscription-allowed-domains", allowedDomain);
-      }
+    function setAllowedDomains() {
+      H.updateSetting("subscription-allowed-domains", allowedDomain);
+    }
 
-      beforeEach(() => {
-        H.restore();
-        cy.signInAsAdmin();
-        H.activateToken("pro-self-hosted");
-        H.setupSMTP();
-        setAllowedDomains();
+    beforeEach(() => {
+      H.activateToken("pro-self-hosted");
+      H.setupSMTP();
+      setAllowedDomains();
+    });
+
+    it("should validate approved email domains for a question alert and a dashboard subscription (metabase#17977)", () => {
+      H.visitQuestion(ORDERS_QUESTION_ID);
+
+      cy.findByLabelText("Move, trash, and more…").click();
+      H.popover().findByText("Create an alert").click();
+
+      H.selectScheduleTime();
+      H.modal().within(() => {
+        cy.findByText("New alert").should("be.visible");
+
+        addEmailRecipient(deniedEmail);
+
+        cy.findByText(adminAlertError);
+        cy.button("Done").should("be.disabled");
       });
 
-      it("should validate approved email domains for a question alert", () => {
-        H.visitQuestion(ORDERS_QUESTION_ID);
+      H.visitDashboard(ORDERS_DASHBOARD_ID);
+      H.toggleDashboardSubscriptionsSidebar();
 
-        H.openSharingMenu("Create an alert");
+      H.sidebar().within(() => {
+        cy.findByText("Email it").click();
+        addEmailRecipient(deniedEmail);
 
-        H.modal().within(() => {
-          cy.findByText("New alert").should("be.visible");
+        // Reproduces metabase#17977
+        cy.button("Send email now").should("be.disabled");
+        cy.button("Done").should("be.disabled");
+        cy.findByText(adminSubscriptionError);
+      });
+    });
 
-          cy.findByTestId("token-field").within(() => {
-            addEmailRecipient(deniedEmail);
-          });
+    it("should not display the list of approved domains for non-admins (metabase#57138)", () => {
+      cy.signInAsNormalUser();
+      H.visitQuestion(ORDERS_QUESTION_ID);
 
-          cy.findByText(adminAlertError);
-          cy.button("Done").should("be.disabled");
-        });
+      cy.findByLabelText("Move, trash, and more…").click();
+      H.popover().findByText("Create an alert").click();
+      H.selectScheduleTime();
+      H.modal().within(() => {
+        cy.findByText("New alert").should("be.visible");
+
+        addEmailRecipient(deniedEmail);
+
+        cy.button("Done").click();
+      });
+      cy.findByTestId("toast-undo").within(() => {
+        cy.root().should("have.text", normalUserAlertError);
       });
 
-      it("should validate approved email domains for a dashboard subscription (metabase#17977)", () => {
-        H.visitDashboard(ORDERS_DASHBOARD_ID);
-        H.openSharingMenu("Subscriptions");
+      H.visitDashboard(ORDERS_DASHBOARD_ID);
+      H.toggleDashboardSubscriptionsSidebar();
 
-        H.sidebar().within(() => {
-          cy.findByText("Email it").click();
-          addEmailRecipient(deniedEmail);
+      H.sidebar().within(() => {
+        addEmailRecipient(deniedEmail);
 
-          // Reproduces metabase#17977
-          cy.button("Send email now").should("be.disabled");
-          cy.button("Done").should("be.disabled");
-          cy.findByText(adminSubscriptionError);
-        });
+        cy.button("Done").click();
       });
-
-      it("should not display the list of approved domains for non-admins (metabase#57138)", () => {
-        cy.signInAsNormalUser();
-        H.visitQuestion(ORDERS_QUESTION_ID);
-
-        H.openSharingMenu("Create an alert");
-        H.modal().within(() => {
-          cy.findByText("New alert").should("be.visible");
-
-          cy.findByTestId("token-field").within(() => {
-            addEmailRecipient(deniedEmail);
-          });
-
-          cy.button("Done").click();
-        });
-        cy.findByTestId("toast-undo").within(() => {
-          cy.root().should("have.attr", "color", "error");
-          cy.root().should("have.text", normalUserAlertError);
-        });
-
-        H.visitDashboard(ORDERS_DASHBOARD_ID);
-        H.openSharingMenu("Subscriptions");
-
-        H.sidebar().within(() => {
-          addEmailRecipient(deniedEmail);
-
-          cy.button("Done").click();
-        });
-        cy.findByTestId("toast-undo").within(() => {
-          cy.root().should("have.attr", "color", "error");
-          cy.root().should("have.text", normalUserSubscriptionError);
-        });
+      cy.findByTestId("toast-undo").within(() => {
+        cy.root().should("have.text", normalUserSubscriptionError);
       });
-    },
-  );
+    });
+  });
 });

@@ -8,14 +8,17 @@
    [hickory.core :as hik]
    [hickory.render :as hik.r]
    [hickory.zip :as hik.z]
+   [metabase.api.common :as api]
+   [metabase.channel.db :as channel.db]
    [metabase.channel.email.result-attachment :as email.result-attachment]
    [metabase.channel.render.card :as render.card]
    [metabase.channel.render.image-bundle :as img]
+   [metabase.channel.render.markdown :as markdown]
    [metabase.channel.render.png :as png]
    [metabase.channel.render.style :as style]
    [metabase.notification.payload.core :as notification.payload]
-   [metabase.util.markdown :as markdown]
-   [toucan2.core :as t2]))
+   [metabase.system.core :as system]
+   [metabase.util :as u]))
 
 (set! *warn-on-reflection* true)
 
@@ -30,7 +33,7 @@
 (def ^:private csv-row-limit 10)
 
 (defn- csv-to-html-table [csv-string]
-  (let [rows (csv/read-csv csv-string)]
+  (let [rows (csv/read-csv (u/strip-bom csv-string))]
     [:table {:style table-style}
      (for [row (take (inc csv-row-limit) rows)] ;; inc row-limit to include the header and the expected # of rows
        [:tr {:style table-style}
@@ -41,7 +44,7 @@
   [part]
   (-> part
       (assoc-in [:card :include_csv] true)
-      email.result-attachment/result-attachment
+      (email.result-attachment/result-attachment api/*current-user-id*)
       first
       :content
       slurp
@@ -73,14 +76,14 @@
                                     :font-style              "normal"
                                     :color                   "#4c5773"
                                     :-moz-osx-font-smoothing "grayscale"})}
-         (markdown/process-markdown (:text dashboard-result) :html)])
+         (markdown/process-markdown (:text dashboard-result) :html (system/site-url))])
        (cellfn nil)])))
 
 (defn- render-dashboard-to-hiccup
   "Given a dashboard ID, renders all of the dashcards to hiccup datastructure."
   [dashboard-id]
-  (let [user              (t2/select-one :model/User)
-        dashboard         (t2/select-one :model/Dashboard :id dashboard-id)
+  (let [user              (channel.db/any-user)
+        dashboard         (channel.db/dashboard dashboard-id)
         dashboard-results (notification.payload/execute-dashboard (:id dashboard) (:id user) nil)
         render            (->> (map render-one-dashcard (map #(assoc % :dashboard-id dashboard-id) dashboard-results))
                                (into [[:tr
@@ -153,8 +156,8 @@
 (defn style-tag-nonce-middleware
   "Constructs a middleware handler function that adds the generated nonce to an html string.
   This is only designed to be used with an endpoint that returns an html string response containing
-  a style tag with an attribute 'nonce=%NONCE%'. Specifcally, this was designed to be used with the
-  endpoint `api/pulse/preview_dashboard/:id`."
+  a style tag with an attribute 'nonce=%NONCE%'. Specifically, this was designed to be used with the
+  endpoint `dev/preview/preview-dashboard/:id`."
   [only-this-uri handler]
   (fn [request respond raise]
     (let [{:keys [uri]} request]

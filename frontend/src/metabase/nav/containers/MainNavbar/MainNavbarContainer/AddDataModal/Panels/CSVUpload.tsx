@@ -11,22 +11,22 @@ import { type FileRejection, useDropzone } from "react-dropzone";
 import { match } from "ts-pattern";
 import { c, t } from "ttag";
 
-import { getComposedDragProps } from "metabase/collections/components/CollectionContent/utils";
-import { useGetDefaultCollectionId } from "metabase/collections/hooks";
-import CollectionName from "metabase/common/components/CollectionName";
+import { getComposedDragProps } from "metabase/common/collections/dropzone";
+import { useGetDefaultCollectionId } from "metabase/common/collections/hooks";
+import { CollectionName } from "metabase/common/components/CollectionName";
 import {
-  type CollectionPickerItem,
   CollectionPickerModal,
-} from "metabase/common/components/Pickers/CollectionPicker";
+  type OmniPickerItem,
+} from "metabase/common/components/Pickers";
 import { UploadInput } from "metabase/common/components/upload";
-import { useDispatch } from "metabase/lib/redux";
+import { useDispatch } from "metabase/redux";
+import { UploadMode } from "metabase/redux/store/upload";
 import {
   MAX_UPLOAD_SIZE,
   MAX_UPLOAD_STRING,
   uploadFile,
 } from "metabase/redux/uploads";
 import { Box, Button, Center, Group, Icon, Stack, Text } from "metabase/ui";
-import { UploadMode } from "metabase-types/store/upload";
 
 import S from "../AddDataModal.module.css";
 import { trackCSVFileInputSelect } from "../analytics";
@@ -66,7 +66,7 @@ export const CSVUpload = ({
   );
 
   const handleCollectionChange = useCallback(
-    (item: CollectionPickerItem) => {
+    (item: OmniPickerItem) => {
       // The model should always be a collection since we explicitly set it in the CollectionPickerModal.
       // In case anything ever changes in the picker, we want to ignore it in this handler.
       if (item.model !== "collection") {
@@ -218,7 +218,7 @@ export const CSVUpload = ({
               <Box component={IconCSVWarning} h={50} />
             ) : (
               <Box
-                c={uploadState.file ? "brand" : "text-secondary-inverse"}
+                c={uploadState.file ? "core-brand" : "text-secondary-inverse"}
                 component={IconCSV}
                 h={50}
               />
@@ -227,7 +227,7 @@ export const CSVUpload = ({
             <div>
               <Text fw="bold">{primaryText}</Text>
               {!uploadState.file && (
-                <Text c="text-light">
+                <Text c="text-secondary">
                   {c("{0} is the allowed size of a file in MB")
                     .t`.csv or .tsv files, ${MAX_UPLOAD_STRING} MB max`}
                 </Text>
@@ -235,18 +235,16 @@ export const CSVUpload = ({
             </div>
             {uploadState.file ? (
               <Button
-                variant="subtle"
-                p={0}
-                h="auto"
+                variant="transparent"
+                size="compact-md"
                 onClick={() => setUploadState({ file: null, error: null })}
               >
                 {t`Remove`}
               </Button>
             ) : (
               <Button
-                variant="subtle"
-                p={0}
-                h="auto"
+                variant="transparent"
+                size="compact-md"
                 onClick={handleFileSelectClick}
               >
                 {t`Select a file`}
@@ -258,18 +256,17 @@ export const CSVUpload = ({
           <Button
             aria-label={t`Select a collection`}
             onClick={() => openCollectionPicker()}
+            leftSection={<Icon name="folder" />}
             rightSection={<Icon name="chevrondown" />}
             styles={{
               inner: {
                 justifyContent: "space-between",
               },
+              label: { flex: 1 },
               root: { flex: 1 },
             }}
           >
-            <Group gap="sm" flex={1}>
-              <Icon name="folder" />
-              <CollectionName id={uploadCollectionId} />
-            </Group>
+            <CollectionName id={uploadCollectionId} />
           </Button>
           <Button
             variant="filled"
@@ -294,17 +291,12 @@ export const CSVUpload = ({
           onChange={handleCollectionChange}
           onClose={() => closeCollectionPicker()}
           options={{
-            showPersonalCollections: true,
-            showRootCollection: true,
-            showSearch: true,
+            hasPersonalCollections: true,
+            hasRootCollection: true,
+            hasSearch: true,
             confirmButtonText: t`Select this collection`,
           }}
-          models={["collection"]}
-          recentFilter={(items) =>
-            items.filter((item) => {
-              return item.model !== "table" && item.can_write;
-            })
-          }
+          entityType="dataset"
         />
       )}
     </>

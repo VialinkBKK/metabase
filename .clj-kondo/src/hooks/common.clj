@@ -500,8 +500,8 @@
               (and resolved (:ns resolved))
               (symbol (name (:ns resolved)) (name (:name resolved)))
 
-             ;; if it wasn't resolved but is still qualified it's probably using the full namespace name rather than an
-             ;; alias.
+              ;; if it wasn't resolved but is still qualified it's probably using the full namespace name rather than an
+              ;; alias.
               (qualified-symbol? sexpr)
               sexpr)))))
     ;; some symbols like `*count/Integer` aren't resolvable.
@@ -526,12 +526,3 @@
 
   ;; should be 1
   (format-string-specifier-count "%-02d"))
-
-(defn add-lsp-ignore-unused-public-var-metadata
-  "Add
-
-    ^{:clj-kondo/ignore [:clojure-lsp/unused-public-var]}
-
-  metadata to a node to suppress LSP warnings."
-  [node]
-  (update-ignored-linters node conj :clojure-lsp/unused-public-var))

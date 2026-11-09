@@ -1,8 +1,8 @@
-import { RuleTester } from "eslint";
+import rule from "../eslint-plugin-metabase/rules/no-unscoped-text-selectors";
 
-import rule from "../eslint-rules/no-unscoped-text-selectors";
+import { createRuleTester } from "./rule-tester";
 
-const ruleTester = new RuleTester({ parserOptions: { ecmaVersion: 2015 } });
+const ruleTester = createRuleTester();
 
 const scopeError = { message: /should be scoped/i };
 

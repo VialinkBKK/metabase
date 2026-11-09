@@ -1,6 +1,10 @@
 const { H } = cy;
-import { SAMPLE_DB_ID } from "e2e/support/cypress_data";
+import { SAMPLE_DB_ID, USERS, WEBMAIL_CONFIG } from "e2e/support/cypress_data";
 import { SAMPLE_DATABASE } from "e2e/support/cypress_sample_database";
+import {
+  ORDERS_DASHBOARD_ID,
+  ORDERS_QUESTION_ID,
+} from "e2e/support/cypress_sample_instance_data";
 
 const { ORDERS, ORDERS_ID, REVIEWS, REVIEWS_ID, PRODUCTS, PRODUCTS_ID } =
   SAMPLE_DATABASE;
@@ -9,8 +13,6 @@ describe("issue 10803", () => {
   const testCases = ["csv", "xlsx"];
 
   beforeEach(() => {
-    cy.intercept("POST", "/api/dataset").as("dataset");
-
     H.restore();
     cy.signInAsAdmin();
 
@@ -26,98 +28,22 @@ describe("issue 10803", () => {
     );
   });
 
-  testCases.forEach((fileType) => {
-    it(`should format the date properly for ${fileType} in saved questions (metabase#10803)`, () => {
-      cy.get("@questionId").then((questionId) => {
-        H.downloadAndAssert(
-          { fileType, questionId, logResults: true, raw: true },
-          testWorkbookDatetimes,
-        );
+  it("should format the date properly in saved and unsaved questions (metabase#10803)", () => {
+    cy.get("@questionId").then((questionId) => {
+      testCases.forEach((fileType) => {
+        H.downloadAndAssert({ fileType, questionId });
       });
     });
 
-    it(`should format the date properly for ${fileType} in unsaved questions`, () => {
-      // Add a space at the end of the query to make it "dirty"
-      // eslint-disable-next-line no-unscoped-text-selectors -- deprecated usage
-      cy.contains(/open editor/i).click();
-      H.NativeEditor.focus().type("{movetoend} ");
+    // Add a space at the end of the query to make it "dirty"
+    // eslint-disable-next-line metabase/no-unscoped-text-selectors -- deprecated usage
+    cy.contains(/open editor/i).click();
+    H.NativeEditor.focus().type("{movetoend} ");
 
-      H.runNativeQuery();
-      H.downloadAndAssert({ fileType, raw: true }, testWorkbookDatetimes);
+    H.runNativeQuery();
+    testCases.forEach((fileType) => {
+      H.downloadAndAssert({ fileType });
     });
-
-    function testWorkbookDatetimes(sheet) {
-      expect(sheet["A1"].v).to.eq("birth_date");
-      expect(sheet["B1"].v).to.eq("created_at");
-
-      // Excel and CSV will have different formats
-      if (fileType === "csv") {
-        expect(sheet["A2"].v).to.eq("June 3, 2026, 12:00 AM");
-        expect(sheet["B2"].v).to.eq("June 3, 2026, 11:41 PM");
-      } else if (fileType === "xlsx") {
-        // We tell the xlsx library to read raw and not parse dates
-        // So for the _date_ format we expect an integer
-        // And for timestamp, we expect a float
-        expect(sheet["A2"].v).to.eq(46176);
-        expect(sheet["B2"].v).to.eq(46176.98707175926);
-      }
-    }
-  });
-});
-
-describe.skip("issue 18219", () => {
-  const questionDetails = {
-    name: "18219",
-    query: {
-      "source-table": ORDERS_ID,
-      aggregation: [["count"]],
-      breakout: [["field", ORDERS.CREATED_AT, { "temporal-unit": "year" }]],
-    },
-  };
-
-  const testCases = ["csv", "xlsx"];
-
-  beforeEach(() => {
-    H.restore();
-    cy.signInAsAdmin();
-  });
-
-  testCases.forEach((fileType) => {
-    it("should format temporal units on export (metabase#18219)", () => {
-      H.createQuestion(questionDetails).then(({ body: { id: questionId } }) => {
-        H.visitQuestion(questionId);
-
-        cy.findByText("Created At: Year");
-        cy.findByText("2022");
-        cy.findByText("744");
-
-        H.downloadAndAssert({ fileType, questionId, raw: true }, assertion);
-      });
-    });
-
-    function assertion(sheet) {
-      expect(sheet["A1"].v).to.eq("Created At: Year");
-
-      if (fileType === "csv") {
-        expect(sheet["A2"].v).to.eq("2022");
-      }
-
-      if (fileType === "xlsx") {
-        /**
-         * Depending on how we end up solving this issue,
-         * the following assertion on the cell type might not be correct.
-         * It's very likely we'll format temporal breakouts as strings.
-         * I.e. we have to take into account Q1, Q2, etc.
-         */
-        // expect(A2.t).to.eq("n");
-
-        /**
-         * Because of the excel date format, we cannot assert on the raw value `v`.
-         * Rather, we have to do it on the parsed value `w`.
-         */
-        expect(sheet["A2"].w).to.eq("2022");
-      }
-    }
   });
 });
 
@@ -127,14 +53,6 @@ describe("issue 18382", () => {
    * The whole point of this repro was to try to cover as much of the old syntax as possible.
    * We want to make sure it still works when loaded into a new(er) Metabase version.
    */
-
-  function assertion(sheet) {
-    expect(sheet["A1"].v).to.eq("MOD:Title");
-    expect(sheet["B1"].v).to.eq("MOD:ID");
-    expect(sheet["C1"].v).to.eq("MOD:Reviewer");
-
-    expect(sheet["A2"].v).to.eq("Aerodynamic Concrete Bench");
-  }
 
   const questionDetails = {
     dataset_query: {
@@ -209,17 +127,14 @@ describe("issue 18382", () => {
     H.visitQuestionAdhoc(questionDetails);
   });
 
-  testCases.forEach((fileType) => {
-    it(`should handle the old syntax in downloads for ${fileType} (metabase#18382)`, () => {
-      // TODO: Please remove this line when issue gets fixed
-      cy.skipOn(fileType === "csv");
-
-      H.downloadAndAssert({ fileType }, assertion);
+  it("should handle the old syntax in downloads (metabase#18382)", () => {
+    testCases.forEach((fileType) => {
+      H.downloadAndAssert({ fileType });
     });
   });
 });
 
-describe("issue 18440", () => {
+describe("issues 18440 and 18573", () => {
   const query = { "source-table": ORDERS_ID, limit: 5 };
 
   const questionDetails = {
@@ -230,54 +145,7 @@ describe("issue 18440", () => {
     },
   };
 
-  const testCases = ["csv", "xlsx"];
-
-  function assertion(sheet) {
-    expect(sheet["C1"].v).to.eq("Product ID");
-    expect(sheet["C2"].v).to.eq("Awesome Concrete Shoes");
-  }
-
-  beforeEach(() => {
-    cy.intercept("POST", "/api/card").as("saveQuestion");
-
-    H.restore();
-    cy.signInAsAdmin();
-
-    // Remap Product ID -> Product Title
-    cy.request("POST", `/api/field/${ORDERS.PRODUCT_ID}/dimension`, {
-      name: "Product ID",
-      type: "external",
-      human_readable_field_id: PRODUCTS.TITLE,
-    });
-  });
-
-  testCases.forEach((fileType) => {
-    it(`export should include a column with remapped values for ${fileType} (metabase#18440-1)`, () => {
-      H.visitQuestionAdhoc(questionDetails);
-
-      // eslint-disable-next-line no-unscoped-text-selectors -- deprecated usage
-      cy.findByText("Product ID");
-      // eslint-disable-next-line no-unscoped-text-selectors -- deprecated usage
-      cy.findByText("Awesome Concrete Shoes");
-
-      H.downloadAndAssert({ fileType }, assertion);
-    });
-
-    it(`export should include a column with remapped values for ${fileType} for a saved question (metabase#18440-2)`, () => {
-      H.createQuestion({ query }).then(({ body: { id } }) => {
-        H.visitQuestion(id);
-
-        cy.findByText("Product ID");
-        cy.findByText("Awesome Concrete Shoes");
-
-        H.downloadAndAssert({ fileType, questionId: id }, assertion);
-      });
-    });
-  });
-});
-
-describe("issue 18573", () => {
-  const questionDetails = {
+  const renamedColumnQuestionDetails = {
     dataset_query: {
       type: "query",
       query: { "source-table": ORDERS_ID, limit: 2 },
@@ -291,10 +159,8 @@ describe("issue 18573", () => {
       },
     },
   };
-  function assertion(sheet) {
-    expect(sheet["C1"].v).to.eq("Foo");
-    expect(sheet["C2"].v).to.eq("Awesome Concrete Shoes");
-  }
+
+  const testCases = ["csv", "xlsx"];
 
   beforeEach(() => {
     H.restore();
@@ -308,15 +174,40 @@ describe("issue 18573", () => {
     });
   });
 
-  it("for the remapped columns, it should preserve renamed column name in exports for xlsx (metabase#18573)", () => {
+  it("export should include remapped values and preserve renamed remapped columns (metabase#18440, metabase#18573)", () => {
+    cy.log("ad-hoc question (metabase#18440-1)");
     H.visitQuestionAdhoc(questionDetails);
 
-    // eslint-disable-next-line no-unscoped-text-selectors -- deprecated usage
-    cy.findByText("Foo");
-    // eslint-disable-next-line no-unscoped-text-selectors -- deprecated usage
+    // eslint-disable-next-line metabase/no-unscoped-text-selectors -- deprecated usage
+    cy.findByText("Product ID");
+    // eslint-disable-next-line metabase/no-unscoped-text-selectors -- deprecated usage
     cy.findByText("Awesome Concrete Shoes");
 
-    H.downloadAndAssert({ fileType: "xlsx" }, assertion);
+    testCases.forEach((fileType) => {
+      H.downloadAndAssert({ fileType });
+    });
+
+    cy.log("saved question (metabase#18440-2)");
+    H.createQuestion({ query }).then(({ body: { id } }) => {
+      H.visitQuestion(id);
+
+      cy.findByText("Product ID");
+      cy.findByText("Awesome Concrete Shoes");
+
+      testCases.forEach((fileType) => {
+        H.downloadAndAssert({ fileType, questionId: id });
+      });
+    });
+
+    cy.log("renamed remapped column (metabase#18573)");
+    H.visitQuestionAdhoc(renamedColumnQuestionDetails);
+
+    // eslint-disable-next-line metabase/no-unscoped-text-selectors -- deprecated usage
+    cy.findByText("Foo");
+    // eslint-disable-next-line metabase/no-unscoped-text-selectors -- deprecated usage
+    cy.findByText("Awesome Concrete Shoes");
+
+    H.downloadAndAssert({ fileType: "xlsx" });
   });
 });
 
@@ -338,31 +229,16 @@ describe("issue 18729", () => {
     display: "line",
   };
 
-  function assertion(sheet) {
-    // It currently says only "Created At", but that is already covered in an issue #18219.
-
-    // TODO: When 18219 gets fixed, uncomment the following assertion and delete the `contain` one.
-    // expect(sheet["A1"].v).to.eq("Created At: Month of year");
-    expect(sheet["A1"].v).to.contain("Created At");
-
-    // Based on how this issue gets resolved, the following assertions might need to change!
-
-    expect(sheet["A2"].v).to.eq(1);
-    expect(sheet["A2"].t).to.eq("n");
-    // Parsed values are always in the form of a string
-    expect(sheet["A2"].w).to.eq("1");
-  }
-
   beforeEach(() => {
     H.restore();
     cy.signInAsAdmin();
   });
 
-  ["csv", "xlsx"].forEach((fileType) => {
-    it(`should properly format the 'X of Y'dates in ${fileType} exports (metabase#18729)`, () => {
-      H.visitQuestionAdhoc(questionDetails);
+  it("should properly format the 'X of Y' dates in exports (metabase#18729)", () => {
+    H.visitQuestionAdhoc(questionDetails);
 
-      H.downloadAndAssert({ fileType }, assertion);
+    ["csv", "xlsx"].forEach((fileType) => {
+      H.downloadAndAssert({ fileType });
     });
   });
 });
@@ -385,8 +261,6 @@ describe("issue 19889", () => {
   }
 
   beforeEach(() => {
-    cy.intercept("POST", "/api/dataset").as("dataset");
-
     H.restore();
     cy.signInAsAdmin();
 
@@ -396,62 +270,52 @@ describe("issue 19889", () => {
     });
 
     // Reorder columns a and b
-    // eslint-disable-next-line no-unscoped-text-selectors -- deprecated usage
+    // eslint-disable-next-line metabase/no-unscoped-text-selectors -- deprecated usage
     cy.findByText("column a").trigger("mousedown", 0, 0).wait(100); //Don't force the first interaction. This ensures things are actually visible to start moving
-    // eslint-disable-next-line no-unscoped-text-selectors -- deprecated usage
+    // eslint-disable-next-line metabase/no-unscoped-text-selectors -- deprecated usage
     cy.findByText("column a")
       .trigger("mousemove", 10, 10, { force: true })
       .wait(100);
-    // eslint-disable-next-line no-unscoped-text-selectors -- deprecated usage
+    // eslint-disable-next-line metabase/no-unscoped-text-selectors -- deprecated usage
     cy.findByText("column a")
       .trigger("mousemove", 100, 0, { force: true })
       .wait(100);
-    // eslint-disable-next-line no-unscoped-text-selectors -- deprecated usage
+    // eslint-disable-next-line metabase/no-unscoped-text-selectors -- deprecated usage
     cy.findByText("column a")
       .trigger("mouseup", 100, 0, { force: true })
       .wait(100);
-    // eslint-disable-next-line no-unscoped-text-selectors -- deprecated usage
+    // eslint-disable-next-line metabase/no-unscoped-text-selectors -- deprecated usage
     cy.findByText("Started from").click(); // Give DOM some time to update
   });
 
-  testCases.forEach((fileType) => {
-    it("should order columns correctly in unsaved native query exports", () => {
-      H.downloadAndAssert({ fileType, raw: true }, (sheet) => {
-        expect(sheet["A1"].v).to.equal("column b");
-        expect(sheet["B1"].v).to.equal("column a");
-        expect(sheet["C1"].v).to.equal("column c");
-      });
+  it("should order columns correctly in unsaved and saved native query exports", () => {
+    testCases.forEach((fileType) => {
+      H.downloadAndAssert({ fileType });
     });
 
-    it("should order columns correctly in saved native query exports", () => {
-      saveAndOverwrite();
+    saveAndOverwrite();
 
-      cy.get("@questionId").then((questionId) => {
-        H.downloadAndAssert({ fileType, questionId, raw: true }, (sheet) => {
-          expect(sheet["A1"].v).to.equal("column b");
-          expect(sheet["B1"].v).to.equal("column a");
-          expect(sheet["C1"].v).to.equal("column c");
-        });
+    cy.get("@questionId").then((questionId) => {
+      testCases.forEach((fileType) => {
+        H.downloadAndAssert({ fileType, questionId });
       });
     });
+  });
 
-    it("should order columns correctly in saved native query exports when the query was modified but not re-run before save (#19889)", () => {
-      // eslint-disable-next-line no-unscoped-text-selectors -- deprecated usage
-      cy.contains(/open editor/i).click();
-      H.NativeEditor.focus().type(
-        '{selectall}select 1 "column x", 2 "column y", 3 "column c"',
-      );
+  it("should order columns correctly in saved native query exports when the query was modified but not re-run before save (#19889)", () => {
+    // eslint-disable-next-line metabase/no-unscoped-text-selectors -- deprecated usage
+    cy.contains(/open editor/i).click();
+    H.NativeEditor.focus().type(
+      '{selectall}select 1 "column x", 2 "column y", 3 "column c"',
+    );
 
-      saveAndOverwrite();
+    saveAndOverwrite();
 
-      cy.get("@questionId").then((questionId) => {
-        H.visitQuestion(questionId);
+    cy.get("@questionId").then((questionId) => {
+      H.visitQuestion(questionId);
 
-        H.downloadAndAssert({ fileType, questionId, raw: true }, (sheet) => {
-          expect(sheet["A1"].v).to.equal("column x");
-          expect(sheet["B1"].v).to.equal("column y");
-          expect(sheet["C1"].v).to.equal("column c");
-        });
+      testCases.forEach((fileType) => {
+        H.downloadAndAssert({ fileType, questionId });
       });
     });
   });
@@ -470,8 +334,6 @@ describe("metabase#28834", () => {
   // difficulties, I've decided to test with Cypress instead.
 
   beforeEach(() => {
-    cy.intercept("POST", "/api/dataset").as("dataset");
-
     H.restore();
     cy.signInAsAdmin();
 
@@ -484,21 +346,85 @@ describe("metabase#28834", () => {
     H.NativeEditor.focus().type(', select 2 "column b"');
   });
 
-  it("should be able to export unsaved native query results as CSV even after the query has changed", () => {
-    const fileType = "csv";
-    H.downloadAndAssert({ fileType, raw: true }, (sheet) => {
-      expect(sheet["A1"].v).to.equal("column a");
-      expect(sheet["A2"].v).to.equal("1");
-      expect(sheet["A3"]).to.be.undefined;
+  it("should be able to export unsaved native query results as CSV and XLSX even after the query has changed", () => {
+    ["csv", "xlsx"].forEach((fileType) => {
+      H.downloadAndAssert({ fileType });
+    });
+  });
+});
+
+describe("issue 70909", () => {
+  const { WEB_PORT } = WEBMAIL_CONFIG;
+  const { admin } = USERS;
+
+  function assertCsvHeaderMatchesTable(csv) {
+    const header = csv.replace(/^\uFEFF/, "").split(/\r?\n/)[0];
+    expect(header).to.include("Tax");
+    expect(header).not.to.include("Discount");
+  }
+
+  beforeEach(() => {
+    H.restore();
+    cy.signInAsAdmin();
+
+    cy.request("PUT", `/api/field/${ORDERS.DISCOUNT}`, {
+      visibility_type: "details-only",
     });
   });
 
-  it("should be able to export unsaved native query results as XLSX even after the query has changed", () => {
-    const fileType = "xlsx";
-    H.downloadAndAssert({ fileType, raw: true }, (sheet) => {
-      expect(sheet["A1"].v).to.equal("column a");
-      expect(sheet["A2"].v).to.equal(1);
-      expect(sheet["A3"]).to.be.undefined;
+  it("should not export columns hidden by 'Only in detail views' field visibility (metabase#70909)", () => {
+    H.visitQuestion(ORDERS_QUESTION_ID);
+    H.tableInteractive().findByText("Tax").should("be.visible");
+    H.tableInteractive().findByText("Discount").should("not.exist");
+
+    H.downloadAndAssert({
+      fileType: "csv",
+      questionId: ORDERS_QUESTION_ID,
+      isDashboard: false,
+      assertResponseBody: assertCsvHeaderMatchesTable,
+    });
+  });
+
+  it("should not export columns hidden by 'Only in detail views' field visibility from an unsaved question (metabase#70909)", () => {
+    H.openOrdersTable();
+    H.tableInteractive().findByText("Tax").should("be.visible");
+    H.tableInteractive().findByText("Discount").should("not.exist");
+
+    H.downloadAndAssert({
+      fileType: "csv",
+      isDashboard: false,
+      assertResponseBody: assertCsvHeaderMatchesTable,
+    });
+  });
+
+  it("should not attach columns hidden by 'Only in detail views' field visibility to subscriptions (metabase#70909)", () => {
+    H.setupSMTP();
+    H.visitDashboard(ORDERS_DASHBOARD_ID);
+
+    H.toggleDashboardSubscriptionsSidebar();
+    H.sidebar().within(() => {
+      cy.findByText("Email it").click();
+      cy.findByPlaceholderText("Enter user names or email addresses").click();
+    });
+    H.popover().findByText(`${admin.first_name} ${admin.last_name}`).click();
+    H.sidebar().within(() => {
+      // Closes the recipients popover that covers the attachment controls
+      cy.findByText("To").click();
+      cy.findByLabelText("Attach results").click({ force: true });
+      cy.findByText("Questions to attach").click();
+    });
+
+    H.sendEmailAndAssert((email) => {
+      const csvAttachment = email.attachments.find(
+        (attachment) => attachment.contentType === "text/csv",
+      );
+      expect(csvAttachment).to.exist;
+
+      cy.request({
+        method: "GET",
+        url: `http://localhost:${WEB_PORT}/email/${email.id}/attachment/${csvAttachment.generatedFileName}`,
+        encoding: "utf8",
+      }).then(({ body }) => assertCsvHeaderMatchesTable(body));
     });
   });
 });

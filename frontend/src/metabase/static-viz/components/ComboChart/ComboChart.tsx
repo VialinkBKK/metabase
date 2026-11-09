@@ -1,74 +1,111 @@
-import { Group } from "@visx/group";
 import { init } from "echarts/core";
 
 import type { StaticChartProps } from "metabase/static-viz/components/StaticVisualization";
+import { readAllPointsOutOfRange } from "metabase/static-viz/lib/data-visibility";
+import { withCartesianChartSize } from "metabase/static-viz/lib/rendering-context";
 import { sanitizeSvgForBatik } from "metabase/static-viz/lib/svg";
-import { registerEChartsModules } from "metabase/visualizations/echarts";
-import { getChartMeasurements } from "metabase/visualizations/echarts/cartesian/chart-measurements";
-import { getCartesianChartModel } from "metabase/visualizations/echarts/cartesian/model";
-import { getLegendItems } from "metabase/visualizations/echarts/cartesian/model/legend";
-import { getCartesianChartOption } from "metabase/visualizations/echarts/cartesian/option";
+import {
+  STATIC_CARTESIAN_CHART_SIZE,
+  STATIC_ROW_CHART_SIZE,
+} from "metabase/static-viz/lib/utils";
+import {
+  getCartesianChartModel,
+  getCartesianChartOption,
+  getChartLayout,
+  getChartModelAtHeight,
+  getLegendItems,
+  getSizeAdjustedSettings,
+  isRowChartSeries,
+  registerEChartsModules,
+} from "metabase/viz-core";
+import type { RawSeries } from "metabase-types/api";
 
 import Watermark from "../../watermark.svg?component";
+import { DataOutOfRangeOverlay } from "../DataOutOfRangeOverlay/DataOutOfRangeOverlay";
 import { Legend } from "../Legend";
-import { calculateLegendRows } from "../Legend/utils";
-
-const WIDTH = 540;
-const HEIGHT = 360;
-const LEGEND_PADDING = 8;
+import { getPlotBounds, layoutChartWithBottomLegend } from "../Legend/layout";
 
 registerEChartsModules();
 
+const getDefaultSize = (rawSeries: RawSeries) =>
+  isRowChartSeries(rawSeries)
+    ? STATIC_ROW_CHART_SIZE
+    : STATIC_CARTESIAN_CHART_SIZE;
+
 export const ComboChart = ({
   rawSeries,
-  settings,
-  renderingContext,
-  width = WIDTH,
-  height = HEIGHT,
+  settings: originalSettings,
+  renderingContext: originalRenderingContext,
+  width = getDefaultSize(rawSeries).width,
+  height = getDefaultSize(rawSeries).height,
   isStorybook = false,
   hasDevWatermark = false,
+  fitWithinBounds = false,
+  gridSize,
 }: StaticChartProps) => {
-  const chart = init(null, null, {
-    renderer: "svg",
-    ssr: true,
+  const renderingContext = withCartesianChartSize(originalRenderingContext, {
     width,
     height,
   });
-
-  const chartModel = getCartesianChartModel(
+  const settings = getSizeAdjustedSettings({
+    settings: originalSettings,
+    width,
+    height,
+    gridSize,
+  });
+  const baseChartModel = getCartesianChartModel(
     rawSeries,
     settings,
     [],
     renderingContext,
   );
 
-  const legendItems = getLegendItems(chartModel.seriesModels);
-  const isReversed = settings["legend.is_reversed"];
-  const { height: legendHeight, items: legendLayoutItems } =
-    calculateLegendRows({
-      items: legendItems,
-      width,
-      horizontalPadding: LEGEND_PADDING,
-      verticalPadding: LEGEND_PADDING,
-      isReversed,
-    });
-
-  const chartMeasurements = getChartMeasurements(
-    chartModel,
-    settings,
-    false,
-    width,
+  const {
+    chartHeight,
+    legend,
+    layout: { chartModel, chartLayout },
+  } = layoutChartWithBottomLegend({
+    items: getLegendItems(baseChartModel.seriesModels),
+    chartWidth: width,
     height,
-    renderingContext,
-  );
+    fitWithinBounds,
+    isReversed: settings["legend.is_reversed"],
+    getLayout: (chartHeight) => {
+      const chartModel = getChartModelAtHeight(
+        baseChartModel,
+        chartHeight,
+        settings,
+      );
+      return {
+        chartModel,
+        chartLayout: getChartLayout(
+          chartModel,
+          settings,
+          false,
+          width,
+          chartHeight,
+          renderingContext,
+        ),
+      };
+    },
+    getPlot: ({ chartLayout }) => getPlotBounds(chartLayout.padding, width),
+  });
+
+  const chart = init(null, null, {
+    renderer: "svg",
+    ssr: true,
+    width,
+    height: chartHeight,
+  });
 
   const option = getCartesianChartOption(
     chartModel,
-    chartMeasurements,
+    chartLayout,
+    false,
     null,
     [],
     settings,
-    WIDTH,
+    width,
     false,
     renderingContext,
   );
@@ -77,25 +114,40 @@ export const ComboChart = ({
 
   const chartSvg = sanitizeSvgForBatik(chart.renderToSVGString(), isStorybook);
 
+  const allPointsOutOfRange = readAllPointsOutOfRange(chart);
+
+  chart.dispose();
+
+  const totalHeight = fitWithinBounds ? height : height + legend.height;
+
   return (
-    <svg
-      xmlns="http://www.w3.org/2000/svg"
-      width={width}
-      height={height + legendHeight}
-    >
-      <Legend items={legendLayoutItems} />
-      <Group top={legendHeight}>
+    <>
+      <svg
+        xmlns="http://www.w3.org/2000/svg"
+        width={width}
+        height={totalHeight}
+      >
         <g dangerouslySetInnerHTML={{ __html: chartSvg }}></g>
-      </Group>
-      {hasDevWatermark && (
-        <Watermark
-          x="0"
-          y="0"
-          height={height}
-          width={width}
-          preserveAspectRatio="xMinYMin slice"
-        />
-      )}
-    </svg>
+        <Legend top={chartHeight} items={legend.items} />
+        {hasDevWatermark && (
+          <Watermark
+            x="0"
+            y="0"
+            height={height}
+            width={width}
+            preserveAspectRatio="xMinYMin slice"
+            fill={renderingContext.getColor("text-secondary")}
+            opacity={0.2}
+          />
+        )}
+        {allPointsOutOfRange && (
+          <DataOutOfRangeOverlay
+            width={width}
+            height={totalHeight}
+            renderingContext={renderingContext}
+          />
+        )}
+      </svg>
+    </>
   );
 };

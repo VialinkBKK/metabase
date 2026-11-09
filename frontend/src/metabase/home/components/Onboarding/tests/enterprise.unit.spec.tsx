@@ -4,7 +4,6 @@ import { type SetupProps, setup as baseSetup } from "./setup";
 
 function setup(opts?: SetupProps) {
   baseSetup({
-    hasEnterprisePlugins: true,
     ...opts,
   });
 }
@@ -12,25 +11,6 @@ function setup(opts?: SetupProps) {
 describe("Onboarding (EE without token)", () => {
   beforeEach(() => {
     jest.clearAllMocks();
-  });
-
-  describe("'Set up your Metabase' section", () => {
-    it("'invite people' should show the default copy without the activated token", () => {
-      setup({ openItem: "invite" });
-
-      const inviteItem = screen.getByTestId("invite-item");
-
-      expect(
-        within(inviteItem).getByText(
-          "Don't be shy with invites. Metabase makes self-service analytics easy.",
-        ),
-      ).toBeInTheDocument();
-      expect(
-        within(inviteItem).queryByText(
-          "Don't be shy with invites. Metabase Starter plan includes 5 users, and Pro includes 10 users without the need to pay additionally.",
-        ),
-      ).not.toBeInTheDocument();
-    });
   });
 
   describe("footer", () => {

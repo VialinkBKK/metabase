@@ -22,7 +22,6 @@
    [toucan2.tools.before-update :as t2.before-update]
    [toucan2.util :as t2.util]))
 
-
 (def changes*
   "An atom to store all the changes of models that we currently track."
   (atom {}))
@@ -41,7 +40,6 @@
                                (= b :id) 1
                                :else (compare a b)))) m))
 
-#_:clj-kondo/ignore ;; printlns
 (defn on-change
   "When a change occurred, execute this function.
 
@@ -79,7 +77,7 @@
                            :update
                            (into {} (t2/changes row-or-instance))
                            (into {} row-or-instance))
-                        clean-change)
+                         clean-change)
         path       [(t2/table-name model) action]]
     ;; ideally this should be debug, but for some reasons this doesn't get logged
     (on-change path change-info)
@@ -96,7 +94,7 @@
   [;; will be better if we could use after-insert to get the inserted id, but toucan2 doesn't define a multimethod for after-insert
    [#'t2.before-insert/before-insert :after :insert ::t2.before-insert/before-insert]
    [#'t2.before-update/before-update :after :update ::t2.before-update/before-update]
-   ;; we do :before aux-method instead of :after for delete bacause the after method has input is number of affected rows
+   ;; we do :before aux-method instead of :after for delete because the after method has input is number of affected rows
    [#'t2.before-delete/before-delete :before :delete ::t2.before-delete/before-delete]])
 
 (defn- track-one!

@@ -1,23 +1,21 @@
 import type { StoryFn } from "@storybook/react";
 
+import { createMockSettingsState, createMockState } from "__support__/state";
 import {
-  SdkVisualizationWrapper,
+  IsomorphicVisualizationStory,
   VisualizationWrapper,
+  createWaitForChartsDecorator,
 } from "__support__/storybook";
 import { NumberColumn, StringColumn } from "__support__/visualizations";
-import type { MetabaseTheme } from "metabase/embedding-sdk/theme";
 import { Box } from "metabase/ui";
-import { registerVisualization } from "metabase/visualizations";
 import Visualization from "metabase/visualizations/components/Visualization";
-import type { Series } from "metabase-types/api";
+import { registerVisualization } from "metabase/viz-core";
+import type { RawSeries, Series } from "metabase-types/api";
 import {
   createMockCard,
+  createMockDatasetData,
   createMockTokenFeatures,
 } from "metabase-types/api/mocks";
-import {
-  createMockSettingsState,
-  createMockState,
-} from "metabase-types/store/mocks";
 
 import { BarChart } from "./BarChart";
 
@@ -26,9 +24,9 @@ export default {
   component: BarChart,
 };
 
-// @ts-expect-error: incompatible prop types with registerVisualization
 registerVisualization(BarChart);
 
+// Unjustified type cast. FIXME
 const MOCK_SERIES = [
   {
     card: createMockCard({ name: "Card", display: "bar" }),
@@ -45,7 +43,7 @@ const MOCK_SERIES = [
   },
 ] as Series;
 
-export const Default: StoryFn = () => (
+const DefaultTemplate: StoryFn = () => (
   <VisualizationWrapper>
     <Box h={500}>
       <Visualization rawSeries={MOCK_SERIES} width={500} />
@@ -53,23 +51,7 @@ export const Default: StoryFn = () => (
   </VisualizationWrapper>
 );
 
-// Example of how themes can be applied in the SDK.
-export const EmbeddingHugeFont: StoryFn = () => {
-  const theme: MetabaseTheme = {
-    fontSize: "20px",
-    components: { cartesian: { padding: "0.5rem 1rem" } },
-  };
-
-  return (
-    <SdkVisualizationWrapper theme={theme}>
-      <Box h={500}>
-        <Visualization rawSeries={MOCK_SERIES} width={500} />
-      </Box>
-    </SdkVisualizationWrapper>
-  );
-};
-
-export const Watermark: StoryFn = () => (
+const WatermarkTemplate: StoryFn = () => (
   <VisualizationWrapper
     initialStore={createMockState({
       settings: createMockSettingsState({
@@ -84,3 +66,136 @@ export const Watermark: StoryFn = () => (
     </Box>
   </VisualizationWrapper>
 );
+
+export const Default = {
+  render: DefaultTemplate,
+  parameters: {
+    loki: { skip: true },
+  },
+};
+
+export const Watermark = {
+  render: WatermarkTemplate,
+  parameters: {
+    loki: { skip: true },
+  },
+};
+
+const splitPanelsSeries = (min: number, max: number) =>
+  // Unjustified type cast. FIXME
+  [
+    {
+      card: createMockCard({
+        name: "Split panels",
+        display: "bar",
+        visualization_settings: {
+          "graph.dimensions": ["Month"],
+          "graph.metrics": ["Small", "Large"],
+          "graph.split_panels": true,
+          "graph.y_axis.auto_range": false,
+          "graph.y_axis.min": min,
+          "graph.y_axis.max": max,
+        },
+      }),
+      data: {
+        cols: [
+          StringColumn({ name: "Month" }),
+          NumberColumn({ name: "Small" }),
+          NumberColumn({ name: "Large" }),
+        ],
+        rows: [
+          ["Jan", 10, 100],
+          ["Feb", 12, 140],
+          ["Mar", 11, 180],
+        ],
+      },
+    },
+  ] as unknown as Series;
+
+const SplitPanelsTemplate: StoryFn<{ rawSeries: Series }> = (args) => (
+  <IsomorphicVisualizationStory {...args} />
+);
+
+export const SplitPanelsFirstPanelEmpty = {
+  render: SplitPanelsTemplate,
+  args: { rawSeries: splitPanelsSeries(120, 160) },
+  decorators: [createWaitForChartsDecorator({ count: 1 })],
+};
+
+export const SplitPanelsAllPanelsEmpty = {
+  render: SplitPanelsTemplate,
+  args: { rawSeries: splitPanelsSeries(300, 400) },
+  decorators: [createWaitForChartsDecorator({ count: 1 })],
+};
+
+const RawSeriesTemplate: StoryFn<{ rawSeries: RawSeries }> = (args) => (
+  <IsomorphicVisualizationStory {...args} />
+);
+
+const comboSplitPanelsSeries: RawSeries = [
+  {
+    card: createMockCard({
+      name: "Split panels combo",
+      display: "bar",
+      visualization_settings: {
+        "graph.dimensions": ["Month"],
+        "graph.metrics": ["Small", "Large"],
+        "graph.split_panels": true,
+        "graph.y_axis.auto_range": false,
+        "graph.y_axis.min": 50,
+        "graph.y_axis.max": 60,
+        series_settings: { Large: { display: "line" } },
+      },
+    }),
+    data: createMockDatasetData({
+      cols: [
+        StringColumn({ name: "Month" }),
+        NumberColumn({ name: "Small" }),
+        NumberColumn({ name: "Large" }),
+      ],
+      rows: [
+        ["Jan", 1, 100],
+        ["Feb", 2, 140],
+        ["Mar", 1, 180],
+      ],
+    }),
+  },
+];
+
+// The line panel gets a transparent alignment bar that spans the panel.
+export const SplitPanelsComboAllPanelsEmpty = {
+  render: RawSeriesTemplate,
+  args: { rawSeries: comboSplitPanelsSeries },
+  decorators: [createWaitForChartsDecorator({ count: 1 })],
+};
+
+const shortBarsSeries: RawSeries = [
+  {
+    card: createMockCard({
+      name: "Short bars",
+      display: "bar",
+      visualization_settings: {
+        "graph.dimensions": ["Month"],
+        "graph.metrics": ["Count"],
+        "graph.y_axis.auto_range": false,
+        "graph.y_axis.min": 0,
+        "graph.y_axis.max": 1000,
+      },
+    }),
+    data: createMockDatasetData({
+      cols: [StringColumn({ name: "Month" }), NumberColumn({ name: "Count" })],
+      rows: [
+        ["Jan", 1],
+        ["Feb", 2],
+        ["Mar", 4],
+      ],
+    }),
+  },
+];
+
+// Bars under 2.5px tall are still painted, so no warning.
+export const ShortBarsAtBaseline = {
+  render: RawSeriesTemplate,
+  args: { rawSeries: shortBarsSeries },
+  decorators: [createWaitForChartsDecorator({ count: 1 })],
+};

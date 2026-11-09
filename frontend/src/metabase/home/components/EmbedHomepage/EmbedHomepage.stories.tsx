@@ -31,12 +31,10 @@ export const Default: Story = {
   },
   args: {
     hasExampleDashboard: true,
-    licenseActiveAtSetup: true,
-    interactiveEmbeddingQuickstartUrl:
-      "https://www.metabase.com/docs/latest/embedding/interactive-embedding-quick-start-guide.html",
-    embeddingDocsUrl:
-      "https://www.metabase.com/docs/latest/embedding/start.html",
+    variant: "ee",
+    hasEmbeddingFeature: false,
+    embeddingDocsUrl: "https://www.metabase.com/docs/latest/embedding/start",
     analyticsDocsUrl:
-      "https://www.metabase.com/learn/customer-facing-analytics/",
+      "https://www.metabase.com/docs/latest/embedding/introduction",
   },
 };

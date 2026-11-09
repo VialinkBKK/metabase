@@ -6,6 +6,7 @@
    [clojure.string :as str]
    [metabase.app-db.spec :as mdb.spec]
    [metabase.app-db.update-h2 :as update-h2]
+   [metabase.auth-provider.core :as auth-provider]
    [metabase.config.core :as config]
    [metabase.connection-pool :as connection-pool]
    [metabase.util.log :as log]
@@ -17,6 +18,7 @@
 
 (set! *warn-on-reflection* true)
 
+#_{:clj-kondo/ignore [:metabase/discourage-dynamic-vars]}
 (defn ^:dynamic *current-millis*
   "Returns the current time millis, but can be overridden for testing."
   []
@@ -25,10 +27,10 @@
 (defn- renew-azure-managed-identity-password
   [client-id]
   (let [{:keys [access_token expires_in]}
-        ((requiring-resolve 'metabase.auth-provider.core/fetch-auth) :azure-managed-identity nil {:azure-managed-identity-client-id client-id})]
+        (auth-provider/fetch-auth :azure-managed-identity nil {:azure-managed-identity-client-id client-id})]
     {:password access_token
      :expiry (+ (*current-millis*) (* (- (parse-long expires_in)
-                                         @(requiring-resolve 'metabase.auth-provider.core/azure-auth-token-renew-slack-seconds))
+                                         auth-provider/azure-auth-token-renew-slack-seconds)
                                       1000))}))
 
 (defn- ensure-azure-managed-identity-password
@@ -100,9 +102,11 @@
 (defn raw-connection-string->DataSource
   "Return a [[javax.sql.DataSource]] given a raw JDBC connection string."
   (^javax.sql.DataSource [s]
-   (raw-connection-string->DataSource s nil nil nil))
+   (raw-connection-string->DataSource s nil nil nil nil))
 
   (^javax.sql.DataSource [s username password azure-managed-identity-client-id]
+   (raw-connection-string->DataSource s username password azure-managed-identity-client-id nil))
+  (^javax.sql.DataSource [s username password azure-managed-identity-client-id aws-iam]
    {:pre [(string? s)]}
    ;; normalize the protocol in case someone is trying to trip us up. Heroku is known for this and passes stuff in
    ;; like `postgres:...` to screw with us.
@@ -138,7 +142,11 @@
                  (seq password)                               (assoc :password password)
                  (and (empty? password)
                       (seq azure-managed-identity-client-id)) (assoc :azure-managed-identity-client-id
-                                                                     azure-managed-identity-client-id))]
+                                                                     azure-managed-identity-client-id))
+         [s m] (if aws-iam
+                 [(str/replace s #"^jdbc:(postgresql|mysql):" "jdbc:aws-wrapper:$1:")
+                  (assoc m :wrapperPlugins "iam" :useSSL true)]
+                 [s m])]
      (update-h2/update-if-needed! s)
      (->DataSource s (some-> (not-empty m) connection-pool/map->properties)))))
 
@@ -162,6 +170,5 @@
         properties                              (some-> (not-empty (dissoc spec :classname :subprotocol :subname))
                                                         remove-shadowed-azure-managed-identity-client-id
                                                         connection-pool/map->properties)]
-
     (update-h2/update-if-needed! url)
     (->DataSource url properties)))

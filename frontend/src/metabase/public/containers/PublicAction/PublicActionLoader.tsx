@@ -1,68 +1,65 @@
-import { useCallback, useState } from "react";
-import { useMount } from "react-use";
+import { useCallback, useEffect } from "react";
+import { useAsyncFn, useMount } from "react-use";
 
-import { useSafeAsyncFunction } from "metabase/common/hooks/use-safe-async-function";
-import { connect } from "metabase/lib/redux";
+import { publicApi } from "metabase/api";
+import { runRtkEndpoint } from "metabase/api/utils/run-rtk-endpoint";
+import { LoadingAndErrorWrapper } from "metabase/common/components/LoadingAndErrorWrapper";
 import { SyncedEmbedFrame } from "metabase/public/components/EmbedFrame";
+import { connect, useDispatch } from "metabase/redux";
 import { setErrorPage } from "metabase/redux/app";
-import { PublicApi } from "metabase/services";
-import type { WritebackAction } from "metabase-types/api";
-import type { AppErrorDescriptor } from "metabase-types/store";
+import { useParams } from "metabase/router";
+import { Flex } from "metabase/ui";
 
 import PublicAction from "./PublicAction";
-import {
-  ContentContainer,
-  LoadingAndErrorWrapper,
-} from "./PublicAction.styled";
-
-interface OwnProps {
-  params: { uuid: string };
-}
+import S from "./PublicActionLoader.module.css";
 
 interface DispatchProps {
-  setErrorPage: (error: AppErrorDescriptor) => void;
+  setErrorPage: (error: any) => void;
 }
 
-type Props = OwnProps & DispatchProps;
+type Props = DispatchProps;
 
 const mapDispatchToProps = {
   setErrorPage,
 };
 
-function PublicActionLoader({ params, setErrorPage }: Props) {
-  const [action, setAction] = useState<WritebackAction | null>(null);
-  const fetchAction = useSafeAsyncFunction(PublicApi.action);
+function PublicActionLoader({ setErrorPage }: Props) {
+  const { uuid = "" } = useParams<{ uuid: string }>();
+  const dispatch = useDispatch();
+  const [{ value: action, error }, fetchAction] = useAsyncFn(
+    () =>
+      runRtkEndpoint(
+        { uuid: uuid },
+        dispatch,
+        publicApi.endpoints.getPublicAction,
+      ),
+    [uuid, dispatch],
+  );
 
   useMount(() => {
-    async function loadAction() {
-      try {
-        const action = await fetchAction({ uuid: params.uuid });
-        setAction(action);
-      } catch (error) {
-        setErrorPage(error as AppErrorDescriptor);
-      }
-    }
-    loadAction();
+    fetchAction();
   });
+
+  useEffect(() => {
+    if (error) {
+      setErrorPage(error);
+    }
+  }, [error, setErrorPage]);
 
   const renderContent = useCallback(() => {
     if (!action) {
       return null;
     }
     return (
-      <ContentContainer>
-        <PublicAction
-          action={action}
-          publicId={params.uuid}
-          onError={setErrorPage}
-        />
-      </ContentContainer>
+      <Flex flex="1 0 auto" align="center" justify="center" p="xl">
+        <PublicAction action={action} publicId={uuid} onError={setErrorPage} />
+      </Flex>
     );
-  }, [action, params.uuid, setErrorPage]);
+  }, [action, uuid, setErrorPage]);
 
   return (
     <SyncedEmbedFrame footerVariant="large">
-      <LoadingAndErrorWrapper loading={!action}>
+      <LoadingAndErrorWrapper className={S.loadingWrapper} loading={!action}>
         {renderContent}
       </LoadingAndErrorWrapper>
     </SyncedEmbedFrame>

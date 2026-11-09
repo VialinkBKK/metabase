@@ -1,10 +1,10 @@
-const ExplicitSize = () => (ComposedComponent: any) => {
-  const WrappedComponent = (props: any) => (
-    <ComposedComponent width={1000} height={1000} {...props} />
-  );
+import { type ComponentType, forwardRef } from "react";
 
-  return WrappedComponent;
-};
-
-// eslint-disable-next-line import/no-default-export
-export default ExplicitSize;
+export const ExplicitSize =
+  () =>
+  <P extends object>(ComposedComponent: ComponentType<P>) =>
+    forwardRef<unknown, P>(function WrappedComponent(props, ref) {
+      return (
+        <ComposedComponent ref={ref} width={1000} height={1000} {...props} />
+      );
+    });

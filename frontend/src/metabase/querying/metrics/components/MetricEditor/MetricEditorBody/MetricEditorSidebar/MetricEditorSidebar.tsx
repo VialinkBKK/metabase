@@ -1,7 +1,7 @@
 import { t } from "ttag";
 
-import ExternalLink from "metabase/common/components/ExternalLink";
-import { useSelector } from "metabase/lib/redux";
+import { ExternalLink } from "metabase/common/components/ExternalLink";
+import { useSelector } from "metabase/redux";
 import { getDocsUrl } from "metabase/selectors/settings";
 import { getShowMetabaseLinks } from "metabase/selectors/whitelabel";
 import { Box, Button, Icon } from "metabase/ui";
@@ -10,13 +10,13 @@ export function MetricEditorSidebar() {
   const showMetabaseLinks = useSelector(getShowMetabaseLinks);
   const docsUrl = useSelector((state) =>
     getDocsUrl(state, {
-      page: "data-modeling/metrics",
-      anchor: "creating-a-metric",
+      page: "data-modeling/semantic-layer/metrics",
+      anchor: "create-a-metric",
     }),
   );
 
   return (
-    <Box pt="md" pr={{ sm: "sm", lg: "md" }}>
+    <Box pt="lg" pr={{ sm: "sm", lg: "lg" }}>
       {showMetabaseLinks && (
         <Button
           component={ExternalLink}

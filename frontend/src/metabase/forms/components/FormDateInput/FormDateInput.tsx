@@ -1,10 +1,13 @@
-import dayjs from "dayjs";
 import { useField } from "formik";
 import type { ReactNode, Ref } from "react";
 import { forwardRef, useCallback, useMemo } from "react";
 
 import { useUniqueId } from "metabase/common/hooks/use-unique-id";
+import { dayjs } from "metabase/dayjs";
 import { DateInput, type DateInputProps, type DateValue } from "metabase/ui";
+
+const DATE_FORMAT = "YYYY-MM-DD";
+
 export type FormDateInputProps = {
   value?: DateValue | undefined;
   className?: string;
@@ -39,7 +42,7 @@ export const FormDateInput = forwardRef(function FormDateInput(
   const handleChange = useCallback(
     (date: DateValue | undefined) => {
       if (date) {
-        setValue(dayjs(date).toISOString());
+        setValue(dayjs(date).format(DATE_FORMAT));
       } else {
         setValue(nullable ? null : undefined);
       }
@@ -50,14 +53,14 @@ export const FormDateInput = forwardRef(function FormDateInput(
   return (
     <DateInput
       fw="bold"
+      onChange={handleChange}
       {...props}
       id={id}
       ref={ref}
       label={title}
       name={name}
-      value={dayjs(date).toDate()}
+      value={dayjs(date).format(DATE_FORMAT)}
       error={touched && error != null}
-      onChange={handleChange}
       onBlur={onBlur}
     />
   );

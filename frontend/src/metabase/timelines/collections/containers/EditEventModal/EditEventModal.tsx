@@ -1,52 +1,80 @@
-import { goBack, push } from "react-router-redux";
-import _ from "underscore";
+import { t } from "ttag";
 
-import TimelineEvents from "metabase/entities/timeline-events";
-import Timelines from "metabase/entities/timelines";
-import { connect } from "metabase/lib/redux";
-import * as Urls from "metabase/lib/urls";
-import EditEventModal from "metabase/timelines/common/components/EditEventModal";
+import {
+  skipToken,
+  useGetTimelineEventQuery,
+  useGetTimelineQuery,
+  useUpdateTimelineEventMutation,
+} from "metabase/api";
+import { useSetArchive } from "metabase/archive/hooks";
+import type { ModalComponentProps } from "metabase/common/components/ModalRoute";
+import { useNavigate } from "metabase/router";
+import EditEventForm from "metabase/timelines/common/components/EditEventForm";
+import {
+  TimelineModal,
+  TimelineModalLoadingState,
+} from "metabase/timelines/common/components/TimelineModal";
+import * as Urls from "metabase/urls";
 import type { Timeline, TimelineEvent } from "metabase-types/api";
-import type { State } from "metabase-types/store";
 
-import LoadingAndErrorWrapper from "../../components/LoadingAndErrorWrapper";
-import type { ModalParams } from "../../types";
+function EditEventModalContainer({ params, onClose }: ModalComponentProps) {
+  const navigate = useNavigate();
+  const archive = useSetArchive();
+  const timelineId = Urls.extractEntityId(params.timelineId);
+  const eventId = Urls.extractEntityId(params.timelineEventId);
+  const {
+    data: timeline,
+    isLoading: isTimelineLoading,
+    error: timelineError,
+  } = useGetTimelineQuery(
+    timelineId != null ? { id: timelineId, include: "events" } : skipToken,
+  );
+  const {
+    data: event,
+    isLoading: isEventLoading,
+    error: eventError,
+  } = useGetTimelineEventQuery(eventId ?? skipToken);
+  const [updateTimelineEvent] = useUpdateTimelineEventMutation();
 
-interface EditEventModalProps {
-  params: ModalParams;
+  const onSubmit = async (event: TimelineEvent, timeline?: Timeline) => {
+    await updateTimelineEvent(event).unwrap();
+    if (timeline) {
+      navigate(Urls.timelineInCollection(timeline));
+    }
+  };
+
+  const onArchive = async (event: TimelineEvent, timeline?: Timeline) => {
+    await archive({ id: event.id, model: "timeline-event" }, true);
+    if (timeline) {
+      navigate(Urls.timelineInCollection(timeline));
+    }
+  };
+
+  const isLoading = isTimelineLoading || isEventLoading;
+  const error = timelineError ?? eventError;
+
+  return (
+    <TimelineModal
+      title={t`Edit event`}
+      onClose={onClose}
+      animated={false}
+      density="relaxed"
+      tall={isLoading || !!error || !event}
+    >
+      {isLoading || error || !event ? (
+        <TimelineModalLoadingState loading={isLoading} error={error} />
+      ) : (
+        <EditEventForm
+          event={event}
+          timeline={timeline}
+          onSubmit={onSubmit}
+          onArchive={onArchive}
+          onCancel={onClose}
+        />
+      )}
+    </TimelineModal>
+  );
 }
 
-const timelineProps = {
-  id: (state: State, props: EditEventModalProps) =>
-    Urls.extractEntityId(props.params.timelineId),
-  query: { include: "events" },
-  LoadingAndErrorWrapper,
-};
-
-const timelineEventProps = {
-  id: (state: State, props: EditEventModalProps) =>
-    Urls.extractEntityId(props.params.timelineEventId),
-  entityAlias: "event",
-  LoadingAndErrorWrapper,
-};
-
-const mapDispatchToProps = (dispatch: any) => ({
-  onSubmit: async (event: TimelineEvent, timeline?: Timeline) => {
-    await dispatch(TimelineEvents.actions.update(event));
-    timeline && dispatch(push(Urls.timelineInCollection(timeline)));
-  },
-  onArchive: async (event: TimelineEvent, timeline?: Timeline) => {
-    await dispatch(TimelineEvents.actions.setArchived(event, true));
-    timeline && dispatch(push(Urls.timelineInCollection(timeline)));
-  },
-  onCancel: () => {
-    dispatch(goBack());
-  },
-});
-
 // eslint-disable-next-line import/no-default-export -- deprecated usage
-export default _.compose(
-  Timelines.load(timelineProps),
-  TimelineEvents.load(timelineEventProps),
-  connect(null, mapDispatchToProps),
-)(EditEventModal);
+export default EditEventModalContainer;

@@ -1,25 +1,31 @@
 import type { StoryContext, StoryFn } from "@storybook/react";
 import { userEvent, within } from "@storybook/test";
 import { HttpResponse, http } from "msw";
+import type { ComponentType } from "react";
 import _ from "underscore";
 
-import { getStore } from "__support__/entities-store";
+import { getPublicStore } from "__support__/entities-store";
+import {
+  createMockDashboardState,
+  createMockSettingsState,
+  createMockState,
+} from "__support__/state";
 import { createMockEntitiesState } from "__support__/store";
 import { createWaitForResizeToStopDecorator } from "__support__/storybook";
 import { getNextId } from "__support__/utils";
 import { NumberColumn, StringColumn } from "__support__/visualizations";
-import { Api } from "metabase/api";
 import { DASHBOARD_DISPLAY_ACTIONS } from "metabase/dashboard/components/DashboardHeader/DashboardHeaderButtonRow/constants";
-import { MetabaseReduxProvider } from "metabase/lib/redux/custom-context";
 import {
   MockDashboardContext,
   type MockDashboardContextProps,
-} from "metabase/public/containers/PublicOrEmbeddedDashboard/mock-context";
-import { publicReducers } from "metabase/reducers-public";
-import { registerVisualization } from "metabase/visualizations";
+} from "metabase/dashboard/context/mock-context";
+import { MetabaseReduxProvider } from "metabase/redux";
+import { stableStringify } from "metabase/utils/objects";
+import { checkNotNull } from "metabase/utils/types";
 import { BarChart } from "metabase/visualizations/visualizations/BarChart";
-import Table from "metabase/visualizations/visualizations/Table/Table";
+import { Table } from "metabase/visualizations/visualizations/Table/Table";
 import TABLE_RAW_SERIES from "metabase/visualizations/visualizations/Table/stories-data/orders-with-people.json";
+import { registerVisualization } from "metabase/viz-core";
 import type { Dashboard } from "metabase-types/api";
 import {
   createMockCard,
@@ -37,17 +43,10 @@ import {
   createProductsCreatedAtField,
   createProductsRatingField,
 } from "metabase-types/api/mocks/presets";
-import {
-  createMockDashboardState,
-  createMockSettingsState,
-  createMockState,
-} from "metabase-types/store/mocks";
 
 import { PublicOrEmbeddedDashboardView } from "./PublicOrEmbeddedDashboardView";
 
-// @ts-expect-error: incompatible prop types with registerVisualization
 registerVisualization(Table);
-// @ts-expect-error: incompatible prop types with registerVisualization
 registerVisualization(BarChart);
 
 /**
@@ -62,7 +61,6 @@ export default {
   decorators: [
     ReduxDecorator,
     createWaitForResizeToStopDecorator(TIME_UNTIL_ALL_ELEMENTS_STOP_RESIZING),
-    MockIsEmbeddingDecorator,
   ],
   parameters: {
     layout: "fullscreen",
@@ -82,8 +80,10 @@ export default {
   },
 };
 
-function ReduxDecorator(Story: StoryFn, context: StoryContext) {
+function ReduxDecorator(Story: ComponentType, context: StoryContext) {
+  // Unjustified type cast. FIXME
   const dashboard = context.args.dashboard as Dashboard;
+  // Unjustified type cast. FIXME
   const parameterType = context.args.parameterType as ParameterType;
   const initialState = createMockState({
     settings: createMockSettingsState({
@@ -121,16 +121,21 @@ function ReduxDecorator(Story: StoryFn, context: StoryContext) {
     }),
     parameters: {
       parameterValuesCache: {
-        [`{"paramId":"${CATEGORY_DROPDOWN_FILTER.id}","dashId":${DASHBOARD_ID}}`]:
-          {
-            values: [["Doohickey"], ["Gadget"], ["Gizmo"], ["Widget"]],
-            has_more_values: parameterType === "search" ? true : false,
-          },
-        [`{"paramId":"${CATEGORY_DROPDOWN_FILTER.id}","dashId":${DASHBOARD_ID},"query":"g"}`]:
-          {
-            values: [["Gadget"], ["Gizmo"], ["Widget"]],
-            has_more_values: parameterType === "search" ? true : false,
-          },
+        [stableStringify({
+          paramId: CATEGORY_DROPDOWN_FILTER.id,
+          dashId: DASHBOARD_ID,
+        })]: {
+          values: [["Doohickey"], ["Gadget"], ["Gizmo"], ["Widget"]],
+          has_more_values: parameterType === "search" ? true : false,
+        },
+        [stableStringify({
+          paramId: CATEGORY_DROPDOWN_FILTER.id,
+          dashId: DASHBOARD_ID,
+          query: "g",
+        })]: {
+          values: [["Gadget"], ["Gizmo"], ["Widget"]],
+          has_more_values: parameterType === "search" ? true : false,
+        },
       },
     },
     entities: createMockEntitiesState({
@@ -142,22 +147,12 @@ function ReduxDecorator(Story: StoryFn, context: StoryContext) {
     }),
   });
 
-  const store = getStore(publicReducers, initialState, [Api.middleware]);
+  const store = getPublicStore(initialState);
   return (
     <MetabaseReduxProvider store={store}>
       <Story />
     </MetabaseReduxProvider>
   );
-}
-
-declare global {
-  interface Window {
-    overrideIsWithinIframe?: boolean;
-  }
-}
-function MockIsEmbeddingDecorator(Story: StoryFn) {
-  window.overrideIsWithinIframe = true;
-  return <Story />;
 }
 
 const DASHBOARD_ID = getNextId();
@@ -271,7 +266,11 @@ function createDashboard({
       [CATEGORY_DROPDOWN_FILTER.id]: [createProductsCategoryField()],
       [DATE_FILTER_ID]: [createProductsCreatedAtField()],
       [UNIT_OF_TIME_FILTER_ID]: [createProductsCreatedAtField()],
-      [NUMBER_FILTER_ID]: [createProductsRatingField()],
+      // the story types a value into this filter, so its field must not offer
+      // a list to pick from
+      [NUMBER_FILTER_ID]: [
+        createProductsRatingField({ has_field_values: "none" }),
+      ],
     },
     dashcards: [
       createMockDashboardCard({
@@ -401,23 +400,19 @@ const createDefaultArgs = ({
 };
 
 function getLastPopover() {
-  const lastPopover = Array.from(
-    document.documentElement.querySelectorAll(
-      '[data-element-id="mantine-popover"]',
-    ),
-  ).at(-1) as HTMLElement;
-
-  return within(lastPopover);
+  return within(getLastPopoverElement());
 }
 
 function getLastPopoverElement() {
-  const lastPopover = Array.from(
-    document.documentElement.querySelectorAll(
-      '[data-element-id="mantine-popover"]',
-    ),
-  ).at(-1) as HTMLElement;
+  const popovers = document.documentElement.querySelectorAll<HTMLElement>(
+    '[data-element-id="mantine-popover"]',
+  );
+  // Mantine renders an input's options dropdown as a hidden popover when there are no options.
+  const lastPopover = Array.from(popovers)
+    .filter((popover) => popover.checkVisibility())
+    .at(-1);
 
-  return lastPopover;
+  return checkNotNull(lastPopover);
 }
 
 export const LightThemeText = {
@@ -481,6 +476,7 @@ export const LightThemeParameterSearchWithValue = {
     await userEvent.type(searchInput, "g");
 
     const dropdown = getLastPopover();
+    // Unjustified type cast. FIXME
     (dropdown.getByText("Gadget").parentNode as HTMLElement).setAttribute(
       "data-hovered",
       "true",
@@ -551,9 +547,9 @@ export const LightThemeParameterListWithValue = {
     const popover = getLastPopover();
     await userEvent.type(popover.getByPlaceholderText("Search the list"), "g");
     await userEvent.click(popover.getByText("Widget"));
-    const gizmo = popover.getByRole("checkbox", {
+    const gizmo = popover.getByRole<HTMLInputElement>("checkbox", {
       name: "Gizmo",
-    }) as HTMLInputElement;
+    });
     gizmo.disabled = true;
   },
 };
@@ -599,9 +595,7 @@ export const LightThemeParameterListSingleWithValue = {
     );
     await userEvent.click(documentElement.getByText("Widget"));
     const popover = getLastPopover();
-    (popover.getByText("Gadget").parentNode as HTMLElement).classList.add(
-      "pseudo-hover",
-    );
+    popover.getByTestId("Gadget-filter-value").classList.add("pseudo-hover");
   },
 };
 
@@ -887,6 +881,7 @@ export const LightThemeUnitOfTime = {
     await userEvent.click(filter);
 
     const popover = getLastPopover();
+    // Unjustified type cast. FIXME
     (popover.getByText("Hour").parentNode as HTMLElement).classList.add(
       "pseudo-hover",
     );
